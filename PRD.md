@@ -175,18 +175,22 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 #### F2.R2: GPS Enrichment — Timestamp Interpolation (MLP)
 
 **Use cases and implementation scenarios:**
-- After ingest, for each media row with `location = NULL`, the backend queries `gps_tracks` for the nearest point before and after `media.taken_at`.
+- The matcher runs in two situations: (a) automatically at the end of every ingest scan, and (b) automatically after a GPS track import (`POST /api/gps-tracks/import`). This ensures that media uploaded before GPS tracks existed gets retroactively enriched when tracks are added later.
+- For each media row with `location = NULL` (and `gps_source != 'manual'`), the backend queries `gps_tracks` for the nearest point before and after `media.taken_at`.
 - `geo.Interpolate(before, after, takenAt, maxWindow)` computes a linear interpolated lat/lng and a confidence score (0.0–1.0).
 - Confidence decays with time gap (relative to the nearest bracketing point in time) and with distance between bracketing points (up to 10 km).
 - The result is written back to `media.location`, `media.gps_confidence`, and `media.gps_source = 'interpolated'`.
 - If no track points exist within `maxWindow`, location remains NULL.
+- Media that already has a resolved location (`gps_source = 'exif'` or `'manual'`) is never re-evaluated by the matcher.
 
 **Acceptance criteria:**
 - A media file recorded at exactly the midpoint between two track points 100 meters apart gets confidence ≥ 0.99.
 - A file with the nearest track point 55 minutes away (maxWindow = 60 min) gets confidence ≤ 0.10.
 - A file with no track points within maxWindow has `location = NULL` and `gps_source = NULL`.
 - The matcher is triggered automatically at the end of every ingest scan.
+- The matcher is triggered automatically at the end of every GPS track import — previously un-located media is enriched without requiring a re-scan.
 - Manually set locations (`gps_source = 'manual'`) are never overwritten by the matcher.
+- EXIF-located media (`gps_source = 'exif'`) is never re-evaluated, even if track data exists for that timestamp.
 
 **Deployment/failure conditions:** If the `gps_tracks` table is empty, the matcher exits early with no errors.
 
@@ -202,13 +206,18 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 
 **Use cases and implementation scenarios:**
 - User opens the Map tab. All media with a resolved `location` is fetched from `GET /api/media` and rendered as markers on the Leaflet map.
-- Clicking a marker opens a popup with the filename, date, GPS source, and confidence percentage.
+- Clicking a marker opens a side panel (not an inline popup) showing a preview of the media file and its metadata. The side panel is persistent — clicking another marker replaces the current preview without closing the panel.
+- The side panel displays: media preview (photo thumbnail or video player), filename, date, GPS source, confidence percentage, and trip name if assigned.
+- A "Full screen" button in the side panel opens the media in a full-screen overlay. For `photo_360` and `video_360` types, the full-screen view uses the 360° renderer (Pannellum or Photo Sphere Viewer).
 - Media without a location is excluded from the map (but accessible from the Trips tab).
 
 **Acceptance criteria:**
 - Map loads with all located media within 3 seconds for a library of 1,000 items.
 - Markers are visible at all zoom levels.
-- Clicking a marker shows correct metadata.
+- Clicking a marker opens the side panel and shows the correct media preview and metadata.
+- The side panel is dismissible (close button or pressing Escape).
+- Full-screen mode works for photos, videos, and 360° content.
+- The full-screen overlay closes on Escape or a close button.
 - Low-confidence GPS locations (< 0.5) are visually distinguished (e.g., different marker colour or icon).
 
 **Deployment/failure conditions:** If the API returns an error, the map renders empty with a visible error banner. No crash.
@@ -226,14 +235,18 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 **Use cases and implementation scenarios:**
 - After ingest, `SELECT auto_detect_trips(24)` groups media with `taken_at` into trips separated by > 24-hour gaps.
 - Each trip is named `Trip YYYY-MM-DD` by default (date of first media item).
-- From the Trips tab, user clicks "Rename" next to a trip, types a new name, and presses Enter. The name is persisted via `PATCH /api/trips/{id}`.
+- From the Trips tab, user can edit three fields inline: name, start date, and end date. All three are persisted via `PATCH /api/trips/{id}` with body `{name?, start_date?, end_date?}`.
+- Editing the start or end date does not re-assign media files to other trips — it only adjusts the trip's date label. Media–trip assignment is recalculated only when auto-detection runs again.
+- The date range shown in the Trips tab reflects the manually-set dates if present, falling back to the auto-detected range from media timestamps.
 
 **Acceptance criteria:**
 - A library with media from 5 separate trips (each > 24h apart) produces exactly 5 trips after auto-detection.
 - Running auto-detection twice produces the same result (idempotent for trips named `Trip *`).
 - Trips with manually assigned names are not overwritten by re-running auto-detection.
 - Renamed trips survive a server restart.
+- Manually-set start and end dates survive a server restart and are not overwritten by re-running auto-detection.
 - The Trips tab shows trip name, date range, and media count.
+- Editing name, start date, or end date is possible from the same inline editing UI — no separate settings page required.
 
 **Deployment/failure conditions:** If auto-detection fails (DB error), the existing trips are preserved unchanged.
 
@@ -267,6 +280,32 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 **Security considerations:** The game endpoint does not reveal the actual location until after the guess is submitted. The `GET /api/game/round` response contains only the media URL and type — no coordinates.
 
 **Performance/scale:** No special requirements. Single-user game.
+
+---
+
+#### F6.R1: Trip GPS Track Visualisation (low priority, post-MLP)
+
+**Use cases and implementation scenarios:**
+- Some trips have continuous GPS data in `gps_tracks` that corresponds to the trip's time range.
+- When a trip is selected (from the Trips tab or the Map tab filtered to a trip), the user can optionally toggle on a GPS track overlay on the map.
+- The backend provides `GET /api/trips/{id}/track` which returns the ordered sequence of `gps_tracks` points for the trip's `[start_date, end_date]` time range as a GeoJSON LineString.
+- The frontend renders the track as a polyline on the Leaflet map, visually connecting the route taken during the trip.
+- The track overlay is optional — toggled by the user, defaulting to off — because not all trips have GPS data.
+
+**Acceptance criteria:**
+- Trips with no GPS data in the corresponding time range show no track (the toggle is hidden or disabled, with a tooltip explaining why).
+- Trips with GPS data render a polyline connecting all track points in chronological order.
+- The track overlay does not interfere with marker click behaviour.
+- The track is styled distinctly from markers (e.g., a coloured semi-transparent line).
+- Toggling the track off removes the polyline from the map without a page reload.
+
+**Deployment/failure conditions:** If the track query times out or returns too many points (> 50,000), the backend downsamples using a configurable stride or the Ramer-Douglas-Peucker algorithm before returning.
+
+**Configuration/telemetry/management:** Max track points per response configurable via env var (default 10,000). Downsampling strategy is configurable (stride or RDP).
+
+**Security considerations:** No new attack surface. Track data is internal, read from `gps_tracks` table with a time-range filter.
+
+**Performance/scale:** A full-day GPS track at 1-second resolution is ~86,400 points. Downsampling to ≤ 10,000 points keeps the Leaflet polyline responsive. The PostGIS `recorded_at` index makes the time-range query fast even against 10M-row tables.
 
 ---
 
@@ -312,10 +351,12 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 
 1. User opens the Map tab
 2. Markers appear at recording locations; user zooms to a country visited on a past trip
-3. User clicks a marker; popup shows filename, date, GPS source, and confidence
-4. User navigates between nearby markers to revisit the day's route
+3. User clicks a marker; the side panel opens on the right with a media preview and metadata
+4. User clicks "Full screen" to view the photo or video at full size (or in 360° mode for panoramas)
+5. User closes full screen, clicks a nearby marker to move through the day's route
+6. (Optional, if GPS data exists for the trip) User toggles on the GPS track overlay to see the exact route taken as a polyline connecting all track points
 
-*Success state:* User can follow their route through a destination by clicking markers in sequence.
+*Success state:* User can follow their route through a destination by clicking markers in sequence, previewing media in the side panel, and optionally tracing the exact route via the GPS track overlay.
 
 ---
 
@@ -333,16 +374,16 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 
 ---
 
-**UC5: Rename auto-detected trips**
+**UC5: Edit auto-detected trips**
 
 *Precondition:* `auto_detect_trips(24)` has run after a bulk ingest.
 
 1. User opens the Trips tab; sees trips named `Trip 2023-07-15`, `Trip 2024-02-03`, etc.
-2. User recognises the dates, clicks "Rename" on a trip
-3. Types "Iceland 2023" and presses Enter
-4. Trip name updates immediately and persists
+2. User recognises a trip, clicks to edit it inline
+3. Types a new name ("Iceland 2023"), adjusts the start date to one day earlier (to include travel day photos), and confirms
+4. Name and dates update immediately and persist
 
-*Success state:* All trips have meaningful names within 10 minutes of reviewing the list.
+*Success state:* All trips have meaningful names and correct date ranges within 10 minutes of reviewing the list.
 
 ---
 
