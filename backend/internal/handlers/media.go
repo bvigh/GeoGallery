@@ -23,16 +23,16 @@ func NewMediaHandler(db *pgxpool.Pool, s *storage.Client) *MediaHandler {
 }
 
 type mediaItem struct {
-	ID          string   `json:"id"`
-	Filename    string   `json:"filename"`
-	MediaType   string   `json:"media_type"`
-	Lat         *float64 `json:"lat"`
-	Lng         *float64 `json:"lng"`
-	Confidence  *float64 `json:"gps_confidence"`
-	GpsSource   *string  `json:"gps_source"`
-	TakenAt     *string  `json:"taken_at"`
-	StorageKey  string   `json:"storage_key"`
-	TripID      *string  `json:"trip_id"`
+	ID         string     `json:"id"`
+	Filename   string     `json:"filename"`
+	MediaType  string     `json:"media_type"`
+	Lat        *float64   `json:"lat"`
+	Lng        *float64   `json:"lng"`
+	Confidence *float64   `json:"gps_confidence"`
+	GpsSource  *string    `json:"gps_source"`
+	TakenAt    *time.Time `json:"taken_at"`
+	StorageKey string     `json:"storage_key"`
+	TripID     *string    `json:"trip_id"`
 }
 
 func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {

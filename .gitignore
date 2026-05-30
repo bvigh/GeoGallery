@@ -30,3 +30,9 @@ go.work.sum
 # .idea/
 .vscode/
 
+# JS
+frontend/node_modules
+
+.DS_Store
+
+ingest/*

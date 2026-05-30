@@ -17,7 +17,7 @@ interface Props {
 }
 
 export function MediaMap({ items, onSelect }: Props) {
-  const withLocation = items.filter((m) => m.lat !== null && m.lng !== null);
+  const withLocation = (items ?? []).filter((m) => m.lat !== null && m.lng !== null);
 
   return (
     <MapContainer
