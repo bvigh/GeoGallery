@@ -1,0 +1,75 @@
+import { useEffect, useState } from "react";
+import type { Trip } from "../types";
+import { api } from "../api/client";
+
+export function TripsPage() {
+  const [trips, setTrips] = useState<Trip[]>([]);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+
+  useEffect(() => {
+    api.get<Trip[]>("/trips").then((data) => setTrips(data ?? [])).catch(console.error);
+  }, []);
+
+  const saveRename = async (id: string) => {
+    await api.patch(`/trips/${id}`, { name: editName });
+    setTrips((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, name: editName } : t))
+    );
+    setEditing(null);
+  };
+
+  return (
+    <div className="p-6">
+      <h1 className="mb-4 text-xl font-semibold">Trips</h1>
+      {trips.length === 0 && (
+        <p className="text-muted-foreground">No trips yet. Upload some media to get started.</p>
+      )}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {trips.map((trip) => (
+          <div
+            key={trip.id}
+            className="rounded-lg border bg-card p-4 shadow-sm"
+          >
+            {editing === trip.id ? (
+              <div className="flex gap-2">
+                <input
+                  className="flex-1 rounded border px-2 py-1 text-sm"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && saveRename(trip.id)}
+                  autoFocus
+                />
+                <button
+                  className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground"
+                  onClick={() => saveRename(trip.id)}
+                >
+                  Save
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between">
+                <h2 className="font-medium">{trip.name}</h2>
+                <button
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => {
+                    setEditing(trip.id);
+                    setEditName(trip.name);
+                  }}
+                >
+                  Rename
+                </button>
+              </div>
+            )}
+            <p className="mt-1 text-sm text-muted-foreground">
+              {trip.start_date} – {trip.end_date ?? "ongoing"}
+            </p>
+            <p className="text-sm text-muted-foreground">
+              {trip.media_count} item{trip.media_count !== 1 ? "s" : ""}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
