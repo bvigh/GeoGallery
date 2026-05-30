@@ -26,12 +26,16 @@ go.work.sum
 # env file
 .env
 
+# debug files
+__debug*
+
 # Editor/IDE
 # .idea/
 .vscode/
 
 # JS
 frontend/node_modules
+frontend/.vite
 
 .DS_Store
 
