@@ -16,6 +16,7 @@ export function UploadPage() {
     const form = new FormData();
     for (const file of Array.from(files)) {
       form.append("files", file);
+      form.append("file_mtime", String(file.lastModified)); // ms since epoch
     }
 
     try {

@@ -78,7 +78,7 @@ func (h *IngestHandler) Scan(w http.ResponseWriter, r *http.Request) {
 			        $5, $6, $7)
 			ON CONFLICT (storage_key) DO NOTHING
 		`,
-			d.Name(), detectMediaType(ext),
+			d.Name(), ingest.DetectMediaType(exifData, d.Name(), ext),
 			exifData.Lat, exifData.Lng,
 			gpsSource(exifData),
 			takenAt, key,

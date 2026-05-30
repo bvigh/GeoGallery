@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,16 +81,18 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mtimes := r.MultipartForm.Value["file_mtime"]
+
 	var uploaded []string
-	for _, fh := range files {
+	for i, fh := range files {
 		f, err := fh.Open()
 		if err != nil {
 			continue
 		}
 
 		ext := strings.ToLower(filepath.Ext(fh.Filename))
-		mediaType := detectMediaType(ext)
 		exifData := ingest.ExtractExif(f)
+		mediaType := ingest.DetectMediaType(exifData, fh.Filename, ext)
 		f.Seek(0, 0)
 
 		key := fmt.Sprintf("media/%d/%s", time.Now().UnixNano(), fh.Filename)
@@ -102,10 +105,11 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		var takenAt *time.Time
 		if exifData.TakenAt != nil {
 			takenAt = exifData.TakenAt
-		} else {
-			// fall back to file modification time via form field if provided
-			t := time.Now()
-			takenAt = &t
+		} else if i < len(mtimes) {
+			if ms, err := strconv.ParseInt(mtimes[i], 10, 64); err == nil {
+				t := time.UnixMilli(ms)
+				takenAt = &t
+			}
 		}
 
 		_, err = h.db.Exec(r.Context(), `
@@ -127,17 +131,6 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"uploaded": uploaded})
-}
-
-func detectMediaType(ext string) string {
-	switch ext {
-	case ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp":
-		return "photo"
-	case ".mp4", ".mov", ".avi", ".mkv":
-		return "video"
-	default:
-		return "photo"
-	}
 }
 
 func contentTypeFor(ext string) string {
