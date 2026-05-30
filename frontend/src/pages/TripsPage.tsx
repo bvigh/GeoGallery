@@ -8,7 +8,7 @@ export function TripsPage() {
   const [editName, setEditName] = useState("");
 
   useEffect(() => {
-    api.get<Trip[]>("/trips").then(setTrips).catch(console.error);
+    api.get<Trip[]>("/trips").then((data) => setTrips(data ?? [])).catch(console.error);
   }, []);
 
   const saveRename = async (id: string) => {
