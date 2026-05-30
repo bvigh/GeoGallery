@@ -174,9 +174,14 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 
 #### F2.R2: GPS Enrichment — Timestamp Interpolation (MLP)
 
+**GPS source priority (highest to lowest):**
+1. `manual` — human override; never overwritten by the matcher.
+2. `exif` — coordinates embedded in the file by the recording device; treated as ground truth and never overwritten.
+3. `interpolated` — estimated from bracketing `gps_tracks` points by timestamp; used only when EXIF GPS is absent.
+
 **Use cases and implementation scenarios:**
 - The matcher runs in two situations: (a) automatically at the end of every ingest scan, and (b) automatically after a GPS track import (`POST /api/gps-tracks/import`). This ensures that media uploaded before GPS tracks existed gets retroactively enriched when tracks are added later.
-- For each media row with `location = NULL` (and `gps_source != 'manual'`), the backend queries `gps_tracks` for the nearest point before and after `media.taken_at`.
+- For each media row with `location = NULL` (and `gps_source` is NULL), the backend queries `gps_tracks` for the nearest point before and after `media.taken_at`.
 - `geo.Interpolate(before, after, takenAt, maxWindow)` computes a linear interpolated lat/lng and a confidence score (0.0–1.0).
 - Confidence decays with time gap (relative to the nearest bracketing point in time) and with distance between bracketing points (up to 10 km).
 - The result is written back to `media.location`, `media.gps_confidence`, and `media.gps_source = 'interpolated'`.

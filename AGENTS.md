@@ -60,7 +60,7 @@ Backend auto-runs migrations on startup. No manual schema setup needed.
 
 | Table | Purpose |
 |---|---|
-| `media` | One row per media file. Holds resolved `location`, raw `exif_location`, `gps_confidence`, `gps_source`, `taken_at`, `storage_key`. |
+| `media` | One row per media file. Holds resolved `location`, `gps_confidence`, `gps_source`, `taken_at`, `storage_key`. |
 | `trips` | Auto-detected or manually created trip groupings. |
 | `gps_tracks` | Raw GPS track points from external sources (Google Timeline, Strava, etc.). Indexed on `recorded_at` and location. |
 

@@ -31,7 +31,6 @@ CREATE TABLE media (
     storage_key   TEXT NOT NULL UNIQUE,   -- S3/MinIO object key
     taken_at      TIMESTAMPTZ,
     location      GEOGRAPHY(POINT, 4326), -- resolved GPS location
-    exif_location GEOGRAPHY(POINT, 4326), -- GPS from EXIF (may differ)
     gps_confidence FLOAT CHECK (gps_confidence BETWEEN 0 AND 1),
     gps_source    TEXT CHECK (gps_source IN ('exif', 'interpolated', 'manual', 'none')),
     camera_model  TEXT,
