@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/bvigh/geogallery/internal/config"
 	"github.com/bvigh/geogallery/internal/db"
@@ -46,6 +47,7 @@ func main() {
 	tripH := handlers.NewTripHandler(pool)
 	gameH := handlers.NewGameHandler(pool, s3Client)
 	ingestH := handlers.NewIngestHandler(pool, s3Client, cfg.IngestWatchDir)
+	gpsTrackH := handlers.NewGPSTrackHandler(pool, time.Duration(cfg.GPSMatchWindowHours)*time.Hour)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -68,6 +70,8 @@ func main() {
 		r.Post("/game/guess", gameH.SubmitGuess)
 
 		r.Post("/ingest/scan", ingestH.Scan)
+
+		r.Post("/gps-tracks/import", gpsTrackH.Import)
 
 		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(`{"status":"ok"}`))
