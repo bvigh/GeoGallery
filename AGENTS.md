@@ -122,7 +122,8 @@ GPS resolution priority: EXIF → timestamp-interpolated from `gps_tracks` → n
 
 ## Unimplemented Work (in priority order)
 
-1. **GPS matcher background job** — query `gps_tracks` for bracketing points around `media.taken_at`, call `geo.Interpolate(before, after, takenAt, maxWindow)`, write result to `media.location/gps_confidence/gps_source`. Wire as `POST /api/ingest/match-gps` or auto-run at end of scan.
+1. **Test suite** — no tests exist yet. Adding coverage is a prerequisite for all subsequent work (see Testing section).
+2. **GPS matcher background job** — query `gps_tracks` for bracketing points around `media.taken_at`, call `geo.Interpolate(before, after, takenAt, maxWindow)`, write result to `media.location/gps_confidence/gps_source`. Wire as `POST /api/ingest/match-gps` or auto-run at end of scan.
 2. **GPS track import endpoint** — `POST /api/gps-tracks/import` accepting JSON/CSV from Google Timeline / Strava exports. Inserts into `gps_tracks`.
 3. **Trip auto-detection trigger** — call `SELECT auto_detect_trips(24)` after bulk ingest. SQL function exists in migration `000002`.
 4. **360° media rendering** — detect `photo_360`/`video_360` in frontend; render with Pannellum or Photo Sphere Viewer instead of `<img>`.
@@ -133,9 +134,22 @@ GPS resolution priority: EXIF → timestamp-interpolated from `gps_tracks` → n
 
 ## Testing
 
-No test suite yet. When adding:
-- Backend: `testing` package + real test DB (preferred over mocks — mock/prod divergence has caused issues).
-- Frontend: Vitest + React Testing Library.
+**Tests are required for all new and modified code.** The project currently has no test suite — building it out is the top priority item in Unimplemented Work.
+
+**Backend — unit tests**
+- Use the `testing` package + [testify](https://github.com/stretchr/testify) (`assert`/`require`). Test files live alongside source (`exif_test.go` next to `exif.go`).
+- Pure logic (EXIF parsing, GPS interpolation, media type detection, scoring) must have unit tests with no external deps.
+- Use table-driven tests (`[]struct{ input ...; want ... }`).
+
+**Backend — integration/handler tests**
+- Use a real test DB (PostGIS), not mocks. Mock/prod divergence has caused issues here before.
+- Spin up via `docker compose up db` or a `TestMain` that starts a throwaway container.
+- Test handler behaviour through `net/http/httptest`.
+
+**Frontend**
+- Vitest + React Testing Library.
+- Test components that contain logic (score display, map marker rendering, upload flow).
+- Pure utility functions in `src/lib/` get unit tests.
 
 ## Key Design Decisions
 
