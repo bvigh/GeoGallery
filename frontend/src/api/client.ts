@@ -26,4 +26,9 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
   return res.json();
 }
 
-export const api = { get, post, patch };
+async function getMediaUrl(id: string): Promise<string> {
+  const data = await get<{ url: string }>(`/media/${id}/url`);
+  return data.url;
+}
+
+export const api = { get, post, patch, getMediaUrl };

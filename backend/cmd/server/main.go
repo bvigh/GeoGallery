@@ -59,6 +59,7 @@ func main() {
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/media", mediaH.List)
 		r.Post("/media/upload", mediaH.Upload)
+		r.Get("/media/{id}/url", mediaH.GetURL)
 
 		r.Get("/trips", tripH.List)
 		r.Patch("/trips/{id}", tripH.Rename)

@@ -36,6 +36,8 @@ __debug*
 # JS
 frontend/node_modules
 frontend/.vite
+frontend/dist
+tsconfig.tsbuildinfo
 
 .DS_Store
 
