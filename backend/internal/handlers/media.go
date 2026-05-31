@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,14 +10,30 @@ import (
 	"strings"
 	"time"
 
+	"io"
+
 	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/bvigh/geogallery/internal/storage"
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type mediaDB interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+type mediaStorage interface {
+	Upload(ctx context.Context, key string, body io.Reader, contentType string) error
+	PresignGet(ctx context.Context, key string) (string, error)
+}
+
 type MediaHandler struct {
-	db      *pgxpool.Pool
-	storage *storage.Client
+	db      mediaDB
+	storage mediaStorage
 }
 
 func NewMediaHandler(db *pgxpool.Pool, s *storage.Client) *MediaHandler {
@@ -156,4 +173,26 @@ func gpsSource(e ingest.ExifData) *string {
 		return &s
 	}
 	return nil
+}
+
+func (h *MediaHandler) GetURL(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var storageKey string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT storage_key FROM media WHERE id=$1`, id,
+	).Scan(&storageKey)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	url, err := h.storage.PresignGet(r.Context(), storageKey)
+	if err != nil {
+		http.Error(w, "presign error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"url": url})
 }
