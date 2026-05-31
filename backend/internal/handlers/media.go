@@ -32,12 +32,21 @@ type mediaStorage interface {
 }
 
 type MediaHandler struct {
-	db      mediaDB
-	storage mediaStorage
+	db          mediaDB
+	storage     mediaStorage
+	matcherPool matcherDB
+	matchWindow time.Duration
+	runMatcher  func(ctx context.Context, db matcherDB, maxWindow time.Duration, reprocess bool) error
 }
 
-func NewMediaHandler(db *pgxpool.Pool, s *storage.Client) *MediaHandler {
-	return &MediaHandler{db: db, storage: s}
+func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Duration) *MediaHandler {
+	return &MediaHandler{
+		db:          db,
+		storage:     s,
+		matcherPool: db,
+		matchWindow: matchWindow,
+		runMatcher:  RunGPSMatcher,
+	}
 }
 
 type mediaItem struct {
@@ -142,7 +151,17 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			takenAt, key,
 		)
 		if err == nil {
+			if exifData.Lat != nil && takenAt != nil {
+				insertExifGPSTrack(r.Context(), h.db, *exifData.Lat, *exifData.Lng, *takenAt)
+			}
 			uploaded = append(uploaded, fh.Filename)
+		}
+	}
+
+	if len(uploaded) > 0 {
+		if err := h.runMatcher(r.Context(), h.matcherPool, h.matchWindow, true); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
 		}
 	}
 
