@@ -9,8 +9,8 @@ CREATE TABLE gps_tracks (
     location    GEOGRAPHY(POINT, 4326) NOT NULL,
     altitude_m  FLOAT,
     accuracy_m  FLOAT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    activity    TEXT,                     -- 'WALKING', 'IN_VEHICLE', etc.
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    activity    TEXT                      -- 'WALKING', 'IN_VEHICLE', etc.
 );
 CREATE INDEX gps_tracks_recorded_at_idx ON gps_tracks (recorded_at);
 CREATE INDEX gps_tracks_location_idx ON gps_tracks USING GIST (location);
