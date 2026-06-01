@@ -1,0 +1,1 @@
+ALTER TABLE media ADD COLUMN file_hash TEXT UNIQUE;
