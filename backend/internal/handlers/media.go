@@ -1,16 +1,18 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-
-	"io"
 
 	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/bvigh/geogallery/internal/storage"
@@ -116,17 +118,23 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		ext := strings.ToLower(filepath.Ext(fh.Filename))
-		exifData := ingest.ExtractExif(f)
-		mediaType := ingest.DetectMediaType(exifData, fh.Filename, ext)
-		f.Seek(0, 0)
-
-		key := fmt.Sprintf("media/%d/%s", time.Now().UnixNano(), fh.Filename)
-		if err := h.storage.Upload(r.Context(), key, f, contentTypeFor(ext)); err != nil {
-			f.Close()
+		data, err := io.ReadAll(f)
+		f.Close()
+		if err != nil {
 			continue
 		}
-		f.Close()
+
+		h256 := sha256.Sum256(data)
+		fileHash := hex.EncodeToString(h256[:])
+
+		ext := strings.ToLower(filepath.Ext(fh.Filename))
+		exifData := ingest.ExtractExif(bytes.NewReader(data))
+		mediaType := ingest.DetectMediaType(exifData, fh.Filename, ext)
+
+		key := fmt.Sprintf("media/%d/%s", time.Now().UnixNano(), fh.Filename)
+		if err := h.storage.Upload(r.Context(), key, bytes.NewReader(data), contentTypeFor(ext)); err != nil {
+			continue
+		}
 
 		var takenAt *time.Time
 		if exifData.TakenAt != nil {
@@ -138,19 +146,20 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		_, err = h.db.Exec(r.Context(), `
-			INSERT INTO media (filename, media_type, location, gps_confidence, gps_source, taken_at, storage_key)
+		tag, err := h.db.Exec(r.Context(), `
+			INSERT INTO media (filename, media_type, location, gps_confidence, gps_source, taken_at, storage_key, file_hash)
 			VALUES ($1, $2,
 			        CASE WHEN $3::float8 IS NOT NULL THEN ST_SetSRID(ST_MakePoint($4, $3), 4326) END,
-			        $5, $6, $7, $8)
+			        $5, $6, $7, $8, $9)
+			ON CONFLICT (file_hash) DO NOTHING
 		`,
 			fh.Filename, mediaType,
 			exifData.Lat, exifData.Lng,
 			nil, // confidence populated by background GPS matcher
 			gpsSource(exifData),
-			takenAt, key,
+			takenAt, key, fileHash,
 		)
-		if err == nil {
+		if err == nil && tag.RowsAffected() == 1 {
 			if exifData.Lat != nil && takenAt != nil {
 				insertExifGPSTrack(r.Context(), h.db, *exifData.Lat, *exifData.Lng, *takenAt)
 			}
