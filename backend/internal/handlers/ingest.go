@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,17 +12,34 @@ import (
 
 	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/bvigh/geogallery/internal/storage"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type IngestHandler struct {
-	db         *pgxpool.Pool
-	storage    *storage.Client
-	watchDir   string
+type ingestDB interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-func NewIngestHandler(db *pgxpool.Pool, s *storage.Client, watchDir string) *IngestHandler {
-	return &IngestHandler{db: db, storage: s, watchDir: watchDir}
+type IngestHandler struct {
+	db          ingestDB
+	storage     *storage.Client
+	watchDir    string
+	matcherPool matcherDB
+	matchWindow time.Duration
+	runMatcher  func(ctx context.Context, db matcherDB, maxWindow time.Duration, reprocess bool) error
+}
+
+func NewIngestHandler(db *pgxpool.Pool, s *storage.Client, watchDir string, matchWindow time.Duration) *IngestHandler {
+	return &IngestHandler{
+		db:          db,
+		storage:     s,
+		watchDir:    watchDir,
+		matcherPool: db,
+		matchWindow: matchWindow,
+		runMatcher:  RunGPSMatcher,
+	}
 }
 
 var supportedExts = map[string]bool{
@@ -83,11 +101,19 @@ func (h *IngestHandler) Scan(w http.ResponseWriter, r *http.Request) {
 			gpsSource(exifData),
 			takenAt, key,
 		)
+		if exifData.Lat != nil && takenAt != nil {
+			insertExifGPSTrack(r.Context(), h.db, *exifData.Lat, *exifData.Lng, *takenAt)
+		}
 		ingested++
 		return nil
 	})
 	if err != nil {
 		http.Error(w, "scan error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := h.runMatcher(r.Context(), h.matcherPool, h.matchWindow, true); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
 

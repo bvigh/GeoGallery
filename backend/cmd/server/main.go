@@ -43,11 +43,13 @@ func main() {
 		log.Fatalf("s3 client: %v", err)
 	}
 
-	mediaH := handlers.NewMediaHandler(pool, s3Client)
+	matchWindow := time.Duration(cfg.GPSMatchWindowHours) * time.Hour
+	mediaH := handlers.NewMediaHandler(pool, s3Client, matchWindow)
 	tripH := handlers.NewTripHandler(pool)
 	gameH := handlers.NewGameHandler(pool, s3Client)
-	ingestH := handlers.NewIngestHandler(pool, s3Client, cfg.IngestWatchDir)
-	gpsTrackH := handlers.NewGPSTrackHandler(pool, time.Duration(cfg.GPSMatchWindowHours)*time.Hour)
+	ingestH := handlers.NewIngestHandler(pool, s3Client, cfg.IngestWatchDir, matchWindow)
+	gpsTrackH := handlers.NewGPSTrackHandler(pool, matchWindow)
+	gpsMatcherH := handlers.NewGPSMatcherHandler(pool, matchWindow)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -72,6 +74,7 @@ func main() {
 		r.Post("/ingest/scan", ingestH.Scan)
 
 		r.Post("/gps-tracks/import", gpsTrackH.Import)
+		r.Post("/gps-matcher/run", gpsMatcherH.Run)
 
 		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(`{"status":"ok"}`))

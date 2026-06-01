@@ -88,10 +88,10 @@ func bracketingPoints(ctx context.Context, db matcherDB, at time.Time, maxWindow
 	row := db.QueryRow(ctx, `
 		SELECT ST_Y(location::geometry), ST_X(location::geometry), recorded_at
 		FROM gps_tracks
-		WHERE recorded_at <= $1 AND recorded_at >= $1 - $2
+		WHERE recorded_at <= $1 AND recorded_at >= $2
 		ORDER BY recorded_at DESC
 		LIMIT 1
-	`, at, maxWindow)
+	`, at, at.Add(-maxWindow))
 	var lat, lng float64
 	var recordedAt time.Time
 	if err := row.Scan(&lat, &lng, &recordedAt); err == nil {
@@ -103,10 +103,10 @@ func bracketingPoints(ctx context.Context, db matcherDB, at time.Time, maxWindow
 	row = db.QueryRow(ctx, `
 		SELECT ST_Y(location::geometry), ST_X(location::geometry), recorded_at
 		FROM gps_tracks
-		WHERE recorded_at >= $1 AND recorded_at <= $1 + $2
+		WHERE recorded_at >= $1 AND recorded_at <= $2
 		ORDER BY recorded_at ASC
 		LIMIT 1
-	`, at, maxWindow)
+	`, at, at.Add(maxWindow))
 	if err := row.Scan(&lat, &lng, &recordedAt); err == nil {
 		after = &geo.Point{Lat: lat, Lng: lng, At: recordedAt}
 	} else if err != pgx.ErrNoRows {
