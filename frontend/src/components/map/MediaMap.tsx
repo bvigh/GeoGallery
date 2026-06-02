@@ -3,13 +3,15 @@ import type { MediaItem } from "../../types";
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 
-// Fix default marker icons in Vite/webpack builds
-delete (L.Icon.Default.prototype as unknown as Record<string, unknown>)._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-});
+function markerIcon(confidence: number | null) {
+  const color = confidence !== null && confidence < 0.5 ? "#f97316" : "#3b82f6";
+  return L.divIcon({
+    html: `<div style="width:12px;height:12px;border-radius:50%;background:${color};border:2px solid white;box-shadow:0 1px 3px rgba(0,0,0,.4)"></div>`,
+    className: "",
+    iconSize: [12, 12],
+    iconAnchor: [6, 6],
+  });
+}
 
 interface Props {
   items: MediaItem[];
@@ -33,6 +35,7 @@ export function MediaMap({ items, onSelect }: Props) {
         <Marker
           key={item.id}
           position={[item.lat!, item.lng!]}
+          icon={markerIcon(item.gps_confidence)}
           eventHandlers={{ click: () => onSelect?.(item) }}
         >
           <Popup>
