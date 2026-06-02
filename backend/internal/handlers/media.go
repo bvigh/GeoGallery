@@ -34,20 +34,24 @@ type mediaStorage interface {
 }
 
 type MediaHandler struct {
-	db          mediaDB
-	storage     mediaStorage
-	matcherPool matcherDB
-	matchWindow time.Duration
-	runMatcher  func(ctx context.Context, db matcherDB, maxWindow time.Duration, reprocess bool) error
+	db            mediaDB
+	storage       mediaStorage
+	matcherPool   matcherDB
+	matchWindow   time.Duration
+	runMatcher    func(ctx context.Context, db matcherDB, maxWindow time.Duration, reprocess bool) error
+	tripGapHours  int
+	runTripDetect func(ctx context.Context, db tripDetectDB, gapHours int) error
 }
 
-func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Duration) *MediaHandler {
+func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Duration, tripGapHours int) *MediaHandler {
 	return &MediaHandler{
-		db:          db,
-		storage:     s,
-		matcherPool: db,
-		matchWindow: matchWindow,
-		runMatcher:  RunGPSMatcher,
+		db:            db,
+		storage:       s,
+		matcherPool:   db,
+		matchWindow:   matchWindow,
+		runMatcher:    RunGPSMatcher,
+		tripGapHours:  tripGapHours,
+		runTripDetect: RunTripDetect,
 	}
 }
 
@@ -169,6 +173,10 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	if len(uploaded) > 0 {
 		if err := h.runMatcher(r.Context(), h.matcherPool, h.matchWindow, true); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		if err := h.runTripDetect(r.Context(), h.matcherPool, h.tripGapHours); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}

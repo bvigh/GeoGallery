@@ -44,10 +44,10 @@ func main() {
 	}
 
 	matchWindow := time.Duration(cfg.GPSMatchWindowHours) * time.Hour
-	mediaH := handlers.NewMediaHandler(pool, s3Client, matchWindow)
+	mediaH := handlers.NewMediaHandler(pool, s3Client, matchWindow, cfg.TripGapHours)
 	tripH := handlers.NewTripHandler(pool)
 	gameH := handlers.NewGameHandler(pool, s3Client)
-	ingestH := handlers.NewIngestHandler(pool, s3Client, cfg.IngestWatchDir, matchWindow)
+	ingestH := handlers.NewIngestHandler(pool, s3Client, cfg.IngestWatchDir, matchWindow, cfg.TripGapHours)
 	gpsTrackH := handlers.NewGPSTrackHandler(pool, matchWindow)
 	gpsMatcherH := handlers.NewGPSMatcherHandler(pool, matchWindow)
 

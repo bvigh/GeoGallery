@@ -23,22 +23,26 @@ type ingestDB interface {
 }
 
 type IngestHandler struct {
-	db          ingestDB
-	storage     *storage.Client
-	watchDir    string
-	matcherPool matcherDB
-	matchWindow time.Duration
-	runMatcher  func(ctx context.Context, db matcherDB, maxWindow time.Duration, reprocess bool) error
+	db            ingestDB
+	storage       *storage.Client
+	watchDir      string
+	matcherPool   matcherDB
+	matchWindow   time.Duration
+	runMatcher    func(ctx context.Context, db matcherDB, maxWindow time.Duration, reprocess bool) error
+	tripGapHours  int
+	runTripDetect func(ctx context.Context, db tripDetectDB, gapHours int) error
 }
 
-func NewIngestHandler(db *pgxpool.Pool, s *storage.Client, watchDir string, matchWindow time.Duration) *IngestHandler {
+func NewIngestHandler(db *pgxpool.Pool, s *storage.Client, watchDir string, matchWindow time.Duration, tripGapHours int) *IngestHandler {
 	return &IngestHandler{
-		db:          db,
-		storage:     s,
-		watchDir:    watchDir,
-		matcherPool: db,
-		matchWindow: matchWindow,
-		runMatcher:  RunGPSMatcher,
+		db:            db,
+		storage:       s,
+		watchDir:      watchDir,
+		matcherPool:   db,
+		matchWindow:   matchWindow,
+		runMatcher:    RunGPSMatcher,
+		tripGapHours:  tripGapHours,
+		runTripDetect: RunTripDetect,
 	}
 }
 
@@ -113,6 +117,11 @@ func (h *IngestHandler) Scan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.runMatcher(r.Context(), h.matcherPool, h.matchWindow, true); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	if err := h.runTripDetect(r.Context(), h.db, h.tripGapHours); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
