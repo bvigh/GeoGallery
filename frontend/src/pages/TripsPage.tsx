@@ -6,15 +6,30 @@ export function TripsPage() {
   const [trips, setTrips] = useState<Trip[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  const [editStartDate, setEditStartDate] = useState("");
+  const [editEndDate, setEditEndDate] = useState("");
 
   useEffect(() => {
     api.get<Trip[]>("/trips").then((data) => setTrips(data ?? [])).catch(console.error);
   }, []);
 
-  const saveRename = async (id: string) => {
-    await api.patch(`/trips/${id}`, { name: editName });
+  const saveUpdate = async (id: string) => {
+    await api.patch(`/trips/${id}`, {
+      name: editName || undefined,
+      start_date: editStartDate || null,
+      end_date: editEndDate || null,
+    });
     setTrips((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, name: editName } : t))
+      prev.map((t) =>
+        t.id === id
+          ? {
+              ...t,
+              name: editName || t.name,
+              start_date: editStartDate || null,
+              end_date: editEndDate || null,
+            }
+          : t
+      )
     );
     setEditing(null);
   };
@@ -32,20 +47,36 @@ export function TripsPage() {
             className="rounded-lg border bg-card p-4 shadow-sm"
           >
             {editing === trip.id ? (
-              <div className="flex gap-2">
-                <input
-                  className="flex-1 rounded border px-2 py-1 text-sm"
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && saveRename(trip.id)}
-                  autoFocus
-                />
-                <button
-                  className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground"
-                  onClick={() => saveRename(trip.id)}
-                >
-                  Save
-                </button>
+              <div className="flex flex-col gap-2">
+                <div className="flex gap-2">
+                  <input
+                    className="flex-1 rounded border px-2 py-1 text-sm"
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && saveUpdate(trip.id)}
+                    autoFocus
+                  />
+                  <button
+                    className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground"
+                    onClick={() => saveUpdate(trip.id)}
+                  >
+                    Save
+                  </button>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="date"
+                    className="flex-1 rounded border px-2 py-1 text-sm"
+                    value={editStartDate}
+                    onChange={(e) => setEditStartDate(e.target.value)}
+                  />
+                  <input
+                    type="date"
+                    className="flex-1 rounded border px-2 py-1 text-sm"
+                    value={editEndDate}
+                    onChange={(e) => setEditEndDate(e.target.value)}
+                  />
+                </div>
               </div>
             ) : (
               <div className="flex items-center justify-between">
@@ -55,9 +86,11 @@ export function TripsPage() {
                   onClick={() => {
                     setEditing(trip.id);
                     setEditName(trip.name);
+                    setEditStartDate(trip.start_date ?? "");
+                    setEditEndDate(trip.end_date ?? "");
                   }}
                 >
-                  Rename
+                  Edit
                 </button>
               </div>
             )}
