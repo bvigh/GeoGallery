@@ -66,7 +66,7 @@ func main() {
 		r.Get("/media/{id}/url", mediaH.GetURL)
 
 		r.Get("/trips", tripH.List)
-		r.Patch("/trips/{id}", tripH.Rename)
+		r.Patch("/trips/{id}", tripH.Update)
 
 		r.Get("/game/round", gameH.NewRound)
 		r.Post("/game/guess", gameH.SubmitGuess)

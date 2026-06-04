@@ -54,17 +54,91 @@ func (h *TripHandler) List(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(trips)
 }
 
-func (h *TripHandler) Rename(w http.ResponseWriter, r *http.Request) {
+type updateBody struct {
+	Name      *string `json:"name"`
+	StartDate *string `json:"start_date"`
+	EndDate   *string `json:"end_date"`
+}
+
+func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	var body struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+	var body updateBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	_, err := h.db.Exec(r.Context(), `UPDATE trips SET name=$1 WHERE id=$2`, body.Name, id)
+	if body.Name == nil && body.StartDate == nil && body.EndDate == nil {
+		http.Error(w, "at least one field required", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := h.db.Begin(r.Context())
 	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	_, err = tx.Exec(r.Context(), `
+		UPDATE trips
+		SET name        = COALESCE($1, name),
+		    start_date  = COALESCE($2::date, start_date),
+		    end_date    = COALESCE($3::date, end_date),
+		    user_edited = TRUE
+		WHERE id = $4
+	`, body.Name, body.StartDate, body.EndDate, id)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if body.StartDate != nil || body.EndDate != nil {
+		var startDate, endDate *string
+		if err = tx.QueryRow(r.Context(),
+			`SELECT start_date::text, end_date::text FROM trips WHERE id = $1`, id,
+		).Scan(&startDate, &endDate); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+
+		if startDate != nil && endDate != nil {
+			// Pull unassigned and auto-detected media into this trip
+			if _, err = tx.Exec(r.Context(), `
+				UPDATE media
+				SET trip_id = $1
+				WHERE taken_at::date >= $2::date
+				  AND taken_at::date <= $3::date
+				  AND (trip_id IS NULL
+				       OR trip_id IN (SELECT id FROM trips WHERE user_edited = FALSE))
+			`, id, *startDate, *endDate); err != nil {
+				http.Error(w, "db error", http.StatusInternalServerError)
+				return
+			}
+
+			// Delete auto-detected trips that are now empty
+			if _, err = tx.Exec(r.Context(), `
+				DELETE FROM trips
+				WHERE user_edited = FALSE
+				  AND id NOT IN (SELECT trip_id FROM media WHERE trip_id IS NOT NULL)
+			`); err != nil {
+				http.Error(w, "db error", http.StatusInternalServerError)
+				return
+			}
+
+			// Recompute date ranges for remaining auto-detected trips
+			if _, err = tx.Exec(r.Context(), `
+				UPDATE trips t
+				SET start_date = (SELECT MIN(taken_at)::date FROM media WHERE trip_id = t.id),
+				    end_date   = (SELECT MAX(taken_at)::date FROM media WHERE trip_id = t.id)
+				WHERE user_edited = FALSE
+			`); err != nil {
+				http.Error(w, "db error", http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
+	if err = tx.Commit(r.Context()); err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
