@@ -10,6 +10,16 @@ export interface MediaItem {
   storage_key: string;
   trip_id: string | null;
   url?: string;
+  initial_yaw?: number;   // radians — from DB, used by 360° viewer
+  initial_pitch?: number; // radians — from DB
+  initial_fov?: number;   // degrees — from DB, default 75
+}
+
+export interface OrientationKeyframe {
+  time: number;   // seconds into video
+  yaw: number;    // radians
+  pitch: number;  // radians
+  fov: number;    // degrees (30–100)
 }
 
 export interface Trip {

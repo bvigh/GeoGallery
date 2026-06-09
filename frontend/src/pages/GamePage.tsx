@@ -3,6 +3,8 @@ import { MapContainer, TileLayer, Marker, useMapEvents } from "react-leaflet";
 import type { GameRound, GuessResult } from "../types";
 import { api } from "../api/client";
 import L from "leaflet";
+import Panorama360 from "../components/viewer/Panorama360";
+import Video360 from "../components/viewer/Video360";
 
 function ClickMarker({
   onPick,
@@ -67,16 +69,29 @@ export function GamePage() {
       )}
 
       {state === "playing" && round && (
-        <div className="flex h-full">
-          <div className="w-1/2 border-r">
-            {round.media_type.startsWith("video") ? (
-              <video src={round.url} controls className="h-full w-full object-contain" />
-            ) : (
-              <img src={round.url} alt="guess this" className="h-full w-full object-contain" />
-            )}
-          </div>
-          <div className="flex w-1/2 flex-col">
-            <div className="flex-1">
+        <div className="relative h-full w-full overflow-hidden">
+          {/* Full-screen media background */}
+          {round.media_type === "video_360" ? (
+            <Video360 url={round.url} onClose={() => {}} contained />
+          ) : round.media_type === "photo_360" ? (
+            <Panorama360 url={round.url} onClose={() => {}} contained />
+          ) : round.media_type.startsWith("video") ? (
+            <video
+              src={round.url}
+              controls
+              className="absolute inset-0 h-full w-full object-cover"
+            />
+          ) : (
+            <img
+              src={round.url}
+              alt="guess this"
+              className="absolute inset-0 h-full w-full object-cover"
+            />
+          )}
+
+          {/* Bottom-right overlay: guess map + controls */}
+          <div className="absolute bottom-4 right-4 z-[900] flex w-72 flex-col gap-2">
+            <div className="h-48 overflow-hidden rounded-xl shadow-2xl ring-1 ring-white/20">
               <MapContainer center={[20, 0]} zoom={2} className="h-full w-full">
                 <TileLayer
                   attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
@@ -84,26 +99,23 @@ export function GamePage() {
                 />
                 <ClickMarker onPick={(lat, lng) => setGuess({ lat, lng })} />
                 {guess && (
-                  <Marker
-                    position={[guess.lat, guess.lng]}
-                    ref={markerRef}
-                  />
+                  <Marker position={[guess.lat, guess.lng]} ref={markerRef} />
                 )}
               </MapContainer>
             </div>
-            <div className="flex items-center gap-3 border-t p-3">
+            <div className="flex items-center gap-2 rounded-xl bg-black/70 px-3 py-2 backdrop-blur-sm">
               <input
                 type="date"
-                className="rounded border px-2 py-1 text-sm"
+                className="min-w-0 flex-1 rounded bg-white/10 px-2 py-1 text-sm text-white placeholder-white/50 focus:outline-none focus:ring-1 focus:ring-white/40"
                 value={guessDate}
                 onChange={(e) => setGuessDate(e.target.value)}
               />
               <button
-                className="ml-auto rounded bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+                className="shrink-0 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
                 disabled={!guess}
                 onClick={submitGuess}
               >
-                Submit Guess
+                Submit
               </button>
             </div>
           </div>
