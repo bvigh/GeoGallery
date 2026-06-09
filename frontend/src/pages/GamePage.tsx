@@ -1,5 +1,5 @@
-import { useState, useRef } from "react";
-import { MapContainer, TileLayer, Marker, useMapEvents } from "react-leaflet";
+import { useState, useRef, useEffect } from "react";
+import { MapContainer, TileLayer, Marker, Polyline, useMapEvents, useMap } from "react-leaflet";
 import type { GameRound, GuessResult } from "../types";
 import { api } from "../api/client";
 import L from "leaflet";
@@ -18,6 +18,38 @@ function ClickMarker({
   });
   return null;
 }
+
+function FitBounds({
+  guess,
+  actual,
+}: {
+  guess: { lat: number; lng: number };
+  actual: { lat: number; lng: number };
+}) {
+  const map = useMap();
+  useEffect(() => {
+    const bounds = L.latLngBounds(
+      [guess.lat, guess.lng],
+      [actual.lat, actual.lng],
+    );
+    map.fitBounds(bounds, { padding: [80, 80] });
+  }, [map, guess, actual]);
+  return null;
+}
+
+const guessIcon = L.divIcon({
+  className: "",
+  html: `<div style="width:16px;height:16px;border-radius:50%;background:#f97316;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.5)"></div>`,
+  iconSize: [16, 16],
+  iconAnchor: [8, 8],
+});
+
+const actualIcon = L.divIcon({
+  className: "",
+  html: `<div style="width:16px;height:16px;border-radius:50%;background:#22c55e;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.5)"></div>`,
+  iconSize: [16, 16],
+  iconAnchor: [8, 8],
+});
 
 type GameState = "idle" | "playing" | "result";
 
@@ -69,7 +101,7 @@ export function GamePage() {
       )}
 
       {state === "playing" && round && (
-        <div className="relative h-full w-full overflow-hidden">
+        <div className="relative h-full w-full overflow-hidden bg-black">
           {/* Full-screen media background */}
           {round.media_type === "video_360" ? (
             <Video360 url={round.url} onClose={() => {}} contained />
@@ -85,7 +117,7 @@ export function GamePage() {
             <img
               src={round.url}
               alt="guess this"
-              className="absolute inset-0 h-full w-full object-cover"
+              className="absolute inset-0 h-full w-full object-contain"
             />
           )}
 
@@ -122,45 +154,67 @@ export function GamePage() {
         </div>
       )}
 
-      {state === "result" && result && (
-        <div className="m-auto max-w-md text-center">
-          <h2 className="mb-2 text-xl font-bold">Result</h2>
-          <p className="text-4xl font-bold text-primary">
-            {Math.round(result.total_score).toLocaleString()} pts
-          </p>
-          <div className="mt-4 rounded-lg border p-4 text-left text-sm">
-            <p>
-              <span className="font-medium">Distance:</span>{" "}
-              {result.distance_km.toFixed(1)} km away
-            </p>
-            <p>
-              <span className="font-medium">Location score:</span>{" "}
-              {Math.round(result.location_score).toLocaleString()}
-            </p>
-            {result.date_diff_days !== null && (
-              <>
-                <p>
-                  <span className="font-medium">Date off by:</span>{" "}
-                  {Math.round(result.date_diff_days)} days
-                </p>
-                <p>
-                  <span className="font-medium">Time score:</span>{" "}
-                  {Math.round(result.time_score ?? 0).toLocaleString()}
-                </p>
-              </>
-            )}
-            {result.actual_date && (
-              <p className="mt-2 text-muted-foreground">
-                Actual date: {result.actual_date.slice(0, 10)}
-              </p>
-            )}
-          </div>
-          <button
-            className="mt-4 rounded-lg bg-primary px-6 py-2 text-primary-foreground font-medium"
-            onClick={startRound}
+      {state === "result" && result && guess && (
+        <div className="relative h-full w-full">
+          <MapContainer
+            center={[result.actual_lat, result.actual_lng]}
+            zoom={5}
+            className="h-full w-full"
+            zoomControl={false}
           >
-            Next Round
-          </button>
+            <TileLayer
+              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
+            <FitBounds
+              guess={guess}
+              actual={{ lat: result.actual_lat, lng: result.actual_lng }}
+            />
+            <Marker position={[guess.lat, guess.lng]} icon={guessIcon} />
+            <Marker
+              position={[result.actual_lat, result.actual_lng]}
+              icon={actualIcon}
+            />
+            <Polyline
+              positions={[
+                [guess.lat, guess.lng],
+                [result.actual_lat, result.actual_lng],
+              ]}
+              pathOptions={{ color: "#000000", weight: 2, dashArray: "6 8", opacity: 0.85 }}
+            />
+          </MapContainer>
+
+          {/* Score card overlay */}
+          <div className="absolute bottom-6 left-1/2 z-[900] w-80 -translate-x-1/2 rounded-2xl bg-black/80 px-6 py-5 text-center text-white shadow-2xl backdrop-blur-sm ring-1 ring-white/10">
+            <p className="text-4xl font-bold text-primary">
+              {Math.round(result.total_score).toLocaleString()} pts
+            </p>
+            <div className="mt-3 space-y-1 text-sm text-white/80">
+              <p>{result.distance_km.toFixed(1)} km away &nbsp;·&nbsp; {Math.round(result.location_score).toLocaleString()} location pts</p>
+              {result.date_diff_days !== null && (
+                <p>
+                  {Math.round(result.date_diff_days)} days off &nbsp;·&nbsp; {Math.round(result.time_score ?? 0).toLocaleString()} time pts
+                </p>
+              )}
+              {result.actual_date && (
+                <p className="text-white/50">Actual date: {result.actual_date.slice(0, 10)}</p>
+              )}
+            </div>
+            <div className="mt-3 flex justify-center gap-4 text-xs text-white/60">
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block h-3 w-3 rounded-full bg-orange-500" /> Your guess
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block h-3 w-3 rounded-full bg-green-500" /> Actual location
+              </span>
+            </div>
+            <button
+              className="mt-4 w-full rounded-lg bg-primary py-2 font-medium text-primary-foreground"
+              onClick={startRound}
+            >
+              Next Round
+            </button>
+          </div>
         </div>
       )}
     </div>
