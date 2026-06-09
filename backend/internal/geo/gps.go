@@ -92,3 +92,15 @@ func HaversineKm(lat1, lng1, lat2, lng2 float64) float64 {
 func toRad(deg float64) float64 {
 	return deg * math.Pi / 180
 }
+
+// IsValidGPS returns false for coordinates that indicate no real GPS fix:
+// exact or near-zero (Null Island placeholder), or out-of-range values.
+func IsValidGPS(lat, lng float64) bool {
+	if math.Abs(lat) > 90 || math.Abs(lng) > 180 {
+		return false
+	}
+	// Cameras with no fix typically write 0,0. Reject anything within ~1 km of
+	// the origin — no consumer photo location is legitimately that close.
+	const nullIslandThreshold = 0.01
+	return math.Abs(lat) > nullIslandThreshold || math.Abs(lng) > nullIslandThreshold
+}
