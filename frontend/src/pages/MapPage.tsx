@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { MediaMap } from "../components/map/MediaMap";
 import type { MediaItem } from "../types";
 import { api } from "../api/client";
+import Panorama360 from "../components/viewer/Panorama360";
+import Video360 from "../components/viewer/Video360";
 
 function MediaPreview({
   item,
@@ -48,8 +50,6 @@ function FullscreenOverlay({
   url: string;
   onClose: () => void;
 }) {
-  const isVideo = item.media_type === "video" || item.media_type === "video_360";
-
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
@@ -57,6 +57,30 @@ function FullscreenOverlay({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  if (item.media_type === "photo_360") {
+    return (
+      <Panorama360
+        url={url}
+        onClose={onClose}
+        initialYaw={item.initial_yaw}
+        initialPitch={item.initial_pitch}
+        initialFov={item.initial_fov}
+      />
+    );
+  }
+
+  if (item.media_type === "video_360") {
+    return (
+      <Video360
+        url={url}
+        onClose={onClose}
+        initialYaw={item.initial_yaw}
+        initialPitch={item.initial_pitch}
+        initialFov={item.initial_fov}
+      />
+    );
+  }
 
   return (
     <div
@@ -71,7 +95,7 @@ function FullscreenOverlay({
         ✕
       </button>
       <div onClick={(e) => e.stopPropagation()}>
-        {isVideo ? (
+        {item.media_type === "video" ? (
           <video
             src={url}
             controls

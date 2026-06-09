@@ -3,13 +3,18 @@ import type { MediaItem } from "../../types";
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 
-function markerIcon(confidence: number | null) {
-  const color = confidence !== null && confidence < 0.5 ? "#f97316" : "#3b82f6";
+function markerIcon(item: MediaItem) {
+  const color =
+    item.gps_confidence !== null && item.gps_confidence < 0.5 ? "#f97316" : "#3b82f6";
+  const is360 = item.media_type === "photo_360" || item.media_type === "video_360";
+  const size = is360 ? 16 : 12;
+  const half = size / 2;
+  const outline = is360 ? "outline:2px solid #a855f7;outline-offset:2px;" : "";
   return L.divIcon({
-    html: `<div style="width:12px;height:12px;border-radius:50%;background:${color};border:2px solid white;box-shadow:0 1px 3px rgba(0,0,0,.4)"></div>`,
+    html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${color};border:2px solid white;box-shadow:0 1px 3px rgba(0,0,0,.4);${outline}"></div>`,
     className: "",
-    iconSize: [12, 12],
-    iconAnchor: [6, 6],
+    iconSize: [size, size],
+    iconAnchor: [half, half],
   });
 }
 
@@ -35,7 +40,7 @@ export function MediaMap({ items, onSelect }: Props) {
         <Marker
           key={item.id}
           position={[item.lat!, item.lng!]}
-          icon={markerIcon(item.gps_confidence)}
+          icon={markerIcon(item)}
           eventHandlers={{ click: () => onSelect?.(item) }}
         >
           <Popup>
