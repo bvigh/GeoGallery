@@ -64,6 +64,26 @@ func TestInterpolate_FarGapLowConfidence(t *testing.T) {
 	assert.LessOrEqual(t, res.Confidence, 0.10)
 }
 
+func TestIsValidGPS(t *testing.T) {
+	cases := []struct {
+		lat, lng float64
+		valid    bool
+	}{
+		{0, 0, false},
+		{0.001, 0.001, false},  // within null-island threshold
+		{0.02, 0, true},        // only one axis needs to exceed threshold
+		{0, 0.02, true},
+		{47.5, 19.0, true},     // Budapest
+		{-33.9, 18.4, true},    // Cape Town
+		{91, 0, false},         // lat out of range
+		{0, 181, false},        // lng out of range
+	}
+	for _, c := range cases {
+		got := IsValidGPS(c.lat, c.lng)
+		assert.Equal(t, c.valid, got, "lat=%v lng=%v", c.lat, c.lng)
+	}
+}
+
 func TestInterpolate_MidpointHighConfidence(t *testing.T) {
 	t0 := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
 	// ~100 m apart (0.0009° lat ≈ 100 m), 10 s apart

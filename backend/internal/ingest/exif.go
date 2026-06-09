@@ -1,12 +1,14 @@
 package ingest
 
 import (
+	"io"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/rwcarlsen/goexif/exif"
-	"io"
+
+	"github.com/bvigh/geogallery/internal/geo"
 )
 
 type ExifData struct {
@@ -26,7 +28,7 @@ func ExtractExif(r io.Reader) ExifData {
 
 	var result ExifData
 
-	if lat, lng, err := x.LatLong(); err == nil {
+	if lat, lng, err := x.LatLong(); err == nil && geo.IsValidGPS(lat, lng) {
 		result.Lat = &lat
 		result.Lng = &lng
 	}
