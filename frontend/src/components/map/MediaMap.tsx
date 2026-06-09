@@ -1,6 +1,8 @@
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
+import MarkerClusterGroup from "@changey/react-leaflet-markercluster";
 import type { MediaItem } from "../../types";
 import "leaflet/dist/leaflet.css";
+import "@changey/react-leaflet-markercluster/dist/styles.min.css";
 import L from "leaflet";
 
 function markerIcon(item: MediaItem) {
@@ -15,6 +17,16 @@ function markerIcon(item: MediaItem) {
     className: "",
     iconSize: [size, size],
     iconAnchor: [half, half],
+  });
+}
+
+function createClusterIcon(cluster: { getChildCount(): number }) {
+  const count = cluster.getChildCount();
+  return L.divIcon({
+    html: `<div style="width:36px;height:36px;border-radius:50%;background:#3b82f6;border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;color:white;font-size:13px;font-weight:600;">${count}</div>`,
+    className: "",
+    iconSize: [36, 36],
+    iconAnchor: [18, 18],
   });
 }
 
@@ -36,25 +48,27 @@ export function MediaMap({ items, onSelect }: Props) {
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
-      {withLocation.map((item) => (
-        <Marker
-          key={item.id}
-          position={[item.lat!, item.lng!]}
-          icon={markerIcon(item)}
-          eventHandlers={{ click: () => onSelect?.(item) }}
-        >
-          <Popup>
-            <div className="text-sm">
-              <p className="font-medium">{item.filename}</p>
-              {item.taken_at && (
-                <p className="text-muted-foreground">
-                  {new Date(item.taken_at).toLocaleDateString()}
-                </p>
-              )}
-            </div>
-          </Popup>
-        </Marker>
-      ))}
+      <MarkerClusterGroup chunkedLoading iconCreateFunction={createClusterIcon}>
+        {withLocation.map((item) => (
+          <Marker
+            key={item.id}
+            position={[item.lat!, item.lng!]}
+            icon={markerIcon(item)}
+            eventHandlers={{ click: () => onSelect?.(item) }}
+          >
+            <Popup>
+              <div className="text-sm">
+                <p className="font-medium">{item.filename}</p>
+                {item.taken_at && (
+                  <p className="text-muted-foreground">
+                    {new Date(item.taken_at).toLocaleDateString()}
+                  </p>
+                )}
+              </div>
+            </Popup>
+          </Marker>
+        ))}
+      </MarkerClusterGroup>
     </MapContainer>
   );
 }
