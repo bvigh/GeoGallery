@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,6 +24,15 @@ func (m *mockUploadStorage) Upload(_ context.Context, _ string, _ io.Reader, _ s
 }
 func (m *mockUploadStorage) PresignGet(_ context.Context, _ string) (string, error) {
 	panic("not expected")
+}
+
+// mockRegistrarDB implements registrarDB with a controllable Exec outcome.
+type mockRegistrarDB struct {
+	rowsAffected int64
+}
+
+func (m *mockRegistrarDB) Exec(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+	return makeTag(int(m.rowsAffected)), nil
 }
 
 // uploadOneFile builds a minimal multipart/form-data request with one file.
@@ -42,18 +50,11 @@ func uploadOneFile(filename, content string) *http.Request {
 // --- Cycle 4: Upload calls matcher with reprocess=true after inserting ---
 
 func TestUpload_CallsMatcherWithReprocess(t *testing.T) {
-	execDB := &mockMediaExecDB{
-		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
-			return makeTag(1), nil
-		},
-	}
-
 	var capturedReprocess bool
 	matcherCalled := false
 
 	h := &MediaHandler{
-		db:      execDB,
-		storage: &mockUploadStorage{},
+		registrar: &MediaRegistrar{db: &mockRegistrarDB{rowsAffected: 1}, storage: &mockUploadStorage{}},
 		runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, reprocess bool) error {
 			matcherCalled = true
 			capturedReprocess = reprocess
@@ -78,9 +79,8 @@ func TestScan_CallsMatcherWithReprocess(t *testing.T) {
 
 	// watchDir with no files → walk finishes immediately, matcher still called.
 	h := &IngestHandler{
-		db:       &mockIngestDB{},
-		storage:  nil,
-		watchDir: t.TempDir(),
+		registrar: &MediaRegistrar{db: &mockRegistrarDB{rowsAffected: 1}, storage: &mockUploadStorage{}},
+		watchDir:  t.TempDir(),
 		runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, reprocess bool) error {
 			matcherCalled = true
 			capturedReprocess = reprocess
@@ -105,9 +105,8 @@ func TestScan_CallsTripDetect(t *testing.T) {
 	tripDetectCalled := false
 
 	h := &IngestHandler{
-		db:       &mockIngestDB{},
-		storage:  nil,
-		watchDir: t.TempDir(),
+		registrar: &MediaRegistrar{db: &mockRegistrarDB{rowsAffected: 1}, storage: &mockUploadStorage{}},
+		watchDir:  t.TempDir(),
 		runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error {
 			return nil
 		},
@@ -132,9 +131,8 @@ func TestScan_CallsTripDetect(t *testing.T) {
 
 func TestScan_TripDetectError_Returns500(t *testing.T) {
 	h := &IngestHandler{
-		db:       &mockIngestDB{},
-		storage:  nil,
-		watchDir: t.TempDir(),
+		registrar: &MediaRegistrar{db: &mockRegistrarDB{rowsAffected: 1}, storage: &mockUploadStorage{}},
+		watchDir:  t.TempDir(),
 		runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error {
 			return nil
 		},
@@ -153,16 +151,10 @@ func TestScan_TripDetectError_Returns500(t *testing.T) {
 // --- Cycle 8: Upload calls trip detector when files are uploaded ---
 
 func TestUpload_CallsTripDetect(t *testing.T) {
-	execDB := &mockMediaExecDB{
-		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
-			return makeTag(1), nil
-		},
-	}
-
 	tripDetectCalled := false
+
 	h := &MediaHandler{
-		db:      execDB,
-		storage: &mockUploadStorage{},
+		registrar: &MediaRegistrar{db: &mockRegistrarDB{rowsAffected: 1}, storage: &mockUploadStorage{}},
 		runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error {
 			return nil
 		},
@@ -183,16 +175,10 @@ func TestUpload_CallsTripDetect(t *testing.T) {
 // --- Cycle 9: Upload skips trip detector when nothing was uploaded ---
 
 func TestUpload_SkipsTripDetectWhenNothingUploaded(t *testing.T) {
-	execDB := &mockMediaExecDB{
-		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
-			return makeTag(0), nil // dedup: 0 rows affected
-		},
-	}
-
 	tripDetectCalled := false
+
 	h := &MediaHandler{
-		db:      execDB,
-		storage: &mockUploadStorage{},
+		registrar: &MediaRegistrar{db: &mockRegistrarDB{rowsAffected: 0}, storage: &mockUploadStorage{}}, // 0 = dedup
 		runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error {
 			return nil
 		},
@@ -212,15 +198,8 @@ func TestUpload_SkipsTripDetectWhenNothingUploaded(t *testing.T) {
 // --- Cycle 10: Upload returns 500 if trip detector fails ---
 
 func TestUpload_TripDetectError_Returns500(t *testing.T) {
-	execDB := &mockMediaExecDB{
-		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
-			return makeTag(1), nil
-		},
-	}
-
 	h := &MediaHandler{
-		db:      execDB,
-		storage: &mockUploadStorage{},
+		registrar: &MediaRegistrar{db: &mockRegistrarDB{rowsAffected: 1}, storage: &mockUploadStorage{}},
 		runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error {
 			return nil
 		},
@@ -233,31 +212,4 @@ func TestUpload_TripDetectError_Returns500(t *testing.T) {
 	h.Upload(w, uploadOneFile("photo.jpg", "fake-jpeg"))
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
-}
-
-// --- support types ---
-
-// mockMediaExecDB implements mediaDB with controllable Exec.
-type mockMediaExecDB struct {
-	execFn func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-}
-
-func (m *mockMediaExecDB) Query(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
-	panic("not expected")
-}
-func (m *mockMediaExecDB) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
-	panic("not expected")
-}
-func (m *mockMediaExecDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	return m.execFn(ctx, sql, args...)
-}
-
-// mockIngestDB implements ingestDB; no files in temp dir so these are never called.
-type mockIngestDB struct{}
-
-func (m *mockIngestDB) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
-	panic("not expected")
-}
-func (m *mockIngestDB) Exec(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
-	panic("not expected")
 }

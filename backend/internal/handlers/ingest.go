@@ -10,21 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/bvigh/geogallery/internal/storage"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type ingestDB interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-}
-
 type IngestHandler struct {
-	db            ingestDB
-	storage       *storage.Client
+	registrar     *MediaRegistrar
 	watchDir      string
 	matcherPool   matcherDB
 	matchWindow   time.Duration
@@ -35,13 +26,12 @@ type IngestHandler struct {
 
 func NewIngestHandler(db *pgxpool.Pool, s *storage.Client, watchDir string, matchWindow time.Duration, tripGapHours int) *IngestHandler {
 	return &IngestHandler{
-		db:            db,
-		storage:       s,
+		registrar:     &MediaRegistrar{db: db, storage: s},
 		watchDir:      watchDir,
 		matcherPool:   db,
 		matchWindow:   matchWindow,
-		runMatcher:    RunGPSMatcher,
 		tripGapHours:  tripGapHours,
+		runMatcher:    RunGPSMatcher,
 		runTripDetect: RunTripDetect,
 	}
 }
@@ -64,51 +54,23 @@ func (h *IngestHandler) Scan(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 
-		// Skip already-ingested files
-		var exists bool
-		h.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM media WHERE filename=$1)`, d.Name()).Scan(&exists)
-		if exists {
-			skipped++
-			return nil
-		}
-
-		f, err := os.Open(path)
+		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil
 		}
-		defer f.Close()
 
-		exifData := ingest.ExtractExif(f)
-		f.Seek(0, 0)
+		info, _ := d.Info()
+		mtime := info.ModTime()
 
-		key := fmt.Sprintf("media/%d/%s", time.Now().UnixNano(), d.Name())
-		if err := h.storage.Upload(r.Context(), key, f, contentTypeFor(ext)); err != nil {
+		registered, err := h.registrar.registerMedia(r.Context(), data, d.Name(), &mtime)
+		if err != nil {
 			return nil
 		}
-
-		takenAt := exifData.TakenAt
-		if takenAt == nil {
-			info, _ := d.Info()
-			t := info.ModTime()
-			takenAt = &t
+		if registered {
+			ingested++
+		} else {
+			skipped++
 		}
-
-		h.db.Exec(r.Context(), `
-			INSERT INTO media (filename, media_type, location, gps_source, taken_at, storage_key)
-			VALUES ($1, $2,
-			        CASE WHEN $3::float8 IS NOT NULL THEN ST_SetSRID(ST_MakePoint($4, $3), 4326) END,
-			        $5, $6, $7)
-			ON CONFLICT (storage_key) DO NOTHING
-		`,
-			d.Name(), ingest.DetectMediaType(exifData, d.Name(), ext),
-			exifData.Lat, exifData.Lng,
-			gpsSource(exifData),
-			takenAt, key,
-		)
-		if exifData.Lat != nil && takenAt != nil {
-			insertExifGPSTrack(r.Context(), h.db, *exifData.Lat, *exifData.Lng, *takenAt)
-		}
-		ingested++
 		return nil
 	})
 	if err != nil {
@@ -121,7 +83,7 @@ func (h *IngestHandler) Scan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.runTripDetect(r.Context(), h.db, h.tripGapHours); err != nil {
+	if err := h.runTripDetect(r.Context(), h.registrar.db, h.tripGapHours); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
