@@ -1,21 +1,13 @@
 package handlers
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
-	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/bvigh/geogallery/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -30,13 +22,13 @@ type mediaDB interface {
 }
 
 type mediaStorage interface {
-	Upload(ctx context.Context, key string, body io.Reader, contentType string) error
 	PresignGet(ctx context.Context, key string) (string, error)
 }
 
 type MediaHandler struct {
 	db            mediaDB
 	storage       mediaStorage
+	registrar     *MediaRegistrar
 	matcherPool   matcherDB
 	matchWindow   time.Duration
 	runMatcher    func(ctx context.Context, db matcherDB, maxWindow time.Duration, reprocess bool) error
@@ -48,10 +40,11 @@ func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Durat
 	return &MediaHandler{
 		db:            db,
 		storage:       s,
+		registrar:     &MediaRegistrar{db: db, storage: s},
 		matcherPool:   db,
 		matchWindow:   matchWindow,
-		runMatcher:    RunGPSMatcher,
 		tripGapHours:  tripGapHours,
+		runMatcher:    RunGPSMatcher,
 		runTripDetect: RunTripDetect,
 	}
 }
@@ -123,50 +116,26 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		data, err := io.ReadAll(f)
+		data := make([]byte, fh.Size)
+		_, err = f.Read(data)
 		f.Close()
 		if err != nil {
 			continue
 		}
 
-		fileHash := partialHash(data)
-
-		ext := strings.ToLower(filepath.Ext(fh.Filename))
-		exifData := ingest.ExtractExif(bytes.NewReader(data))
-		mediaType := ingest.DetectMediaType(exifData, fh.Filename, ext)
-
-		key := fmt.Sprintf("media/%d/%s", time.Now().UnixNano(), fh.Filename)
-		if err := h.storage.Upload(r.Context(), key, bytes.NewReader(data), contentTypeFor(ext)); err != nil {
-			continue
-		}
-
-		var takenAt *time.Time
-		if exifData.TakenAt != nil {
-			takenAt = exifData.TakenAt
-		} else if i < len(mtimes) {
+		var fallbackMtime *time.Time
+		if i < len(mtimes) {
 			if ms, err := strconv.ParseInt(mtimes[i], 10, 64); err == nil {
 				t := time.UnixMilli(ms)
-				takenAt = &t
+				fallbackMtime = &t
 			}
 		}
 
-		tag, err := h.db.Exec(r.Context(), `
-			INSERT INTO media (filename, media_type, location, gps_confidence, gps_source, taken_at, storage_key, file_hash)
-			VALUES ($1, $2,
-			        CASE WHEN $3::float8 IS NOT NULL THEN ST_SetSRID(ST_MakePoint($4, $3), 4326) END,
-			        $5, $6, $7, $8, $9)
-			ON CONFLICT (file_hash) DO NOTHING
-		`,
-			fh.Filename, mediaType,
-			exifData.Lat, exifData.Lng,
-			nil, // confidence populated by background GPS matcher
-			gpsSource(exifData),
-			takenAt, key, fileHash,
-		)
-		if err == nil && tag.RowsAffected() == 1 {
-			if exifData.Lat != nil && takenAt != nil {
-				insertExifGPSTrack(r.Context(), h.db, *exifData.Lat, *exifData.Lng, *takenAt)
-			}
+		registered, err := h.registrar.registerMedia(r.Context(), data, fh.Filename, fallbackMtime)
+		if err != nil {
+			continue
+		}
+		if registered {
 			uploaded = append(uploaded, fh.Filename)
 		}
 	}
@@ -176,7 +145,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
-		if err := h.runTripDetect(r.Context(), h.matcherPool, h.tripGapHours); err != nil {
+		if err := h.runTripDetect(r.Context(), h.registrar.db, h.tripGapHours); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
@@ -184,48 +153,6 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"uploaded": uploaded})
-}
-
-func contentTypeFor(ext string) string {
-	switch ext {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".heic", ".heif":
-		return "image/heic"
-	case ".mp4":
-		return "video/mp4"
-	case ".mov":
-		return "video/quicktime"
-	default:
-		return "application/octet-stream"
-	}
-}
-
-func gpsSource(e ingest.ExifData) *string {
-	if e.Lat != nil {
-		s := "exif"
-		return &s
-	}
-	return nil
-}
-
-// partialHash hashes the first and last 64 KB plus the file size.
-// This is fast for large files while still being collision-resistant for deduplication.
-func partialHash(data []byte) string {
-	const chunk = 64 * 1024
-	h := sha256.New()
-	var sizeBuf [8]byte
-	binary.LittleEndian.PutUint64(sizeBuf[:], uint64(len(data)))
-	h.Write(sizeBuf[:])
-	if len(data) <= 2*chunk {
-		h.Write(data)
-	} else {
-		h.Write(data[:chunk])
-		h.Write(data[len(data)-chunk:])
-	}
-	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (h *MediaHandler) GetURL(w http.ResponseWriter, r *http.Request) {
