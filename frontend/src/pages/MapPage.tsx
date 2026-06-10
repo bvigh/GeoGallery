@@ -45,18 +45,26 @@ function FullscreenOverlay({
   item,
   url,
   onClose,
+  onPrev,
+  onNext,
+  peerLabel,
 }: {
   item: MediaItem;
   url: string;
   onClose: () => void;
+  onPrev?: () => void;
+  onNext?: () => void;
+  peerLabel?: string;
 }) {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
+      if (e.key === "ArrowLeft") onPrev?.();
+      if (e.key === "ArrowRight") onNext?.();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, onPrev, onNext]);
 
   if (item.media_type === "photo_360") {
     return (
@@ -94,6 +102,29 @@ function FullscreenOverlay({
       >
         ✕
       </button>
+      {onPrev && (
+        <button
+          className="absolute left-4 top-1/2 -translate-y-1/2 text-white text-5xl leading-none hover:opacity-70 select-none"
+          onClick={(e) => { e.stopPropagation(); onPrev(); }}
+          aria-label="Previous"
+        >
+          ‹
+        </button>
+      )}
+      {onNext && (
+        <button
+          className="absolute right-4 top-1/2 -translate-y-1/2 text-white text-5xl leading-none hover:opacity-70 select-none"
+          onClick={(e) => { e.stopPropagation(); onNext(); }}
+          aria-label="Next"
+        >
+          ›
+        </button>
+      )}
+      {peerLabel && (
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white text-sm bg-black/50 px-3 py-1 rounded-full pointer-events-none">
+          {peerLabel}
+        </div>
+      )}
       <div onClick={(e) => e.stopPropagation()}>
         {item.media_type === "video" ? (
           <video
@@ -122,6 +153,8 @@ export function MapPage() {
   const [urlError, setUrlError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
+  const [clusterPeers, setClusterPeers] = useState<MediaItem[]>([]);
+  const [clusterIndex, setClusterIndex] = useState(0);
   const pendingId = useRef<string | null>(null);
 
   useEffect(() => {
@@ -131,27 +164,47 @@ export function MapPage() {
       .catch((e) => setListError(e.message));
   }, []);
 
-  function handleSelect(item: MediaItem | null) {
-    setSelected(item);
-    setMediaUrl(null);
-    setUrlError(null);
-    setFullscreen(false);
-    if (!item) return;
-
+  function fetchUrl(item: MediaItem) {
     pendingId.current = item.id;
     setLoading(true);
     api
       .getMediaUrl(item.id)
-      .then((url) => {
-        if (pendingId.current === item.id) setMediaUrl(url);
-      })
-      .catch((e) => {
-        if (pendingId.current === item.id) setUrlError(e.message);
-      })
-      .finally(() => {
-        if (pendingId.current === item.id) setLoading(false);
-      });
+      .then((url) => { if (pendingId.current === item.id) setMediaUrl(url); })
+      .catch((e) => { if (pendingId.current === item.id) setUrlError(e.message); })
+      .finally(() => { if (pendingId.current === item.id) setLoading(false); });
   }
+
+  function handleSelect(item: MediaItem | null, peers: MediaItem[] = []) {
+    setSelected(item);
+    setClusterPeers(peers);
+    setClusterIndex(peers.findIndex((p) => p.id === item?.id));
+    setMediaUrl(null);
+    setUrlError(null);
+    setFullscreen(false);
+    if (!item) return;
+    fetchUrl(item);
+  }
+
+  function navigatePeer(delta: number) {
+    if (clusterPeers.length <= 1) return;
+    const newIndex = (clusterIndex + delta + clusterPeers.length) % clusterPeers.length;
+    const newItem = clusterPeers[newIndex];
+    setClusterIndex(newIndex);
+    setSelected(newItem);
+    setMediaUrl(null);
+    setUrlError(null);
+    fetchUrl(newItem);
+  }
+
+  useEffect(() => {
+    if (clusterPeers.length <= 1) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "ArrowLeft") navigatePeer(-1);
+      if (e.key === "ArrowRight") navigatePeer(1);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [clusterPeers, clusterIndex]);
 
   return (
     <div className="relative h-full w-full">
@@ -161,7 +214,7 @@ export function MapPage() {
         </div>
       )}
 
-      <MediaMap items={items} onSelect={handleSelect} />
+      <MediaMap items={items} onSelect={(item, peers) => handleSelect(item, peers)} />
 
       {selected && (
         <div className="absolute right-4 top-4 z-[800] w-72 rounded-lg border bg-background p-3 shadow-lg">
@@ -187,6 +240,28 @@ export function MapPage() {
               {selected.gps_confidence !== null &&
                 ` (${Math.round(selected.gps_confidence * 100)}%)`}
             </p>
+          )}
+
+          {clusterPeers.length > 1 && (
+            <div className="mt-2 flex items-center justify-between">
+              <button
+                onClick={() => navigatePeer(-1)}
+                className="px-2 py-1 rounded text-lg leading-none hover:bg-muted"
+                aria-label="Previous"
+              >
+                ‹
+              </button>
+              <span className="text-xs text-muted-foreground">
+                {clusterIndex + 1} / {clusterPeers.length}
+              </span>
+              <button
+                onClick={() => navigatePeer(1)}
+                className="px-2 py-1 rounded text-lg leading-none hover:bg-muted"
+                aria-label="Next"
+              >
+                ›
+              </button>
+            </div>
           )}
 
           {loading && (
@@ -216,6 +291,9 @@ export function MapPage() {
           item={selected}
           url={mediaUrl}
           onClose={() => setFullscreen(false)}
+          onPrev={clusterPeers.length > 1 ? () => navigatePeer(-1) : undefined}
+          onNext={clusterPeers.length > 1 ? () => navigatePeer(1) : undefined}
+          peerLabel={clusterPeers.length > 1 ? `${clusterIndex + 1} / ${clusterPeers.length}` : undefined}
         />
       )}
     </div>

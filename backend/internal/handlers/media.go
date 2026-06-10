@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -128,8 +129,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		h256 := sha256.Sum256(data)
-		fileHash := hex.EncodeToString(h256[:])
+		fileHash := partialHash(data)
 
 		ext := strings.ToLower(filepath.Ext(fh.Filename))
 		exifData := ingest.ExtractExif(bytes.NewReader(data))
@@ -209,6 +209,23 @@ func gpsSource(e ingest.ExifData) *string {
 		return &s
 	}
 	return nil
+}
+
+// partialHash hashes the first and last 64 KB plus the file size.
+// This is fast for large files while still being collision-resistant for deduplication.
+func partialHash(data []byte) string {
+	const chunk = 64 * 1024
+	h := sha256.New()
+	var sizeBuf [8]byte
+	binary.LittleEndian.PutUint64(sizeBuf[:], uint64(len(data)))
+	h.Write(sizeBuf[:])
+	if len(data) <= 2*chunk {
+		h.Write(data)
+	} else {
+		h.Write(data[:chunk])
+		h.Write(data[len(data)-chunk:])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (h *MediaHandler) GetURL(w http.ResponseWriter, r *http.Request) {
