@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useRef } from "react";
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
 import MarkerClusterGroup from "@changey/react-leaflet-markercluster";
 import type { MediaItem } from "../../types";
@@ -32,11 +33,43 @@ function createClusterIcon(cluster: { getChildCount(): number }) {
 
 interface Props {
   items: MediaItem[];
-  onSelect?: (item: MediaItem) => void;
+  onSelect?: (item: MediaItem, peers: MediaItem[]) => void;
 }
 
 export function MediaMap({ items, onSelect }: Props) {
   const withLocation = (items ?? []).filter((m) => m.lat !== null && m.lng !== null);
+  const itemsById = useMemo(
+    () => new Map(withLocation.map((m) => [m.id, m])),
+    [withLocation],
+  );
+  const activePeers = useRef<MediaItem[]>([]);
+  const clusterRef = useRef<any>(null);
+
+  // Attach spiderfied/unspiderfied directly on the Leaflet layer.
+  // The library's eventHandlers prop uses the wrong event name prefix;
+  // imperative attachment is the only reliable path.
+  useEffect(() => {
+    const layer = clusterRef.current;
+    if (!layer) return;
+
+    function onSpiderfied(e: any) {
+      activePeers.current = (e.markers as Array<{ options: { title?: string } }>)
+        .map((m) => itemsById.get(m.options.title ?? ""))
+        .filter((m): m is MediaItem => m !== undefined);
+    }
+    function onUnspiderfied() {
+      // Delay one tick: unspiderfied fires before the marker click,
+      // so the click handler must read activePeers before we clear it.
+      setTimeout(() => { activePeers.current = []; }, 0);
+    }
+
+    layer.on("spiderfied", onSpiderfied);
+    layer.on("unspiderfied", onUnspiderfied);
+    return () => {
+      layer.off("spiderfied", onSpiderfied);
+      layer.off("unspiderfied", onUnspiderfied);
+    };
+  }, [itemsById]);
 
   return (
     <MapContainer
@@ -48,13 +81,23 @@ export function MediaMap({ items, onSelect }: Props) {
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
-      <MarkerClusterGroup chunkedLoading iconCreateFunction={createClusterIcon}>
+      <MarkerClusterGroup
+        ref={clusterRef}
+        chunkedLoading
+        iconCreateFunction={createClusterIcon}
+      >
         {withLocation.map((item) => (
           <Marker
             key={item.id}
+            title={item.id}
             position={[item.lat!, item.lng!]}
             icon={markerIcon(item)}
-            eventHandlers={{ click: () => onSelect?.(item) }}
+            eventHandlers={{
+              click: () => {
+                const peers = activePeers.current.length > 0 ? activePeers.current : [item];
+                onSelect?.(item, peers);
+              },
+            }}
           >
             <Popup>
               <div className="text-sm">
