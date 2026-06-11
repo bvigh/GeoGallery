@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/bvigh/geogallery/internal/geo"
@@ -27,6 +29,66 @@ type roundMedia struct {
 }
 
 func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	fromDate := q.Get("from_date")
+	toDate := q.Get("to_date")
+	tripIDs := q["trip_id"]
+	mediaTypes := q["media_type"]
+
+	conds := []string{"location IS NOT NULL"}
+	var args []any
+	n := 1
+
+	if fromDate != "" {
+		conds = append(conds, fmt.Sprintf("taken_at >= $%d::date", n))
+		args = append(args, fromDate)
+		n++
+	}
+	if toDate != "" {
+		conds = append(conds, fmt.Sprintf("taken_at < ($%d::date + INTERVAL '1 day')", n))
+		args = append(args, toDate)
+		n++
+	}
+	if len(mediaTypes) > 0 {
+		conds = append(conds, fmt.Sprintf("media_type = ANY($%d)", n))
+		args = append(args, mediaTypes)
+		n++
+	}
+	if len(tripIDs) > 0 {
+		var hasUnassigned bool
+		var uuids []string
+		for _, id := range tripIDs {
+			if id == "unassigned" {
+				hasUnassigned = true
+			} else {
+				uuids = append(uuids, id)
+			}
+		}
+		switch {
+		case hasUnassigned && len(uuids) > 0:
+			conds = append(conds, fmt.Sprintf("(trip_id = ANY($%d) OR trip_id IS NULL)", n))
+			args = append(args, uuids)
+			n++
+		case hasUnassigned:
+			conds = append(conds, "trip_id IS NULL")
+		default:
+			conds = append(conds, fmt.Sprintf("trip_id = ANY($%d)", n))
+			args = append(args, uuids)
+			n++
+		}
+	}
+
+	where := "WHERE " + strings.Join(conds, " AND ")
+	sql := fmt.Sprintf(`
+		SELECT id, media_type, storage_key,
+		       ST_Y(location::geometry), ST_X(location::geometry),
+		       taken_at::text
+		FROM media
+		%s
+		ORDER BY RANDOM()
+		LIMIT 1
+	`, where)
+
 	var m struct {
 		ID         string   `json:"id"`
 		MediaType  string   `json:"media_type"`
@@ -36,15 +98,7 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 		TakenAt    *string  `json:"taken_at"`
 	}
 
-	err := h.db.QueryRow(r.Context(), `
-		SELECT id, media_type, storage_key,
-		       ST_Y(location::geometry), ST_X(location::geometry),
-		       taken_at::text
-		FROM media
-		WHERE location IS NOT NULL
-		ORDER BY RANDOM()
-		LIMIT 1
-	`).Scan(&m.ID, &m.MediaType, &m.StorageKey, &m.Lat, &m.Lng, &m.TakenAt)
+	err := h.db.QueryRow(r.Context(), sql, args...).Scan(&m.ID, &m.MediaType, &m.StorageKey, &m.Lat, &m.Lng, &m.TakenAt)
 	if err != nil {
 		http.Error(w, "no media available", http.StatusNotFound)
 		return
