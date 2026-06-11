@@ -59,8 +59,9 @@ func (r *MediaRegistrar) registerMedia(
 ) (bool, error) {
 	const headSize = 1024 * 1024 // 1MB — safe margin for EXIF
 	head := make([]byte, headSize)
-	n, err := io.ReadAtLeast(body, head, 0)
-	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+	n, err := io.ReadFull(body, head)
+	if err != nil && err != io.ErrUnexpectedEOF {
+		// io.ErrUnexpectedEOF means the file is smaller than headSize, which is fine
 		return false, err
 	}
 	head = head[:n]
