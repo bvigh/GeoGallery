@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -178,7 +179,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		data := make([]byte, fh.Size)
-		_, err = f.Read(data)
+		_, err = io.ReadFull(f, data)
 		f.Close()
 		if err != nil {
 			continue
