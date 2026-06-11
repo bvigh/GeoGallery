@@ -17,7 +17,7 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/aistor/minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -28,8 +28,9 @@ services:
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio_data:/data
+      - ${MINIO_LICENSE_PATH:-$HOME/minio/minio.license}:/minio.license:ro
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 10
