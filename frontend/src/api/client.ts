@@ -1,7 +1,20 @@
 const BASE = "/api";
 
-async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
+async function get<T>(path: string, params?: Record<string, string | string[]>): Promise<T> {
+  let url = `${BASE}${path}`;
+  if (params) {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (Array.isArray(v)) {
+        v.forEach((s) => qs.append(k, s));
+      } else if (v !== "") {
+        qs.set(k, v);
+      }
+    }
+    const s = qs.toString();
+    if (s) url += "?" + s;
+  }
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
   return res.json();
 }

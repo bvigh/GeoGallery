@@ -31,6 +31,13 @@ export interface Trip {
   cover_key: string | null;
 }
 
+export interface FilterState {
+  fromDate: string;
+  toDate: string;
+  tripIds: string[];
+  mediaTypes: MediaItem["media_type"][];
+}
+
 export interface GameRound {
   id: string;
   media_type: string;

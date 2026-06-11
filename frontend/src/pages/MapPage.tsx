@@ -1,9 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MediaMap } from "../components/map/MediaMap";
-import type { MediaItem } from "../types";
+import { FilterPanel } from "../components/map/FilterPanel";
+import type { FilterState, MediaItem, Trip } from "../types";
 import { api } from "../api/client";
 import Panorama360 from "../components/viewer/Panorama360";
 import Video360 from "../components/viewer/Video360";
+
+const PAGE_SIZE = 500;
 
 function MediaPreview({
   item,
@@ -147,6 +150,11 @@ function FullscreenOverlay({
 
 export function MapPage() {
   const [items, setItems] = useState<MediaItem[]>([]);
+  const [trips, setTrips] = useState<Trip[]>([]);
+  const [filters, setFilters] = useState<FilterState>({
+    fromDate: "", toDate: "", tripIds: [], mediaTypes: [],
+  });
+  const [loadingMedia, setLoadingMedia] = useState(false);
   const [selected, setSelected] = useState<MediaItem | null>(null);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -158,11 +166,56 @@ export function MapPage() {
   const pendingId = useRef<string | null>(null);
 
   useEffect(() => {
-    api
-      .get<MediaItem[]>("/media")
-      .then(setItems)
-      .catch((e) => setListError(e.message));
+    let cancelled = false;
+
+    setItems([]);
+    setLoadingMedia(true);
+    setListError(null);
+
+    const params: Record<string, string | string[]> = {};
+    if (filters.fromDate) params.from_date = filters.fromDate;
+    if (filters.toDate) params.to_date = filters.toDate;
+    if (filters.tripIds.length) params.trip_id = filters.tripIds;
+    if (filters.mediaTypes.length) params.media_type = filters.mediaTypes;
+
+    let offset = 0;
+
+    function fetchPage() {
+      api
+        .get<MediaItem[]>("/media", { ...params, offset: String(offset) })
+        .then((page) => {
+          if (cancelled) return;
+          setItems((prev) => [...prev, ...page]);
+          if (page.length === PAGE_SIZE) {
+            offset += PAGE_SIZE;
+            fetchPage();
+          } else {
+            setLoadingMedia(false);
+          }
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          setListError(e.message);
+          setLoadingMedia(false);
+        });
+    }
+
+    fetchPage();
+
+    return () => { cancelled = true; };
+  }, [filters]);
+
+  useEffect(() => {
+    api.get<Trip[]>("/trips").then(setTrips).catch(() => {});
   }, []);
+
+  const activeCount = useMemo(() => {
+    let n = 0;
+    if (filters.fromDate || filters.toDate) n++;
+    if (filters.tripIds.length > 0) n++;
+    if (filters.mediaTypes.length > 0) n++;
+    return n;
+  }, [filters]);
 
   function fetchUrl(item: MediaItem) {
     pendingId.current = item.id;
@@ -208,9 +261,22 @@ export function MapPage() {
 
   return (
     <div className="relative h-full w-full">
+      <FilterPanel
+        trips={trips}
+        filters={filters}
+        onChange={setFilters}
+        activeCount={activeCount}
+      />
+
       {listError && (
-        <div className="absolute left-4 top-4 z-10 rounded bg-destructive px-3 py-2 text-sm text-white">
+        <div className="absolute left-4 top-16 z-10 rounded bg-destructive px-3 py-2 text-sm text-white">
           {listError}
+        </div>
+      )}
+
+      {loadingMedia && (
+        <div className="absolute bottom-4 left-4 z-[800] rounded bg-background/80 px-2 py-1 text-xs text-muted-foreground">
+          Loading…
         </div>
       )}
 
