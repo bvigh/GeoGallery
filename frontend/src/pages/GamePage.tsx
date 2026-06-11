@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from "react";
 import { MapContainer, TileLayer, Marker, Polyline, useMapEvents, useMap } from "react-leaflet";
-import type { GameRound, GuessResult } from "../types";
+import type { GameRound, GuessResult, Trip, FilterState } from "../types";
 import { api } from "../api/client";
 import L from "leaflet";
 import Panorama360 from "../components/viewer/Panorama360";
 import Video360 from "../components/viewer/Video360";
+import { FilterPanel } from "../components/map/FilterPanel";
 
 function ClickMarker({
   onPick,
@@ -60,9 +61,26 @@ export function GamePage() {
   const [guessDate, setGuessDate] = useState("");
   const [result, setResult] = useState<GuessResult | null>(null);
   const markerRef = useRef<L.Marker | null>(null);
+  const [trips, setTrips] = useState<Trip[]>([]);
+  const [filters, setFilters] = useState<FilterState>({ fromDate: "", toDate: "", tripIds: [], mediaTypes: [] });
+
+  useEffect(() => {
+    api.get<Trip[]>("/trips").then(setTrips);
+  }, []);
+
+  const activeCount = [
+    filters.fromDate || filters.toDate,
+    filters.tripIds.length > 0,
+    filters.mediaTypes.length > 0,
+  ].filter(Boolean).length;
 
   const startRound = async () => {
-    const r = await api.get<GameRound>("/game/round");
+    const params: Record<string, string | string[]> = {};
+    if (filters.fromDate) params.from_date = filters.fromDate;
+    if (filters.toDate) params.to_date = filters.toDate;
+    if (filters.tripIds.length) params.trip_id = filters.tripIds;
+    if (filters.mediaTypes.length) params.media_type = filters.mediaTypes;
+    const r = await api.get<GameRound>("/game/round", params);
     setRound(r);
     setGuess(null);
     setGuessDate("");
@@ -83,21 +101,29 @@ export function GamePage() {
   };
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative flex h-full flex-col">
       {state === "idle" && (
-        <div className="m-auto text-center">
-          <h1 className="mb-4 text-2xl font-bold">GeoGallery Game</h1>
-          <p className="mb-6 text-muted-foreground">
-            You'll be shown a photo or video from your gallery. Guess where and
-            when it was taken.
-          </p>
-          <button
-            className="rounded-lg bg-primary px-6 py-2 text-primary-foreground font-medium"
-            onClick={startRound}
-          >
-            Start Round
-          </button>
-        </div>
+        <>
+          <FilterPanel
+            trips={trips}
+            filters={filters}
+            onChange={setFilters}
+            activeCount={activeCount}
+          />
+          <div className="m-auto text-center">
+            <h1 className="mb-4 text-2xl font-bold">GeoGallery Game</h1>
+            <p className="mb-6 text-muted-foreground">
+              You'll be shown a photo or video from your gallery. Guess where and
+              when it was taken.
+            </p>
+            <button
+              className="rounded-lg bg-primary px-6 py-2 text-primary-foreground font-medium"
+              onClick={startRound}
+            >
+              Start Round
+            </button>
+          </div>
+        </>
       )}
 
       {state === "playing" && round && (
