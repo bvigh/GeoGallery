@@ -19,7 +19,7 @@ import (
 // mockUploadStorage allows Upload to succeed without S3.
 type mockUploadStorage struct{}
 
-func (m *mockUploadStorage) Upload(_ context.Context, _ string, _ io.Reader, _ string) error {
+func (m *mockUploadStorage) Upload(_ context.Context, _ string, _ io.Reader, _ int64, _ string) error {
 	return nil
 }
 func (m *mockUploadStorage) PresignGet(_ context.Context, _ string) (string, error) {

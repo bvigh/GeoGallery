@@ -54,15 +54,17 @@ func (h *IngestHandler) Scan(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 
-		data, err := os.ReadFile(path)
+		info, err := d.Info()
 		if err != nil {
 			return nil
 		}
-
-		info, _ := d.Info()
+		f, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
 		mtime := info.ModTime()
-
-		registered, err := h.registrar.registerMedia(r.Context(), data, d.Name(), &mtime)
+		registered, err := h.registrar.registerMedia(r.Context(), f, info.Size(), d.Name(), &mtime)
+		f.Close()
 		if err != nil {
 			return nil
 		}

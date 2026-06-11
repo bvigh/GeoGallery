@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -158,7 +157,7 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(500 << 20); err != nil {
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		http.Error(w, "parse form", http.StatusBadRequest)
 		return
 	}
@@ -178,13 +177,6 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		data := make([]byte, fh.Size)
-		_, err = io.ReadFull(f, data)
-		f.Close()
-		if err != nil {
-			continue
-		}
-
 		var fallbackMtime *time.Time
 		if i < len(mtimes) {
 			if ms, err := strconv.ParseInt(mtimes[i], 10, 64); err == nil {
@@ -193,7 +185,8 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		registered, err := h.registrar.registerMedia(r.Context(), data, fh.Filename, fallbackMtime)
+		registered, err := h.registrar.registerMedia(r.Context(), f, fh.Size, fh.Filename, fallbackMtime)
+		f.Close()
 		if err != nil {
 			continue
 		}
