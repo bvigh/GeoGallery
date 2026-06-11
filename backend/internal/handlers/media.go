@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bvigh/geogallery/internal/storage"
@@ -63,22 +64,82 @@ type mediaItem struct {
 }
 
 func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(r.Context(), `
+	q := r.URL.Query()
+
+	fromDate := q.Get("from_date")
+	toDate := q.Get("to_date")
+	tripIDs := q["trip_id"]
+	mediaTypes := q["media_type"]
+	offset, _ := strconv.Atoi(q.Get("offset"))
+
+	var conds []string
+	var args []any
+	n := 1
+
+	if fromDate != "" {
+		conds = append(conds, fmt.Sprintf("taken_at >= $%d::date", n))
+		args = append(args, fromDate)
+		n++
+	}
+	if toDate != "" {
+		conds = append(conds, fmt.Sprintf("taken_at < ($%d::date + INTERVAL '1 day')", n))
+		args = append(args, toDate)
+		n++
+	}
+	if len(mediaTypes) > 0 {
+		conds = append(conds, fmt.Sprintf("media_type = ANY($%d)", n))
+		args = append(args, mediaTypes)
+		n++
+	}
+	if len(tripIDs) > 0 {
+		var hasUnassigned bool
+		var uuids []string
+		for _, id := range tripIDs {
+			if id == "unassigned" {
+				hasUnassigned = true
+			} else {
+				uuids = append(uuids, id)
+			}
+		}
+		switch {
+		case hasUnassigned && len(uuids) > 0:
+			conds = append(conds, fmt.Sprintf("(trip_id = ANY($%d) OR trip_id IS NULL)", n))
+			args = append(args, uuids)
+			n++
+		case hasUnassigned:
+			conds = append(conds, "trip_id IS NULL")
+		default:
+			conds = append(conds, fmt.Sprintf("trip_id = ANY($%d)", n))
+			args = append(args, uuids)
+			n++
+		}
+	}
+
+	where := ""
+	if len(conds) > 0 {
+		where = "WHERE " + strings.Join(conds, " AND ")
+	}
+
+	args = append(args, offset)
+	sql := fmt.Sprintf(`
 		SELECT id, filename, media_type,
 		       ST_Y(location::geometry) AS lat, ST_X(location::geometry) AS lng,
 		       gps_confidence, gps_source,
 		       taken_at, storage_key, trip_id
 		FROM media
+		%s
 		ORDER BY taken_at DESC NULLS LAST
-		LIMIT 500
-	`)
+		LIMIT 500 OFFSET $%d
+	`, where, n)
+
+	rows, err := h.db.Query(r.Context(), sql, args...)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 
-	var items []mediaItem
+	items := []mediaItem{}
 	for rows.Next() {
 		var m mediaItem
 		var lat, lng *float64

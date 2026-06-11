@@ -12,7 +12,7 @@ vi.mock("../api/client", () => ({
   },
 }));
 
-const mockApi = api as { get: ReturnType<typeof vi.fn>; patch: ReturnType<typeof vi.fn> };
+const mockApi = api as unknown as { get: ReturnType<typeof vi.fn>; patch: ReturnType<typeof vi.fn> };
 
 const sampleTrips: Trip[] = [
   {

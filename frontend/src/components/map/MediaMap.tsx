@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
+import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import MarkerClusterGroup from "@changey/react-leaflet-markercluster";
 import type { MediaItem } from "../../types";
 import "leaflet/dist/leaflet.css";
@@ -29,6 +29,16 @@ function createClusterIcon(cluster: { getChildCount(): number }) {
     iconSize: [36, 36],
     iconAnchor: [18, 18],
   });
+}
+
+function ZoomControlBottomLeft() {
+  const map = useMap();
+  useEffect(() => {
+    const control = L.control.zoom({ position: "bottomleft" });
+    control.addTo(map);
+    return () => { control.remove(); };
+  }, [map]);
+  return null;
 }
 
 interface Props {
@@ -75,8 +85,10 @@ export function MediaMap({ items, onSelect }: Props) {
     <MapContainer
       center={[20, 0]}
       zoom={2}
+      zoomControl={false}
       className="h-full w-full"
     >
+      <ZoomControlBottomLeft />
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
