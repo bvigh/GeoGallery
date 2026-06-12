@@ -21,7 +21,7 @@ type registrarDB interface {
 }
 
 type registrarStorage interface {
-	Upload(ctx context.Context, key string, body io.Reader, contentType string) error
+	Upload(ctx context.Context, key string, body io.Reader, size int64, contentType string) error
 }
 
 type MediaRegistrar struct {
@@ -29,22 +29,61 @@ type MediaRegistrar struct {
 	storage registrarStorage
 }
 
+// tailCapture wraps a reader and keeps the last 64KB of bytes seen,
+// used to compute the tail chunk of partialHashStream after streaming.
+type tailCapture struct {
+	r    io.Reader
+	tail []byte
+}
+
+func (tc *tailCapture) Read(p []byte) (int, error) {
+	n, err := tc.r.Read(p)
+	if n > 0 {
+		const keep = 64 * 1024
+		tc.tail = append(tc.tail, p[:n]...)
+		if len(tc.tail) > keep {
+			tc.tail = tc.tail[len(tc.tail)-keep:]
+		}
+	}
+	return n, err
+}
+
 // registerMedia stores one media file. Returns (true, nil) if newly inserted,
 // (false, nil) if deduplicated by file_hash, or (false, err) on failure.
 func (r *MediaRegistrar) registerMedia(
 	ctx context.Context,
-	data []byte,
+	body io.Reader,
+	size int64,
 	filename string,
 	fallbackMtime *time.Time,
 ) (bool, error) {
-	fileHash := partialHash(data)
+	const headSize = 1024 * 1024 // 1MB — safe margin for EXIF
+	head := make([]byte, headSize)
+	n, err := io.ReadFull(body, head)
+	if err != nil && err != io.ErrUnexpectedEOF {
+		// io.ErrUnexpectedEOF means the file is smaller than headSize, which is fine
+		return false, err
+	}
+	head = head[:n]
+
 	ext := strings.ToLower(filepath.Ext(filename))
-	exifData := ingest.ExtractExif(bytes.NewReader(data))
+	exifData := ingest.ExtractExif(bytes.NewReader(head))
 	mediaType := ingest.DetectMediaType(exifData, filename, ext)
 
+	tc := &tailCapture{r: body}
+	uploadBody := io.MultiReader(bytes.NewReader(head), tc)
+
 	key := fmt.Sprintf("media/%d/%s", time.Now().UnixNano(), filename)
-	if err := r.storage.Upload(ctx, key, bytes.NewReader(data), contentTypeFor(ext)); err != nil {
+	if err := r.storage.Upload(ctx, key, uploadBody, size, contentTypeFor(ext)); err != nil {
 		return false, err
+	}
+
+	const chunk = 64 * 1024
+	var fileHash string
+	if size <= 2*chunk {
+		fileHash = partialHash(head)
+	} else {
+		fileHash = partialHashStream(size, head[:chunk], tc.tail)
 	}
 
 	takenAt := exifData.TakenAt
@@ -116,5 +155,17 @@ func partialHash(data []byte) string {
 		h.Write(data[:chunk])
 		h.Write(data[len(data)-chunk:])
 	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// partialHashStream produces the same hash as partialHash for files larger than 128KB,
+// using the pre-captured first and last 64KB chunks instead of a full []byte.
+func partialHashStream(size int64, firstChunk, lastChunk []byte) string {
+	h := sha256.New()
+	var sizeBuf [8]byte
+	binary.LittleEndian.PutUint64(sizeBuf[:], uint64(size))
+	h.Write(sizeBuf[:])
+	h.Write(firstChunk)
+	h.Write(lastChunk)
 	return hex.EncodeToString(h.Sum(nil))
 }

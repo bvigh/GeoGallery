@@ -46,7 +46,7 @@ type mockStorage struct {
 	presignFn func(ctx context.Context, key string) (string, error)
 }
 
-func (m *mockStorage) Upload(_ context.Context, _ string, _ io.Reader, _ string) error {
+func (m *mockStorage) Upload(_ context.Context, _ string, _ io.Reader, _ int64, _ string) error {
 	panic("not expected in these tests")
 }
 func (m *mockStorage) PresignGet(ctx context.Context, key string) (string, error) {
