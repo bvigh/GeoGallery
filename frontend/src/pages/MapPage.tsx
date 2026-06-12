@@ -134,13 +134,13 @@ function FullscreenOverlay({
             src={url}
             controls
             autoPlay
-            className="max-h-screen max-w-screen-lg rounded"
+            className="max-h-[90vh] max-w-[90vw] rounded object-contain"
           />
         ) : (
           <img
             src={url}
             alt={item.filename}
-            className="max-h-screen max-w-screen-lg rounded"
+            className="max-h-[100vh] max-w-[100vw] rounded object-contain"
           />
         )}
       </div>
