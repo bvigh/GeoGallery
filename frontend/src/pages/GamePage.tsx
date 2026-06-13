@@ -101,6 +101,7 @@ export function GamePage() {
       guess_lat: guess.lat,
       guess_lng: guess.lng,
       guess_date: guessDate,
+      max_dist_km: round.max_dist_km,
     });
     setResult(res);
     setState("result");

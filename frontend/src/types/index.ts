@@ -46,6 +46,7 @@ export interface GameRound {
   initial_yaw?: number;
   initial_pitch?: number;
   initial_fov?: number;
+  max_dist_km: number;
 }
 
 export interface GuessResult {
