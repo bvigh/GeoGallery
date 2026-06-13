@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -29,6 +30,7 @@ type roundMedia struct {
 	InitialYaw   *float64 `json:"initial_yaw"`
 	InitialPitch *float64 `json:"initial_pitch"`
 	InitialFov   *float64 `json:"initial_fov"`
+	MaxDistKm    float64  `json:"max_dist_km"`
 }
 
 func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +119,11 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	maxDistKm, err := h.computeMaxDistKm(r.Context(), conds, args)
+	if err != nil {
+		maxDistKm = 1.0
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(roundMedia{
 		ID:           m.ID,
@@ -125,14 +132,42 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 		InitialYaw:   m.InitialYaw,
 		InitialPitch: m.InitialPitch,
 		InitialFov:   m.InitialFov,
+		MaxDistKm:    maxDistKm,
 	})
 }
 
+func (h *GameHandler) computeMaxDistKm(ctx context.Context, conds []string, args []any) (float64, error) {
+	// ST_LongestLine finds the two farthest points (degree-space, fast via convex hull).
+	// Casting the resulting linestring to geography gives geodesic length in meters.
+	sql := fmt.Sprintf(`
+		SELECT COALESCE(
+			ST_Length(
+				ST_LongestLine(
+					ST_Collect(location::geometry),
+					ST_Collect(location::geometry)
+				)::geography
+			) / 1000.0,
+			0
+		)
+		FROM media
+		WHERE %s
+	`, strings.Join(conds, " AND "))
+	var maxDist float64
+	if err := h.db.QueryRow(ctx, sql, args...).Scan(&maxDist); err != nil {
+		return 1.0, err
+	}
+	if maxDist < 1.0 {
+		maxDist = 1.0
+	}
+	return maxDist, nil
+}
+
 type guessRequest struct {
-	MediaID string  `json:"media_id"`
-	GuessLat float64 `json:"guess_lat"`
-	GuessLng float64 `json:"guess_lng"`
+	MediaID   string  `json:"media_id"`
+	GuessLat  float64 `json:"guess_lat"`
+	GuessLng  float64 `json:"guess_lng"`
 	GuessDate string  `json:"guess_date"` // YYYY-MM-DD
+	MaxDistKm float64 `json:"max_dist_km"`
 }
 
 type guessResult struct {
@@ -154,21 +189,27 @@ func (h *GameHandler) SubmitGuess(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var actual struct {
-		Lat     float64
-		Lng     float64
-		TakenAt *string
+		Lat           float64
+		Lng           float64
+		TakenAt       *string
+		GpsConfidence float64
 	}
 	err := h.db.QueryRow(r.Context(), `
-		SELECT ST_Y(location::geometry), ST_X(location::geometry), taken_at::text
+		SELECT ST_Y(location::geometry), ST_X(location::geometry), taken_at::text,
+		       COALESCE(gps_confidence, 1.0)
 		FROM media WHERE id=$1
-	`, req.MediaID).Scan(&actual.Lat, &actual.Lng, &actual.TakenAt)
+	`, req.MediaID).Scan(&actual.Lat, &actual.Lng, &actual.TakenAt, &actual.GpsConfidence)
 	if err != nil {
 		http.Error(w, "media not found", http.StatusNotFound)
 		return
 	}
 
 	distKm := geo.HaversineKm(req.GuessLat, req.GuessLng, actual.Lat, actual.Lng)
-	locScore := locationScore(distKm)
+	maxDistKm := req.MaxDistKm
+	if maxDistKm < 1.0 {
+		maxDistKm = 1.0
+	}
+	locScore := locationScore(distKm, maxDistKm, actual.GpsConfidence)
 
 	result := guessResult{
 		ActualLat:     actual.Lat,
@@ -195,9 +236,15 @@ func (h *GameHandler) SubmitGuess(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
-// 5000 points max, decays to 0 at 2500km
-func locationScore(km float64) float64 {
-	return math.Max(0, 5000*(1-km/2500))
+const toleranceScaleKm = 10.0
+
+// locationScore decays linearly from 5000 to 0 as distance grows from 0 to maxDistKm.
+// A confidence < 1 subtracts a tolerance from the raw distance before scoring,
+// so low-confidence locations don't penalise close guesses unfairly.
+func locationScore(km, maxDistKm, confidence float64) float64 {
+	toleranceKm := (1.0 - confidence) * toleranceScaleKm
+	adjusted := math.Max(0, km-toleranceKm)
+	return math.Max(0, 5000*(1-adjusted/maxDistKm))
 }
 
 // 5000 points max, decays to 0 at 365 days off
