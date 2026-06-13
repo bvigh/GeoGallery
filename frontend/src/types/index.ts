@@ -10,9 +10,10 @@ export interface MediaItem {
   storage_key: string;
   trip_id: string | null;
   url?: string;
-  initial_yaw?: number;   // radians — from DB, used by 360° viewer
-  initial_pitch?: number; // radians — from DB
-  initial_fov?: number;   // degrees — from DB, default 75
+  initial_yaw?: number;
+  initial_pitch?: number;
+  initial_fov?: number;
+  keyframes?: OrientationKeyframe[];
 }
 
 export interface OrientationKeyframe {
@@ -42,6 +43,9 @@ export interface GameRound {
   id: string;
   media_type: string;
   url: string;
+  initial_yaw?: number;
+  initial_pitch?: number;
+  initial_fov?: number;
 }
 
 export interface GuessResult {

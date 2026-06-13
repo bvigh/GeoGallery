@@ -5,21 +5,26 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 interface Props {
   url: string;
   onClose: () => void;
-  initialYaw?: number;
-  initialPitch?: number;
-  initialFov?: number;
+  initialYaw?: number | null;
+  initialPitch?: number | null;
+  initialFov?: number | null;
   /** When true: fills parent container (no fixed overlay, no close bar). Used in GamePage. */
   contained?: boolean;
+  captureRef?: React.MutableRefObject<(() => { yaw: number; pitch: number; fov: number }) | null>;
 }
 
 export default function Panorama360({
   url,
   onClose,
-  initialYaw = 0,
-  initialPitch = 0,
-  initialFov = 75,
+  initialYaw,
+  initialPitch,
+  initialFov,
   contained = false,
+  captureRef,
 }: Props) {
+  const yaw = initialYaw ?? 0;
+  const pitch = initialPitch ?? 0;
+  const fov = initialFov ?? 75;
   const mountRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -32,7 +37,7 @@ export default function Panorama360({
     mount.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(initialFov, w / h, 0.1, 1000);
+    const camera = new THREE.PerspectiveCamera(fov, w / h, 0.1, 1000);
     camera.position.set(0, 0, 0.001);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -40,9 +45,20 @@ export default function Panorama360({
     controls.enablePan = false;
     controls.rotateSpeed = -0.3;
 
-    if (initialYaw !== 0 || initialPitch !== 0) {
-      const euler = new THREE.Euler(initialPitch, initialYaw, 0, "YXZ");
+    if (yaw !== 0 || pitch !== 0) {
+      const euler = new THREE.Euler(pitch, yaw, 0, "YXZ");
       camera.quaternion.setFromEuler(euler);
+      controls.target
+        .copy(camera.position)
+        .add(new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion));
+      controls.update();
+    }
+
+    if (captureRef) {
+      captureRef.current = () => {
+        const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "YXZ");
+        return { yaw: euler.y, pitch: euler.x, fov: camera.fov };
+      };
     }
 
     const MIN_FOV = 30;
@@ -83,6 +99,7 @@ export default function Panorama360({
     animate();
 
     return () => {
+      if (captureRef) captureRef.current = null;
       cancelAnimationFrame(rafId);
       window.removeEventListener("resize", onResize);
       renderer.domElement.removeEventListener("wheel", onWheel);
@@ -93,7 +110,7 @@ export default function Panorama360({
       texture.dispose();
       mount.removeChild(renderer.domElement);
     };
-  }, [url, initialYaw, initialPitch, initialFov]);
+  }, [url, yaw, pitch, fov, captureRef]);
 
   if (contained) {
     return <div ref={mountRef} className="absolute inset-0 bg-black" />;

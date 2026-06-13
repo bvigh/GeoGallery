@@ -10,11 +10,14 @@ interface Props {
   url: string;
   onClose: () => void;
   keyframes?: OrientationKeyframe[];
-  initialYaw?: number;
-  initialPitch?: number;
-  initialFov?: number;
+  initialYaw?: number | null;
+  initialPitch?: number | null;
+  initialFov?: number | null;
   /** When true: fills parent container (no fixed overlay). Used in GamePage. */
   contained?: boolean;
+  captureRef?: React.MutableRefObject<(() => { yaw: number; pitch: number; fov: number }) | null>;
+  captureTimeRef?: React.MutableRefObject<(() => number) | null>;
+  controlRef?: React.MutableRefObject<{ pause: () => void; seek: (t: number) => void; seekAndApply: (t: number) => void } | null>;
 }
 
 function fmt(s: number) {
@@ -27,11 +30,19 @@ export default function Video360({
   url,
   onClose,
   keyframes = EMPTY_KEYFRAMES,
-  initialYaw = 0,
-  initialPitch = 0,
-  initialFov = 75,
+  initialYaw,
+  initialPitch,
+  initialFov,
   contained = false,
+  captureRef,
+  captureTimeRef,
+  controlRef,
 }: Props) {
+  const yaw = initialYaw ?? 0;
+  const pitch = initialPitch ?? 0;
+  const fov = initialFov ?? 75;
+  const keyframesRef = useRef(keyframes);
+  useEffect(() => { keyframesRef.current = keyframes; }, [keyframes]);
   const mountRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [playing, setPlaying] = useState(true);
@@ -66,7 +77,7 @@ export default function Video360({
     mount.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(initialFov, w / h, 0.1, 1000);
+    const camera = new THREE.PerspectiveCamera(fov, w / h, 0.1, 1000);
     camera.position.set(0, 0, 0.001);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -74,9 +85,43 @@ export default function Video360({
     controls.enablePan = false;
     controls.rotateSpeed = -0.3;
 
-    if (initialYaw !== 0 || initialPitch !== 0) {
-      const euler = new THREE.Euler(initialPitch, initialYaw, 0, "YXZ");
+    if (yaw !== 0 || pitch !== 0) {
+      const euler = new THREE.Euler(pitch, yaw, 0, "YXZ");
       camera.quaternion.setFromEuler(euler);
+      controls.target
+        .copy(camera.position)
+        .add(new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion));
+      controls.update();
+    }
+
+    if (captureRef) {
+      captureRef.current = () => {
+        const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "YXZ");
+        return { yaw: euler.y, pitch: euler.x, fov: camera.fov };
+      };
+    }
+    if (captureTimeRef) {
+      captureTimeRef.current = () => video.currentTime;
+    }
+    if (controlRef) {
+      controlRef.current = {
+        pause: () => video.pause(),
+        seek: (t: number) => { video.currentTime = t; },
+        seekAndApply: (t: number) => {
+          video.currentTime = t;
+          video.pause();
+          const orientation = interpolateKeyframes(t);
+          if (orientation) {
+            const euler = new THREE.Euler(orientation.pitch, orientation.yaw, 0, "YXZ");
+            camera.quaternion.setFromEuler(euler);
+            controls.target
+              .copy(camera.position)
+              .add(new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion));
+            camera.fov = orientation.fov;
+            camera.updateProjectionMatrix();
+          }
+        },
+      };
     }
 
     const MIN_FOV = 30;
@@ -101,24 +146,34 @@ export default function Video360({
     let userOverride = false;
     let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
     const COOLDOWN_MS = 5000;
+    const BLEND_MS = 1000;
+    let blendStartTime: number | null = null;
+    let blendFromQuat = new THREE.Quaternion();
+    let blendFromFov = fov;
+
+    function lerpAngle(a: number, b: number, t: number): number {
+      let delta = ((b - a) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI;
+      return a + delta * t;
+    }
 
     function interpolateKeyframes(
       t: number
     ): { yaw: number; pitch: number; fov: number } | null {
-      if (keyframes.length === 0) return null;
-      const first = keyframes[0];
+      const kfs = keyframesRef.current;
+      if (kfs.length === 0) return null;
+      const first = kfs[0];
       if (t <= first.time) return { yaw: first.yaw, pitch: first.pitch, fov: first.fov };
-      const last = keyframes[keyframes.length - 1];
+      const last = kfs[kfs.length - 1];
       if (t >= last.time) return { yaw: last.yaw, pitch: last.pitch, fov: last.fov };
 
-      for (let i = 0; i < keyframes.length - 1; i++) {
-        const a = keyframes[i];
-        const b = keyframes[i + 1];
+      for (let i = 0; i < kfs.length - 1; i++) {
+        const a = kfs[i];
+        const b = kfs[i + 1];
         if (t >= a.time && t < b.time) {
           const alpha = (t - a.time) / (b.time - a.time);
           return {
-            yaw: a.yaw + (b.yaw - a.yaw) * alpha,
-            pitch: a.pitch + (b.pitch - a.pitch) * alpha,
+            yaw: lerpAngle(a.yaw, b.yaw, alpha),
+            pitch: lerpAngle(a.pitch, b.pitch, alpha),
             fov: a.fov + (b.fov - a.fov) * alpha,
           };
         }
@@ -128,24 +183,18 @@ export default function Video360({
 
     function onTimeUpdate() {
       setCurrentTime(video.currentTime);
-      if (userOverride) return;
-      const orientation = interpolateKeyframes(video.currentTime);
-      if (!orientation) return;
-      const euler = new THREE.Euler(orientation.pitch, orientation.yaw, 0, "YXZ");
-      camera.quaternion.setFromEuler(euler);
-      controls.target
-        .copy(camera.position)
-        .add(new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion));
-      camera.fov = orientation.fov;
-      camera.updateProjectionMatrix();
     }
     video.addEventListener("timeupdate", onTimeUpdate);
 
-    // --- User override: disable automation on interaction, resume after 5s inactivity ---
+    // --- User override: disable automation on interaction, resume with blend after 5s inactivity ---
     function onUserInteract() {
       userOverride = true;
+      blendStartTime = null;
       if (cooldownTimer) clearTimeout(cooldownTimer);
       cooldownTimer = setTimeout(() => {
+        blendFromQuat.copy(camera.quaternion);
+        blendFromFov = camera.fov;
+        blendStartTime = performance.now();
         userOverride = false;
       }, COOLDOWN_MS);
     }
@@ -167,6 +216,29 @@ export default function Video360({
     let rafId: number;
     const animate = () => {
       rafId = requestAnimationFrame(animate);
+      if (!userOverride && !video.paused) {
+        const orientation = interpolateKeyframes(video.currentTime);
+        if (orientation) {
+          const targetEuler = new THREE.Euler(orientation.pitch, orientation.yaw, 0, "YXZ");
+          const targetQuat = new THREE.Quaternion().setFromEuler(targetEuler);
+
+          let alpha = 1;
+          if (blendStartTime !== null) {
+            const elapsed = performance.now() - blendStartTime;
+            alpha = Math.min(elapsed / BLEND_MS, 1);
+            // ease-in-out cubic
+            alpha = alpha < 0.5 ? 4 * alpha * alpha * alpha : 1 - Math.pow(-2 * alpha + 2, 3) / 2;
+            if (elapsed >= BLEND_MS) blendStartTime = null;
+          }
+
+          camera.quaternion.slerpQuaternions(blendFromQuat, targetQuat, alpha);
+          camera.fov = blendFromFov + (orientation.fov - blendFromFov) * alpha;
+          controls.target
+            .copy(camera.position)
+            .add(new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion));
+          camera.updateProjectionMatrix();
+        }
+      }
       controls.update();
       texture.needsUpdate = true;
       renderer.render(scene, camera);
@@ -174,6 +246,9 @@ export default function Video360({
     animate();
 
     return () => {
+      if (captureRef) captureRef.current = null;
+      if (captureTimeRef) captureTimeRef.current = null;
+      if (controlRef) controlRef.current = null;
       cancelAnimationFrame(rafId);
       if (cooldownTimer) clearTimeout(cooldownTimer);
       video.removeEventListener("loadedmetadata", onLoadedMetadata);
@@ -195,7 +270,7 @@ export default function Video360({
       texture.dispose();
       mount.removeChild(renderer.domElement);
     };
-  }, [url, keyframes, initialYaw, initialPitch, initialFov]);
+  }, [url, yaw, pitch, fov, captureRef, captureTimeRef, controlRef]);
 
   const togglePlay = () => {
     const video = videoRef.current;

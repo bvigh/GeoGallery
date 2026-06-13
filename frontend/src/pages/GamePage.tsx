@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { MapContainer, TileLayer, Marker, Polyline, useMapEvents, useMap } from "react-leaflet";
-import type { GameRound, GuessResult, Trip, FilterState } from "../types";
+import type { GameRound, GuessResult, OrientationKeyframe, Trip, FilterState } from "../types";
 import { api } from "../api/client";
 import L from "leaflet";
 import Panorama360 from "../components/viewer/Panorama360";
@@ -57,6 +57,7 @@ type GameState = "idle" | "playing" | "result";
 export function GamePage() {
   const [state, setState] = useState<GameState>("idle");
   const [round, setRound] = useState<GameRound | null>(null);
+  const [roundKeyframes, setRoundKeyframes] = useState<OrientationKeyframe[]>([]);
   const [guess, setGuess] = useState<{ lat: number; lng: number } | null>(null);
   const [guessDate, setGuessDate] = useState("");
   const [result, setResult] = useState<GuessResult | null>(null);
@@ -85,6 +86,11 @@ export function GamePage() {
     setGuess(null);
     setGuessDate("");
     setResult(null);
+    if (r.media_type === "video_360") {
+      api.getKeyframes(r.id).then(setRoundKeyframes).catch(() => setRoundKeyframes([]));
+    } else {
+      setRoundKeyframes([]);
+    }
     setState("playing");
   };
 
@@ -130,9 +136,24 @@ export function GamePage() {
         <div className="relative h-full w-full overflow-hidden bg-black">
           {/* Full-screen media background */}
           {round.media_type === "video_360" ? (
-            <Video360 url={round.url} onClose={() => {}} contained />
+            <Video360
+              url={round.url}
+              onClose={() => {}}
+              contained
+              initialYaw={round.initial_yaw}
+              initialPitch={round.initial_pitch}
+              initialFov={round.initial_fov}
+              keyframes={roundKeyframes}
+            />
           ) : round.media_type === "photo_360" ? (
-            <Panorama360 url={round.url} onClose={() => {}} contained />
+            <Panorama360
+              url={round.url}
+              onClose={() => {}}
+              contained
+              initialYaw={round.initial_yaw}
+              initialPitch={round.initial_pitch}
+              initialFov={round.initial_fov}
+            />
           ) : round.media_type.startsWith("video") ? (
             <video
               src={round.url}

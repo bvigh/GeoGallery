@@ -1,3 +1,5 @@
+import type { OrientationKeyframe } from "../types";
+
 const BASE = "/api";
 
 async function get<T>(path: string, params?: Record<string, string | string[]>): Promise<T> {
@@ -44,4 +46,27 @@ async function getMediaUrl(id: string): Promise<string> {
   return data.url;
 }
 
-export const api = { get, post, patch, getMediaUrl };
+async function getKeyframes(id: string): Promise<OrientationKeyframe[]> {
+  return get<OrientationKeyframe[]>(`/media/${id}/keyframes`);
+}
+
+async function updateViewSettings(
+  id: string,
+  settings: { initial_yaw: number | null; initial_pitch: number | null; initial_fov: number | null }
+): Promise<void> {
+  await fetch(`${BASE}/media/${id}/view-settings`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+}
+
+async function replaceKeyframes(id: string, keyframes: OrientationKeyframe[]): Promise<void> {
+  await fetch(`${BASE}/media/${id}/keyframes`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(keyframes),
+  });
+}
+
+export const api = { get, post, patch, getMediaUrl, getKeyframes, updateViewSettings, replaceKeyframes };

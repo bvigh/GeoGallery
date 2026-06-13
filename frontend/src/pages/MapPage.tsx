@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MediaMap } from "../components/map/MediaMap";
 import { FilterPanel } from "../components/map/FilterPanel";
-import type { FilterState, MediaItem, Trip } from "../types";
+import type { FilterState, MediaItem, OrientationKeyframe, Trip } from "../types";
 import { api } from "../api/client";
 import Panorama360 from "../components/viewer/Panorama360";
 import Video360 from "../components/viewer/Video360";
@@ -89,6 +89,7 @@ function FullscreenOverlay({
         initialYaw={item.initial_yaw}
         initialPitch={item.initial_pitch}
         initialFov={item.initial_fov}
+        keyframes={item.keyframes}
       />
     );
   }
@@ -148,6 +149,170 @@ function FullscreenOverlay({
   );
 }
 
+function EditViewModal({
+  item,
+  url,
+  onClose,
+  onSaved,
+}: {
+  item: MediaItem;
+  url: string;
+  onClose: () => void;
+  onSaved: (updated: Partial<MediaItem>) => void;
+}) {
+  const captureRef = useRef<(() => { yaw: number; pitch: number; fov: number }) | null>(null);
+  const captureTimeRef = useRef<(() => number) | null>(null);
+  const controlRef = useRef<{ pause: () => void; seek: (t: number) => void; seekAndApply: (t: number) => void } | null>(null);
+  const [keyframes, setKeyframes] = useState<OrientationKeyframe[]>(item.keyframes ?? []);
+  const [saving, setSaving] = useState(false);
+
+  async function handleSetDefaultView() {
+    if (!captureRef.current) return;
+    const { yaw, pitch, fov } = captureRef.current();
+    setSaving(true);
+    await api.updateViewSettings(item.id, { initial_yaw: yaw, initial_pitch: pitch, initial_fov: fov });
+    setSaving(false);
+    onSaved({ initial_yaw: yaw, initial_pitch: pitch, initial_fov: fov });
+  }
+
+  function handleAddKeyframe() {
+    if (!captureRef.current || !captureTimeRef.current) return;
+    controlRef.current?.pause();
+    const { yaw, pitch, fov } = captureRef.current();
+    const time = captureTimeRef.current();
+    setKeyframes((prev) => {
+      const without = prev.filter((kf) => Math.abs(kf.time - time) > 0.05);
+      return [...without, { time, yaw, pitch, fov }].sort((a, b) => a.time - b.time);
+    });
+  }
+
+  function handleSeekToKeyframe(time: number) {
+    controlRef.current?.seekAndApply(time);
+  }
+
+  async function handleSaveKeyframes() {
+    setSaving(true);
+    await api.replaceKeyframes(item.id, keyframes);
+    setSaving(false);
+    onSaved({ keyframes });
+  }
+
+  function handleDeleteKeyframe(time: number) {
+    setKeyframes((prev) => prev.filter((kf) => kf.time !== time));
+  }
+
+  const isVideo = item.media_type === "video_360";
+
+  return (
+    <div className="fixed inset-0 z-[1100] flex flex-col bg-black">
+      <div className="flex items-center justify-between px-4 py-2 bg-black/80 text-white text-sm shrink-0">
+        <span className="font-medium">Edit default view — {item.filename}</span>
+        <button onClick={onClose} className="text-white hover:text-gray-300 text-xl leading-none">✕</button>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden">
+        <div className="flex-1 relative">
+          {isVideo ? (
+            <Video360
+              url={url}
+              onClose={() => {}}
+              contained
+              initialYaw={item.initial_yaw}
+              initialPitch={item.initial_pitch}
+              initialFov={item.initial_fov}
+              keyframes={keyframes}
+              captureRef={captureRef}
+              captureTimeRef={captureTimeRef}
+              controlRef={controlRef}
+            />
+          ) : (
+            <Panorama360
+              url={url}
+              onClose={() => {}}
+              contained
+              initialYaw={item.initial_yaw}
+              initialPitch={item.initial_pitch}
+              initialFov={item.initial_fov}
+              captureRef={captureRef}
+            />
+          )}
+        </div>
+
+        <div className="w-64 shrink-0 bg-black/90 text-white flex flex-col gap-3 p-4 overflow-y-auto">
+          <div>
+            <p className="text-xs text-white/60 mb-1">Default view (yaw / pitch / zoom)</p>
+            <button
+              onClick={handleSetDefaultView}
+              disabled={saving}
+              className="w-full rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+            >
+              Set current view as default
+            </button>
+          </div>
+
+          {isVideo && (
+            <div>
+              <p className="text-xs text-white/60 mb-1">Keyframes</p>
+              <button
+                onClick={handleAddKeyframe}
+                className="w-full rounded bg-white/10 px-3 py-1.5 text-sm hover:bg-white/20"
+              >
+                + Add keyframe at current time
+              </button>
+              {keyframes.length > 0 && (
+                <ul className="mt-2 space-y-1 text-xs">
+                  {keyframes.map((kf) => (
+                    <li key={kf.time} className="rounded bg-white/5 px-2 py-1">
+                      <div className="flex items-center justify-between">
+                        <button
+                          onClick={() => handleSeekToKeyframe(kf.time)}
+                          className="tabular-nums text-left hover:text-primary"
+                          title="Jump to this keyframe"
+                        >
+                          {kf.time.toFixed(1)}s &nbsp;·&nbsp;
+                          y:{(kf.yaw * 180 / Math.PI).toFixed(0)}°&nbsp;
+                          p:{(kf.pitch * 180 / Math.PI).toFixed(0)}°&nbsp;
+                          z:{kf.fov.toFixed(0)}°
+                        </button>
+                        <div className="flex items-center gap-1 ml-2 shrink-0">
+                          <button
+                            onClick={() => handleAddKeyframe()}
+                            className="text-white/40 hover:text-white text-xs px-1"
+                            title="Update this keyframe with current view"
+                            aria-label="Update keyframe"
+                          >
+                            ↺
+                          </button>
+                          <button
+                            onClick={() => handleDeleteKeyframe(kf.time)}
+                            className="text-white/40 hover:text-white"
+                            aria-label="Delete keyframe"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {keyframes.length > 0 && (
+                <button
+                  onClick={handleSaveKeyframes}
+                  disabled={saving}
+                  className="mt-2 w-full rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+                >
+                  Save keyframes
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function MapPage() {
   const [items, setItems] = useState<MediaItem[]>([]);
   const [trips, setTrips] = useState<Trip[]>([]);
@@ -163,6 +328,7 @@ export function MapPage() {
   const [listError, setListError] = useState<string | null>(null);
   const [clusterPeers, setClusterPeers] = useState<MediaItem[]>([]);
   const [clusterIndex, setClusterIndex] = useState(0);
+  const [editingView, setEditingView] = useState(false);
   const pendingId = useRef<string | null>(null);
 
   useEffect(() => {
@@ -236,6 +402,11 @@ export function MapPage() {
     setFullscreen(false);
     if (!item) return;
     fetchUrl(item);
+    if (item.media_type === "video_360") {
+      api.getKeyframes(item.id).then((kf) => {
+        setSelected((prev) => prev?.id === item.id ? { ...prev, keyframes: kf } : prev);
+      }).catch(() => {});
+    }
   }
 
   function navigatePeer(delta: number) {
@@ -308,6 +479,15 @@ export function MapPage() {
             </p>
           )}
 
+          {(selected.media_type === "photo_360" || selected.media_type === "video_360") && (
+            <button
+              className="mt-2 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted"
+              onClick={() => setEditingView(true)}
+            >
+              Edit default view
+            </button>
+          )}
+
           {clusterPeers.length > 1 && (
             <div className="mt-2 flex items-center justify-between">
               <button
@@ -360,6 +540,18 @@ export function MapPage() {
           onPrev={clusterPeers.length > 1 ? () => navigatePeer(-1) : undefined}
           onNext={clusterPeers.length > 1 ? () => navigatePeer(1) : undefined}
           peerLabel={clusterPeers.length > 1 ? `${clusterIndex + 1} / ${clusterPeers.length}` : undefined}
+        />
+      )}
+
+      {editingView && selected && mediaUrl && (
+        <EditViewModal
+          item={selected}
+          url={mediaUrl}
+          onClose={() => setEditingView(false)}
+          onSaved={(updated) => {
+            setSelected((prev) => prev ? { ...prev, ...updated } : prev);
+            setEditingView(false);
+          }}
         />
       )}
     </div>

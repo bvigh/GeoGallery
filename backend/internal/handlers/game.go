@@ -23,9 +23,12 @@ func NewGameHandler(db *pgxpool.Pool, s *storage.Client) *GameHandler {
 }
 
 type roundMedia struct {
-	ID        string `json:"id"`
-	MediaType string `json:"media_type"`
-	URL       string `json:"url"`
+	ID           string   `json:"id"`
+	MediaType    string   `json:"media_type"`
+	URL          string   `json:"url"`
+	InitialYaw   *float64 `json:"initial_yaw"`
+	InitialPitch *float64 `json:"initial_pitch"`
+	InitialFov   *float64 `json:"initial_fov"`
 }
 
 func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +85,8 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 	sql := fmt.Sprintf(`
 		SELECT id, media_type, storage_key,
 		       ST_Y(location::geometry), ST_X(location::geometry),
-		       taken_at::text
+		       taken_at::text,
+		       initial_yaw, initial_pitch, initial_fov
 		FROM media
 		%s
 		ORDER BY RANDOM()
@@ -90,15 +94,18 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 	`, where)
 
 	var m struct {
-		ID         string   `json:"id"`
-		MediaType  string   `json:"media_type"`
-		StorageKey string   `json:"storage_key"`
-		Lat        *float64 `json:"lat"`
-		Lng        *float64 `json:"lng"`
-		TakenAt    *string  `json:"taken_at"`
+		ID           string   `json:"id"`
+		MediaType    string   `json:"media_type"`
+		StorageKey   string   `json:"storage_key"`
+		Lat          *float64 `json:"lat"`
+		Lng          *float64 `json:"lng"`
+		TakenAt      *string  `json:"taken_at"`
+		InitialYaw   *float64
+		InitialPitch *float64
+		InitialFov   *float64
 	}
 
-	err := h.db.QueryRow(r.Context(), sql, args...).Scan(&m.ID, &m.MediaType, &m.StorageKey, &m.Lat, &m.Lng, &m.TakenAt)
+	err := h.db.QueryRow(r.Context(), sql, args...).Scan(&m.ID, &m.MediaType, &m.StorageKey, &m.Lat, &m.Lng, &m.TakenAt, &m.InitialYaw, &m.InitialPitch, &m.InitialFov)
 	if err != nil {
 		http.Error(w, "no media available", http.StatusNotFound)
 		return
@@ -111,7 +118,14 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(roundMedia{ID: m.ID, MediaType: m.MediaType, URL: url})
+	json.NewEncoder(w).Encode(roundMedia{
+		ID:           m.ID,
+		MediaType:    m.MediaType,
+		URL:          url,
+		InitialYaw:   m.InitialYaw,
+		InitialPitch: m.InitialPitch,
+		InitialFov:   m.InitialFov,
+	})
 }
 
 type guessRequest struct {
