@@ -28,6 +28,7 @@ type mediaStorage interface {
 
 type MediaHandler struct {
 	db            mediaDB
+	pool          *pgxpool.Pool
 	storage       mediaStorage
 	registrar     *MediaRegistrar
 	matcherPool   matcherDB
@@ -40,6 +41,7 @@ type MediaHandler struct {
 func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Duration, tripGapHours int) *MediaHandler {
 	return &MediaHandler{
 		db:            db,
+		pool:          db,
 		storage:       s,
 		registrar:     &MediaRegistrar{db: db, storage: s},
 		matcherPool:   db,
@@ -51,16 +53,19 @@ func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Durat
 }
 
 type mediaItem struct {
-	ID         string     `json:"id"`
-	Filename   string     `json:"filename"`
-	MediaType  string     `json:"media_type"`
-	Lat        *float64   `json:"lat"`
-	Lng        *float64   `json:"lng"`
-	Confidence *float64   `json:"gps_confidence"`
-	GpsSource  *string    `json:"gps_source"`
-	TakenAt    *time.Time `json:"taken_at"`
-	StorageKey string     `json:"storage_key"`
-	TripID     *string    `json:"trip_id"`
+	ID           string     `json:"id"`
+	Filename     string     `json:"filename"`
+	MediaType    string     `json:"media_type"`
+	Lat          *float64   `json:"lat"`
+	Lng          *float64   `json:"lng"`
+	Confidence   *float64   `json:"gps_confidence"`
+	GpsSource    *string    `json:"gps_source"`
+	TakenAt      *time.Time `json:"taken_at"`
+	StorageKey   string     `json:"storage_key"`
+	TripID       *string    `json:"trip_id"`
+	InitialYaw   *float64   `json:"initial_yaw"`
+	InitialPitch *float64   `json:"initial_pitch"`
+	InitialFov   *float64   `json:"initial_fov"`
 }
 
 func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -125,7 +130,8 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 		SELECT id, filename, media_type,
 		       ST_Y(location::geometry) AS lat, ST_X(location::geometry) AS lng,
 		       gps_confidence, gps_source,
-		       taken_at, storage_key, trip_id
+		       taken_at, storage_key, trip_id,
+		       initial_yaw, initial_pitch, initial_fov
 		FROM media
 		%s
 		ORDER BY taken_at DESC NULLS LAST
@@ -144,7 +150,8 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 		var m mediaItem
 		var lat, lng *float64
 		if err := rows.Scan(&m.ID, &m.Filename, &m.MediaType, &lat, &lng,
-			&m.Confidence, &m.GpsSource, &m.TakenAt, &m.StorageKey, &m.TripID); err != nil {
+			&m.Confidence, &m.GpsSource, &m.TakenAt, &m.StorageKey, &m.TripID,
+			&m.InitialYaw, &m.InitialPitch, &m.InitialFov); err != nil {
 			continue
 		}
 		m.Lat = lat
@@ -208,6 +215,107 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"uploaded": uploaded})
+}
+
+type viewSettingsRequest struct {
+	InitialYaw   *float64 `json:"initial_yaw"`
+	InitialPitch *float64 `json:"initial_pitch"`
+	InitialFov   *float64 `json:"initial_fov"`
+}
+
+func (h *MediaHandler) UpdateViewSettings(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var req viewSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	_, err := h.db.Exec(r.Context(),
+		`UPDATE media SET initial_yaw=$1, initial_pitch=$2, initial_fov=$3 WHERE id=$4`,
+		req.InitialYaw, req.InitialPitch, req.InitialFov, id,
+	)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type orientationKeyframe struct {
+	Time  float64 `json:"time"`
+	Yaw   float64 `json:"yaw"`
+	Pitch float64 `json:"pitch"`
+	Fov   float64 `json:"fov"`
+}
+
+func (h *MediaHandler) GetKeyframes(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	rows, err := h.db.Query(r.Context(),
+		`SELECT time_seconds, yaw, pitch, fov FROM video_keyframes WHERE media_id=$1 ORDER BY time_seconds ASC`,
+		id,
+	)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	keyframes := []orientationKeyframe{}
+	for rows.Next() {
+		var kf orientationKeyframe
+		if err := rows.Scan(&kf.Time, &kf.Yaw, &kf.Pitch, &kf.Fov); err != nil {
+			continue
+		}
+		keyframes = append(keyframes, kf)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(keyframes)
+}
+
+func (h *MediaHandler) ReplaceKeyframes(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var keyframes []orientationKeyframe
+	if err := json.NewDecoder(r.Body).Decode(&keyframes); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := h.pool.Begin(r.Context())
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	if _, err := tx.Exec(r.Context(),
+		`DELETE FROM video_keyframes WHERE media_id=$1`, id,
+	); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	for _, kf := range keyframes {
+		if _, err := tx.Exec(r.Context(),
+			`INSERT INTO video_keyframes (media_id, time_seconds, yaw, pitch, fov) VALUES ($1, $2, $3, $4, $5)`,
+			id, kf.Time, kf.Yaw, kf.Pitch, kf.Fov,
+		); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *MediaHandler) GetURL(w http.ResponseWriter, r *http.Request) {
