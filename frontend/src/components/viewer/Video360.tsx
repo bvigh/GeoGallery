@@ -199,6 +199,17 @@ export default function Video360({
       }, COOLDOWN_MS);
     }
 
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      const editable = (e.target as HTMLElement)?.isContentEditable;
+      if (e.code === "Space" && tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT" && !editable) {
+        e.preventDefault();
+        if (video.paused) video.play(); else video.pause();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    mount.focus();
+
     const canvas = renderer.domElement;
     canvas.addEventListener("mousedown", onUserInteract);
     canvas.addEventListener("pointerdown", onUserInteract);
@@ -255,6 +266,7 @@ export default function Video360({
       video.removeEventListener("play", onPlay);
       video.removeEventListener("pause", onPause);
       video.removeEventListener("timeupdate", onTimeUpdate);
+      window.removeEventListener("keydown", onKeyDown);
       canvas.removeEventListener("mousedown", onUserInteract);
       canvas.removeEventListener("pointerdown", onUserInteract);
       canvas.removeEventListener("touchstart", onUserInteract);
@@ -320,7 +332,7 @@ export default function Video360({
   if (contained) {
     return (
       <div className="absolute inset-0 bg-black flex flex-col">
-        <div ref={mountRef} className="flex-1" />
+        <div ref={mountRef} className="flex-1 outline-none" tabIndex={-1} />
         {controls}
       </div>
     );
@@ -337,7 +349,7 @@ export default function Video360({
           ✕
         </button>
       </div>
-      <div ref={mountRef} className="flex-1" />
+      <div ref={mountRef} className="flex-1 outline-none" tabIndex={-1} />
       {controls}
     </div>
   );
