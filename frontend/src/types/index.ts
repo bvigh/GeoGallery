@@ -30,6 +30,7 @@ export interface Trip {
   end_date: string | null;
   media_count: number;
   cover_key: string | null;
+  user_edited: boolean;
 }
 
 export interface FilterState {

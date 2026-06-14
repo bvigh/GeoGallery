@@ -15,6 +15,20 @@ export function TripsPage() {
     api.get<Trip[]>("/trips").then((data) => setTrips(data ?? [])).catch(console.error);
   }, []);
 
+  const deleteTrip = async (id: string) => {
+    if (!confirm("Delete this trip? Its media will be unassigned and re-grouped automatically.")) return;
+    setTrips((prev) => prev.filter((t) => t.id !== id));
+    try {
+      await api.delete(`/trips/${id}`);
+      const refreshed = await api.get<Trip[]>("/trips");
+      setTrips(refreshed ?? []);
+    } catch (e) {
+      console.error(e);
+      const refreshed = await api.get<Trip[]>("/trips").catch(() => null);
+      if (refreshed) setTrips(refreshed);
+    }
+  };
+
   const saveUpdate = (id: string) => {
     setTrips((prev) =>
       prev.map((t) =>
@@ -84,18 +98,31 @@ export function TripsPage() {
             ) : (
               <div className="flex items-center justify-between">
                 <h2 className="font-medium">{trip.name}</h2>
-                <button
-                  className="text-xs text-muted-foreground hover:text-foreground"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setEditing(trip.id);
-                    setEditName(trip.name);
-                    setEditStartDate(trip.start_date ?? "");
-                    setEditEndDate(trip.end_date ?? "");
-                  }}
-                >
-                  Edit
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    className="text-xs text-muted-foreground hover:text-foreground"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditing(trip.id);
+                      setEditName(trip.name);
+                      setEditStartDate(trip.start_date ?? "");
+                      setEditEndDate(trip.end_date ?? "");
+                    }}
+                  >
+                    Edit
+                  </button>
+                  {trip.user_edited && (
+                    <button
+                      className="text-xs text-destructive hover:text-destructive/80"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteTrip(trip.id);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
               </div>
             )}
             <p className="mt-1 text-sm text-muted-foreground">
