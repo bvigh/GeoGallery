@@ -52,17 +52,17 @@ The following items complete the MLP:
 
 | **Feature** | **Status** | **Notes** |
 |---|---|---|
-| Map view with media markers | Scaffolded | Leaflet + react-leaflet, markers wired to `/api/media` |
-| Web upload + folder ingest | Scaffolded | `POST /api/media/upload` + `POST /api/ingest/scan` |
-| EXIF GPS + timestamp extraction | Scaffolded | `goexif` library, fallback to file mod time |
-| Trip auto-detection + rename | Scaffolded | SQL function `auto_detect_trips(gap_hours)` |
-| Game mode (location + date) | Scaffolded | `/api/game/round` + `/api/game/guess`, scoring in `handlers/game.go` |
-| GPS track import endpoint | **Missing** | `POST /api/gps-tracks/import` — accepts JSON/CSV from Google Timeline or Strava |
-| GPS matcher background job | **Missing** | After ingest: query `gps_tracks`, call `geo.Interpolate`, write back to `media.location` |
-| Trip trigger post-ingest | **Missing** | Call `auto_detect_trips(24)` automatically after scan completes |
-| 360° media rendering | **Missing** | Pannellum or Photo Sphere Viewer in frontend for `photo_360`/`video_360` types |
+| Map view with media markers | **Done** | Leaflet + react-leaflet, markers wired to `/api/media`; low-confidence markers styled orange |
+| Web upload + folder ingest | **Done** | `POST /api/media/upload` (streaming) + `POST /api/ingest/scan`; dedup by partial file hash |
+| EXIF GPS + timestamp extraction | **Done** | `goexif` library, fallback to file mod time (browser sends `file_mtime[]` for uploads) |
+| Trip auto-detection + rename + delete | **Done** | `RunTripDetect` called automatically after every ingest; rename sets `user_edited=true`; user-edited trips can be deleted via `DELETE /api/trips/{id}` |
+| Game mode (location + date) | **Done** | `/api/game/round` + `/api/game/guess`; location score relative to media collection spread; filter by date/trip/type |
+| GPS track import endpoint | **Done** | `POST /api/gps-tracks/import` — JSON array of track points; auto-runs GPS matcher after insert |
+| GPS matcher | **Done** | `RunGPSMatcher` in `handlers/gps_matcher.go`; runs after every ingest and GPS import; also triggerable via `POST /api/gps-matcher/run` |
+| 360° media rendering | **Done** | Photo Sphere Viewer (photo_360) and video viewer (video_360) in `frontend/src/components/viewer/`; per-media default view and keyframe settings |
+| Test suite | **Done** | Backend: geo, exif, GPS matcher, GPS tracks, media handler tests; Frontend: Vitest + RTL for MapPage, TripsPage, FilterPanel, MediaMap |
 
-Phase 1 is complete when all rows above are implemented and tested against the owner's own media library (thousands of files, mixed EXIF GPS coverage).
+**Phase 1 is complete.**
 
 #### Phase 2 — Sharing with Friends
 
@@ -107,7 +107,7 @@ Requirements are organized by feature group. Phase 1 MLP requirements are marked
 - Files up to 50GB upload without timeout.
 - EXIF GPS is extracted for images and videos with embedded coordinates.
 - Files with no EXIF GPS are inserted with `location = NULL` (not rejected).
-- Duplicate filenames (same `filename` value) are skipped without error.
+- Duplicate files (same partial hash: first + last 64 KB + file size) are skipped without error.
 - Upload response lists each filename with success/skip status.
 
 **Customer solution and architecture fit:**
@@ -137,7 +137,7 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 - A directory with 1000 mixed files ingests completely without timeout (async or streaming response).
 - Skipped files are counted and reported in the response.
 - Unsupported file types (`.txt`, `.pdf`) are silently ignored.
-- A second scan of the same directory ingests 0 new files and reports all as skipped.
+- A second scan of the same directory ingests 0 new files and reports all as skipped (hash-based dedup, not filename-based).
 
 **Deployment/failure conditions:** If MinIO upload fails for one file, the scan continues and reports the failure per-file. Partial progress is not rolled back.
 
@@ -265,7 +265,8 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 
 **Use cases and implementation scenarios:**
 - User opens the Game tab and clicks "Start Round".
-- `GET /api/game/round` returns a random media item with a resolved location, along with a presigned URL for the media file.
+- `GET /api/game/round` returns a random media item with a resolved location, a presigned URL, and `max_dist_km` (the 95th-percentile pairwise distance across the media collection, computed per round).
+- The game can be filtered by date range, trip, and media type via query parameters — the same filter set as `GET /api/media`.
 - The left half of the screen shows the photo or video. The right half shows a world map (Leaflet).
 - User clicks the map to place their location guess, and optionally enters a date guess.
 - User clicks "Submit Guess". `POST /api/game/guess` returns the actual location, actual date, distance error (km), date error (days), and component scores.
@@ -274,13 +275,13 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 
 **Acceptance criteria:**
 - A guess of exactly the correct location and date scores 5,000 points total.
-- A location guess 2,500 km away scores 0 location points; combined score is halved if date is correct.
+- Location score decays linearly to 0 at `max_dist_km` (relative to the media collection's geographic spread — not a fixed global constant). GPS confidence adjusts tolerance: lower confidence = more lenient scoring.
 - If no date is entered, only the location component counts (total = location score, not averaged).
 - Game is unplayable if no media has a resolved location; the start button shows a descriptive message.
 
-**Deployment/failure conditions:** If the API returns no media (empty library), the game displays "Upload and locate some media first."
+**Deployment/failure conditions:** If the API returns no media (empty library or filter matches nothing), the game displays "Upload and locate some media first."
 
-**Configuration/telemetry/management:** Score decay constants (2,500 km, 365 days) are hardcoded for Phase 1. Configurable in Phase 3.
+**Configuration/telemetry/management:** Date decay constant (365 days) is hardcoded. Location decay (`max_dist_km`) is computed dynamically from the collection.
 
 **Security considerations:** The game endpoint does not reveal the actual location until after the guess is submitted. The `GET /api/game/round` response contains only the media URL and type — no coordinates.
 
@@ -408,8 +409,9 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 |---|---|
 | Start all services | `docker compose up` |
 | Trigger folder ingest | `curl -X POST http://localhost:8080/api/ingest/scan` |
-| Import GPS tracks | `curl -X POST http://localhost:8080/api/gps-tracks/import -d @tracks.json` |
-| Run trip auto-detection | `psql $DATABASE_URL -c "SELECT auto_detect_trips(24);"` |
+| Import GPS tracks | `curl -X POST http://localhost:8080/api/gps-tracks/import -H "Content-Type: application/json" -d @tracks.json` |
+| Re-run GPS matcher | `curl -X POST http://localhost:8080/api/gps-matcher/run` |
+| Run trip auto-detection | Runs automatically after every ingest/import. No manual step needed. |
 | Reset all data | `docker compose down -v && docker compose up` |
 | Run DB migrations manually | `cd backend && go run ./cmd/server` (auto-runs on startup) |
 
