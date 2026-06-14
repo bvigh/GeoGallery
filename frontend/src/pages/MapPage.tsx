@@ -59,15 +59,28 @@ function FullscreenOverlay({
   onNext?: () => void;
   peerLabel?: string;
 }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
       if (e.key === "ArrowLeft") onPrev?.();
       if (e.key === "ArrowRight") onNext?.();
+      if (e.code === "Space" && item.media_type === "video") {
+        const target = e.target as HTMLElement;
+        if (target === videoRef.current) return; // native controls handle it
+        const tag = target?.tagName;
+        const editable = target?.isContentEditable;
+        if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT" && !editable) {
+          e.preventDefault();
+          const v = videoRef.current;
+          if (v) v.paused ? v.play() : v.pause();
+        }
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, onPrev, onNext]);
+  }, [onClose, onPrev, onNext, item.media_type]);
 
   if (item.media_type === "photo_360") {
     return (
@@ -132,10 +145,11 @@ function FullscreenOverlay({
       <div onClick={(e) => e.stopPropagation()}>
         {item.media_type === "video" ? (
           <video
+            ref={videoRef}
             src={url}
             controls
             autoPlay
-            className="max-h-[90vh] max-w-[90vw] rounded object-contain"
+            className="max-h-[90vh] max-w-[90vw] rounded object-contain outline-none"
           />
         ) : (
           <img
