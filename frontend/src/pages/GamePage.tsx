@@ -20,6 +20,25 @@ function ClickMarker({
   return null;
 }
 
+function MapResizer({
+  expanded,
+  onDragChange,
+}: {
+  expanded: boolean;
+  onDragChange: (dragging: boolean) => void;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    const id = setTimeout(() => map.invalidateSize(), 310);
+    return () => clearTimeout(id);
+  }, [expanded, map]);
+  useMapEvents({
+    movestart: () => onDragChange(true),
+    moveend: () => onDragChange(false),
+  });
+  return null;
+}
+
 function FitBounds({
   guess,
   actual,
@@ -64,6 +83,9 @@ export function GamePage() {
   const markerRef = useRef<L.Marker | null>(null);
   const [trips, setTrips] = useState<Trip[]>([]);
   const [filters, setFilters] = useState<FilterState>({ fromDate: "", toDate: "", tripIds: [], mediaTypes: [] });
+  const [mapHovered, setMapHovered] = useState(false);
+  const [mapDragging, setMapDragging] = useState(false);
+  const mapMouseLeft = useRef(false);
 
   useEffect(() => {
     api.get<Trip[]>("/trips").then(setTrips);
@@ -170,12 +192,33 @@ export function GamePage() {
           )}
 
           {/* Bottom-right overlay: guess map + controls */}
-          <div className="absolute bottom-4 right-4 z-[900] flex w-72 flex-col gap-2">
-            <div className="h-48 overflow-hidden rounded-xl shadow-2xl ring-1 ring-white/20">
+          <div
+            className="absolute bottom-4 right-4 z-[900] flex flex-col gap-2 transition-all duration-300"
+            style={{ width: mapHovered ? "576px" : "288px" }}
+            onMouseEnter={() => {
+              mapMouseLeft.current = false;
+              setMapHovered(true);
+            }}
+            onMouseLeave={() => {
+              mapMouseLeft.current = true;
+              if (!mapDragging) setMapHovered(false);
+            }}
+          >
+            <div
+              className="overflow-hidden rounded-xl shadow-2xl ring-1 ring-white/20 transition-all duration-300"
+              style={{ height: mapHovered ? "384px" : "192px" }}
+            >
               <MapContainer center={[20, 0]} zoom={2} className="h-full w-full">
                 <TileLayer
                   attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
                   url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                />
+                <MapResizer
+                  expanded={mapHovered}
+                  onDragChange={(dragging) => {
+                    setMapDragging(dragging);
+                    if (!dragging && mapMouseLeft.current) setMapHovered(false);
+                  }}
                 />
                 <ClickMarker onPick={(lat, lng) => setGuess({ lat, lng })} />
                 {guess && (
