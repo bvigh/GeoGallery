@@ -9,11 +9,12 @@ import (
 )
 
 type TripHandler struct {
-	db *pgxpool.Pool
+	db       *pgxpool.Pool
+	gapHours int
 }
 
-func NewTripHandler(db *pgxpool.Pool) *TripHandler {
-	return &TripHandler{db: db}
+func NewTripHandler(db *pgxpool.Pool, gapHours int) *TripHandler {
+	return &TripHandler{db: db, gapHours: gapHours}
 }
 
 type trip struct {
@@ -23,13 +24,15 @@ type trip struct {
 	EndDate    *string `json:"end_date"`
 	MediaCount int     `json:"media_count"`
 	CoverKey   *string `json:"cover_key"`
+	UserEdited bool    `json:"user_edited"`
 }
 
 func (h *TripHandler) List(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(), `
 		SELECT t.id, t.name, t.start_date::text, t.end_date::text,
 		       COUNT(m.id) AS media_count,
-		       MIN(m.storage_key) AS cover_key
+		       MIN(m.storage_key) AS cover_key,
+		       t.user_edited
 		FROM trips t
 		LEFT JOIN media m ON m.trip_id = t.id
 		GROUP BY t.id
@@ -44,7 +47,7 @@ func (h *TripHandler) List(w http.ResponseWriter, r *http.Request) {
 	var trips []trip
 	for rows.Next() {
 		var t trip
-		if err := rows.Scan(&t.ID, &t.Name, &t.StartDate, &t.EndDate, &t.MediaCount, &t.CoverKey); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.StartDate, &t.EndDate, &t.MediaCount, &t.CoverKey, &t.UserEdited); err != nil {
 			continue
 		}
 		trips = append(trips, t)
@@ -142,5 +145,57 @@ func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *TripHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	var userEdited bool
+	if err = tx.QueryRow(r.Context(),
+		`SELECT user_edited FROM trips WHERE id = $1`, id,
+	).Scan(&userEdited); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if !userEdited {
+		http.Error(w, "only user-edited trips can be deleted", http.StatusForbidden)
+		return
+	}
+
+	// Unassign media from this trip so auto-detection can reclaim it
+	if _, err = tx.Exec(r.Context(),
+		`UPDATE media SET trip_id = NULL WHERE trip_id = $1`, id,
+	); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if _, err = tx.Exec(r.Context(),
+		`DELETE FROM trips WHERE id = $1`, id,
+	); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if err = tx.Commit(r.Context()); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	// Re-run auto-detection so the freed media gets grouped
+	if err = RunTripDetect(r.Context(), h.db, h.gapHours); err != nil {
+		// Non-fatal: trip is deleted, detection can be retried
+		http.Error(w, "trip deleted but auto-detect failed", http.StatusInternalServerError)
+		return
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }

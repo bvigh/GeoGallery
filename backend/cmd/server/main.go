@@ -45,7 +45,7 @@ func main() {
 
 	matchWindow := time.Duration(cfg.GPSMatchWindowHours) * time.Hour
 	mediaH := handlers.NewMediaHandler(pool, s3Client, matchWindow, cfg.TripGapHours)
-	tripH := handlers.NewTripHandler(pool)
+	tripH := handlers.NewTripHandler(pool, cfg.TripGapHours)
 	gameH := handlers.NewGameHandler(pool, s3Client)
 	ingestH := handlers.NewIngestHandler(pool, s3Client, cfg.IngestWatchDir, matchWindow, cfg.TripGapHours)
 	gpsTrackH := handlers.NewGPSTrackHandler(pool, matchWindow)
@@ -70,6 +70,7 @@ func main() {
 
 		r.Get("/trips", tripH.List)
 		r.Patch("/trips/{id}", tripH.Update)
+		r.Delete("/trips/{id}", tripH.Delete)
 
 		r.Get("/game/round", gameH.NewRound)
 		r.Post("/game/guess", gameH.SubmitGuess)
