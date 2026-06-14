@@ -63,7 +63,7 @@ func ExtractExif(r io.Reader) ExifData {
 //  2. EXIF dimensions are present and aspect ratio is within 5% of 2:1 with
 //     width ≥ 3000px (rules out accidental landscape crops)
 func DetectMediaType(e ExifData, filename, ext string) string {
-	isVideo := isVideoExt(ext)
+	isVideo := IsVideoExt(ext)
 	if is360(e, filename) {
 		if isVideo {
 			return "video_360"
@@ -76,7 +76,22 @@ func DetectMediaType(e ExifData, filename, ext string) string {
 	return "photo"
 }
 
-func isVideoExt(ext string) bool {
+// DetectMediaTypeFromProbe applies a VideoProbeResult to override 360°
+// detection for videos where EXIF dimensions are absent. Equirectangular
+// spherical mapping metadata takes precedence; the 2:1 aspect ratio check
+// is used as a fallback when that tag is absent.
+func DetectMediaTypeFromProbe(e ExifData, filename, ext string, probe VideoProbeResult) string {
+	if probe.Equirectangular {
+		return "video_360"
+	}
+	if e.WidthPx == nil && probe.HeightPx > 0 {
+		e.WidthPx = &probe.WidthPx
+		e.HeightPx = &probe.HeightPx
+	}
+	return DetectMediaType(e, filename, ext)
+}
+
+func IsVideoExt(ext string) bool {
 	switch strings.ToLower(ext) {
 	case ".mp4", ".mov", ".avi", ".mkv":
 		return true

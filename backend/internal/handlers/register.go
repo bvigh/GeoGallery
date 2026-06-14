@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -68,10 +69,39 @@ func (r *MediaRegistrar) registerMedia(
 
 	ext := strings.ToLower(filepath.Ext(filename))
 	exifData := ingest.ExtractExif(bytes.NewReader(head))
-	mediaType := ingest.DetectMediaType(exifData, filename, ext)
 
-	tc := &tailCapture{r: body}
-	uploadBody := io.MultiReader(bytes.NewReader(head), tc)
+	var mediaType string
+	var tmpFile *os.File
+	if ingest.IsVideoExt(ext) && exifData.WidthPx == nil {
+		// Insta360 and similar cameras write moov at end of file, so EXIF
+		// dimension extraction from the head alone fails. Buffer the full
+		// video to a temp file so ffprobe can read the container metadata.
+		rest := io.MultiReader(bytes.NewReader(head), body)
+		var probe ingest.VideoProbeResult
+		tmpFile, probe, err = ingest.ProbeVideo(rest)
+		if err != nil {
+			return false, err
+		}
+		mediaType = ingest.DetectMediaTypeFromProbe(exifData, filename, ext, probe)
+	} else {
+		mediaType = ingest.DetectMediaType(exifData, filename, ext)
+	}
+
+	var uploadBody io.Reader
+	var tc *tailCapture
+	if tmpFile != nil {
+		defer func() {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+		}()
+		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+			return false, err
+		}
+		uploadBody = tmpFile
+	} else {
+		tc = &tailCapture{r: body}
+		uploadBody = io.MultiReader(bytes.NewReader(head), tc)
+	}
 
 	key := fmt.Sprintf("media/%d/%s", time.Now().UnixNano(), filename)
 	if err := r.storage.Upload(ctx, key, uploadBody, size, contentTypeFor(ext)); err != nil {
@@ -80,10 +110,10 @@ func (r *MediaRegistrar) registerMedia(
 
 	const chunk = 64 * 1024
 	var fileHash string
-	if size <= 2*chunk {
-		fileHash = partialHash(head)
-	} else {
+	if tc != nil && size > 2*chunk {
 		fileHash = partialHashStream(size, head[:chunk], tc.tail)
+	} else {
+		fileHash = partialHash(head)
 	}
 
 	takenAt := exifData.TakenAt
