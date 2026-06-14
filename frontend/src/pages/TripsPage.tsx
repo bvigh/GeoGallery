@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import type { Trip } from "../types";
 import { api } from "../api/client";
+import { TripGalleryOverlay } from "../components/TripGalleryOverlay";
 
 export function TripsPage() {
   const [trips, setTrips] = useState<Trip[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
+  const [selectedTrip, setSelectedTrip] = useState<Trip | null>(null);
   const [editName, setEditName] = useState("");
   const [editStartDate, setEditStartDate] = useState("");
   const [editEndDate, setEditEndDate] = useState("");
@@ -13,12 +15,7 @@ export function TripsPage() {
     api.get<Trip[]>("/trips").then((data) => setTrips(data ?? [])).catch(console.error);
   }, []);
 
-  const saveUpdate = async (id: string) => {
-    await api.patch(`/trips/${id}`, {
-      name: editName || undefined,
-      start_date: editStartDate || null,
-      end_date: editEndDate || null,
-    });
+  const saveUpdate = (id: string) => {
     setTrips((prev) =>
       prev.map((t) =>
         t.id === id
@@ -32,6 +29,11 @@ export function TripsPage() {
       )
     );
     setEditing(null);
+    api.patch(`/trips/${id}`, {
+      name: editName || undefined,
+      start_date: editStartDate || null,
+      end_date: editEndDate || null,
+    }).catch(console.error);
   };
 
   return (
@@ -44,7 +46,8 @@ export function TripsPage() {
         {trips.map((trip) => (
           <div
             key={trip.id}
-            className="rounded-lg border bg-card p-4 shadow-sm"
+            className="rounded-lg border bg-card p-4 shadow-sm cursor-pointer hover:bg-accent transition-colors"
+            onClick={() => editing !== trip.id && setSelectedTrip(trip)}
           >
             {editing === trip.id ? (
               <div className="flex flex-col gap-2">
@@ -83,7 +86,8 @@ export function TripsPage() {
                 <h2 className="font-medium">{trip.name}</h2>
                 <button
                   className="text-xs text-muted-foreground hover:text-foreground"
-                  onClick={() => {
+                  onClick={(e) => {
+                    e.stopPropagation();
                     setEditing(trip.id);
                     setEditName(trip.name);
                     setEditStartDate(trip.start_date ?? "");
@@ -103,6 +107,12 @@ export function TripsPage() {
           </div>
         ))}
       </div>
+      {selectedTrip && (
+        <TripGalleryOverlay
+          trip={selectedTrip}
+          onClose={() => setSelectedTrip(null)}
+        />
+      )}
     </div>
   );
 }
