@@ -91,6 +91,21 @@ func (r *MediaRegistrar) registerMedia(
 	var uploadBody io.Reader
 	var tc *tailCapture
 	if tmpFile != nil {
+		if probe.NeedsTranscode() {
+			slog.Info("register: transcoding to H.264", "filename", filename, "codec", probe.CodecName)
+			transcoded, terr := ingest.TranscodeH264(tmpFile.Name())
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+			if terr != nil {
+				slog.Error("register: transcode failed", "filename", filename, "err", terr)
+				return false, terr
+			}
+			tmpFile = transcoded
+			// Update size from the transcoded file so the S3 upload length is correct.
+			if fi, ferr := tmpFile.Stat(); ferr == nil {
+				size = fi.Size()
+			}
+		}
 		defer func() {
 			tmpFile.Close()
 			os.Remove(tmpFile.Name())

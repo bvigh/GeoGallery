@@ -16,6 +16,58 @@ type VideoProbeResult struct {
 	HeightPx        int
 	Equirectangular bool
 	CreatedAt       *time.Time
+	CodecName       string // e.g. "h264", "mpeg4", "hevc"
+	CodecTag        string // e.g. "avc1", "mp4v", "hvc1"
+}
+
+// NeedsTranscode reports whether the video requires transcoding to H.264 for
+// browser playback. Browsers only support H.264 (avc1), H.265/HEVC, VP8/VP9,
+// and AV1; legacy codecs like MPEG-4 Part 2 (mp4v) are not decoded.
+func (p VideoProbeResult) NeedsTranscode() bool {
+	switch p.CodecName {
+	case "h264", "hevc", "vp8", "vp9", "av1":
+		return false
+	case "":
+		return false // unknown / no video stream — don't attempt transcode
+	default:
+		return true
+	}
+}
+
+// TranscodeH264 re-encodes the file at srcPath to a new temp file using
+// H.264 video + copy audio, with -movflags +faststart so the moov atom is
+// at the front of the file (required for browser streaming). The caller is
+// responsible for closing and removing the returned *os.File.
+func TranscodeH264(srcPath string) (*os.File, error) {
+	out, err := os.CreateTemp("", "geogallery-transcode-*.mp4")
+	if err != nil {
+		return nil, fmt.Errorf("transcode: create temp file: %w", err)
+	}
+	outPath := out.Name()
+
+	cmd := exec.Command(
+		"ffmpeg",
+		"-y",
+		"-i", srcPath,
+		"-c:v", "libx264",
+		"-preset", "fast",
+		"-crf", "23",
+		"-c:a", "copy",
+		"-movflags", "+faststart",
+		outPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		out.Close()
+		os.Remove(outPath)
+		return nil, fmt.Errorf("transcode: ffmpeg: %w\n%s", err, output)
+	}
+
+	if _, err := out.Seek(0, io.SeekStart); err != nil {
+		out.Close()
+		os.Remove(outPath)
+		return nil, fmt.Errorf("transcode: seek: %w", err)
+	}
+	return out, nil
 }
 
 // ProbeVideo writes the reader to a temp file, runs ffprobe, and returns
@@ -54,9 +106,11 @@ func ProbeVideo(r io.Reader) (*os.File, VideoProbeResult, error) {
 func parseProbeOutput(out []byte) VideoProbeResult {
 	var parsed struct {
 		Streams []struct {
-			Width    int `json:"width"`
-			Height   int `json:"height"`
-			SideData []struct {
+			Width     int    `json:"width"`
+			Height    int    `json:"height"`
+			CodecName string `json:"codec_name"`
+			CodecTag  string `json:"codec_tag_string"`
+			SideData  []struct {
 				Type       string `json:"side_data_type"`
 				Projection string `json:"projection"`
 			} `json:"side_data_list"`
@@ -92,5 +146,7 @@ func parseProbeOutput(out []byte) VideoProbeResult {
 		HeightPx:        s.Height,
 		Equirectangular: equirect,
 		CreatedAt:       createdAt,
+		CodecName:       s.CodecName,
+		CodecTag:        s.CodecTag,
 	}
 }
