@@ -173,6 +173,8 @@ func contentTypeFor(ext string) string {
 		return "video/mp4"
 	case ".mov":
 		return "video/quicktime"
+	case ".3gp":
+		return "video/3gpp"
 	default:
 		return "application/octet-stream"
 	}

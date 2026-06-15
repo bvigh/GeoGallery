@@ -26,6 +26,11 @@ func TestDetectMediaType_Mp4_IsVideo(t *testing.T) {
 	assert.Equal(t, "video", result)
 }
 
+func TestDetectMediaType_3gp_IsVideo(t *testing.T) {
+	result := DetectMediaType(ExifData{}, "clip.3gp", ".3gp")
+	assert.Equal(t, "video", result)
+}
+
 func TestDetectMediaType_NonSquareRatio_IsPhoto(t *testing.T) {
 	w, h := 3000, 1600
 	e := ExifData{WidthPx: &w, HeightPx: &h}
