@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -134,6 +135,7 @@ func (h *GPSTrackHandler) Import(w http.ResponseWriter, r *http.Request) {
 
 		tag, err := h.db.Exec(ctx, sb.String(), args...)
 		if err != nil {
+			slog.Error("gps-tracks: batch insert failed", "batch_start", start, "err", err)
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
@@ -144,6 +146,7 @@ func (h *GPSTrackHandler) Import(w http.ResponseWriter, r *http.Request) {
 
 	if len(valid) > 0 {
 		if err := h.runMatcher(ctx, h.matcherPool, h.matchWindow, true); err != nil {
+			slog.Error("gps-tracks: GPS matcher failed after import", "err", err)
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}

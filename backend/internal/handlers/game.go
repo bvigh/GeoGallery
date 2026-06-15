@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"strings"
@@ -115,12 +116,14 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 
 	url, err := h.storage.PresignGet(r.Context(), m.StorageKey)
 	if err != nil {
+		slog.Error("game: presign failed", "id", m.ID, "key", m.StorageKey, "err", err)
 		http.Error(w, "presign error", http.StatusInternalServerError)
 		return
 	}
 
 	maxDistKm, err := h.computeMaxDistKm(r.Context(), conds, args)
 	if err != nil {
+		slog.Warn("game: max_dist_km computation failed, using default", "err", err)
 		maxDistKm = 1.0
 	}
 
@@ -200,6 +203,7 @@ func (h *GameHandler) SubmitGuess(w http.ResponseWriter, r *http.Request) {
 		FROM media WHERE id=$1
 	`, req.MediaID).Scan(&actual.Lat, &actual.Lng, &actual.TakenAt, &actual.GpsConfidence)
 	if err != nil {
+		slog.Error("game: submit guess media lookup failed", "media_id", req.MediaID, "err", err)
 		http.Error(w, "media not found", http.StatusNotFound)
 		return
 	}

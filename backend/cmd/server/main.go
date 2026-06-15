@@ -3,9 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"codeberg.org/bvigh/geogallery/internal/config"
@@ -21,27 +22,39 @@ import (
 func main() {
 	_ = godotenv.Load()
 
+	// Setup logging first so all startup errors are structured.
+	setupLogger(os.Getenv("LOG_LEVEL"), os.Getenv("LOG_FORMAT"))
+
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		slog.Error("config load failed", "err", err)
+		os.Exit(1)
 	}
 
 	pool, err := db.Connect(context.Background(), cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("db connect: %v", err)
+		slog.Error("db connect failed", "err", err)
+		os.Exit(1)
 	}
 	defer pool.Close()
 
 	migrationsPath := envOr("MIGRATIONS_PATH", "./migrations")
 	if err := db.RunMigrations(cfg.DatabaseURL, migrationsPath); err != nil {
-		log.Fatalf("migrations: %v", err)
+		slog.Error("migrations failed", "err", err)
+		os.Exit(1)
 	}
-	log.Println("migrations applied")
+	slog.Info("migrations applied")
 
 	s3Client, err := storage.NewClient(cfg)
 	if err != nil {
-		log.Fatalf("s3 client: %v", err)
+		slog.Error("s3 client init failed", "err", err)
+		os.Exit(1)
 	}
+	if err := s3Client.Ping(context.Background()); err != nil {
+		slog.Error("s3 connectivity check failed", "endpoint", cfg.S3Endpoint, "bucket", cfg.S3Bucket, "err", err)
+		os.Exit(1)
+	}
+	slog.Info("s3 connected", "endpoint", cfg.S3Endpoint, "bucket", cfg.S3Bucket)
 
 	matchWindow := time.Duration(cfg.GPSMatchWindowHours) * time.Hour
 	mediaH := handlers.NewMediaHandler(pool, s3Client, matchWindow, cfg.TripGapHours)
@@ -87,10 +100,33 @@ func main() {
 	})
 
 	addr := fmt.Sprintf(":%s", cfg.ServerPort)
-	log.Printf("server listening on %s", addr)
+	slog.Info("server listening", "addr", addr)
 	if err := http.ListenAndServe(addr, r); err != nil {
-		log.Fatalf("server: %v", err)
+		slog.Error("server failed", "err", err)
+		os.Exit(1)
 	}
+}
+
+func setupLogger(level, format string) {
+	var lvl slog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn", "warning":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	opts := &slog.HandlerOptions{Level: lvl}
+	var handler slog.Handler
+	if strings.ToLower(format) == "json" {
+		handler = slog.NewJSONHandler(os.Stderr, opts)
+	} else {
+		handler = slog.NewTextHandler(os.Stderr, opts)
+	}
+	slog.SetDefault(slog.New(handler))
 }
 
 func envOr(key, fallback string) string {

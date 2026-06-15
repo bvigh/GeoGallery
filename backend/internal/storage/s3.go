@@ -77,3 +77,13 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 	})
 	return err
 }
+
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.s3.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(c.bucket),
+	})
+	if err != nil {
+		return fmt.Errorf("bucket %s not accessible: %w", c.bucket, err)
+	}
+	return nil
+}

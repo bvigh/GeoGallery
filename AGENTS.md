@@ -68,6 +68,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 - Handler structs hold deps (`*pgxpool.Pool`, `*storage.Client`). Construct with `New*Handler(...)`.
 - New routes: register in `main.go` inside `r.Route("/api", ...)`.
 - New config values: add to `config.go` with a default that works locally without editing `.env`.
+- Logging: use `log/slog` (stdlib). `slog.SetDefault` is called in `main.go` — call `slog.Error/Warn/Info/Debug` directly anywhere in the backend. Always log before returning a 500: `slog.Error("context: what failed", "err", err)`. Per-item loops that continue on error must log at Error level, not silently skip.
 - Migrations: `000003_description.up.sql` / `.down.sql` — **never edit existing migration files**.
 - PostGIS geometry: `GEOGRAPHY(POINT, 4326)`, `ST_MakePoint(lng, lat)` (longitude first!), read back with `ST_Y` (lat) and `ST_X` (lng).
 - S3 keys: `media/{unix_nano}/{filename}`. Serve via presigned URLs only — never expose raw MinIO URLs to the frontend.
@@ -120,6 +121,8 @@ INGEST_WATCH_DIR          # default: ./ingest
 MIGRATIONS_PATH           # default: ./migrations (read in main.go, not config.go)
 GPS_MATCH_WINDOW_HOURS    # default: 1 — max hours to look for bracketing GPS track points
 TRIP_GAP_HOURS            # default: 24 — time gap (hours) that splits media into separate trips
+LOG_LEVEL                 # default: info — one of: debug, info, warn, error
+LOG_FORMAT                # default: text — text (human-readable) or json (structured/machine-parseable)
 ```
 
 Copy `.env.example` to `backend/.env` for local development.

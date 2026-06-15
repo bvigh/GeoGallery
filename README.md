@@ -16,7 +16,7 @@ A personal map-based media gallery and GeoGuessr-like game for reviewing trip ph
 |---|---|
 | Frontend | React 18 + Vite + TypeScript + shadcn/ui + Tailwind |
 | Map | Leaflet + OpenStreetMap |
-| Backend | Go 1.23 + chi router |
+| Backend | Go 1.24 + chi router |
 | Database | PostgreSQL 16 + PostGIS 3.4 |
 | Object storage | MinIO AIStore (S3-compatible, local) |
 | Migrations | golang-migrate |
@@ -25,7 +25,7 @@ A personal map-based media gallery and GeoGuessr-like game for reviewing trip ph
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose v2
-- Go 1.23+ (local dev only)
+- Go 1.24+ (local dev only)
 - Node.js 22+ (local dev only)
 - MinIO AIStore license file (see [MinIO AIStore note](#minio-aistore-note))
 
@@ -188,3 +188,5 @@ All variables have defaults that work out of the box. Copy `.env.example` to `.e
 | `FRONTEND_PORT` | `5173` | Frontend container port |
 | `GPS_MATCH_WINDOW_HOURS` | `1` | Max hours to search for bracketing GPS track points |
 | `TRIP_GAP_HOURS` | `24` | Time gap (hours) that splits media into separate trips |
+| `LOG_LEVEL` | `info` | Backend log level: `debug`, `info`, `warn`, `error` |
+| `LOG_FORMAT` | `text` | Backend log format: `text` (human-readable) or `json` (structured) |
