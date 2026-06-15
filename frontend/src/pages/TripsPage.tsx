@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import type { Trip } from "../types";
 import { api } from "../api/client";
+
+const byStartDateDesc = (a: Trip, b: Trip): number => {
+  if (a.start_date === null && b.start_date === null) return 0;
+  if (a.start_date === null) return 1;
+  if (b.start_date === null) return -1;
+  return b.start_date.localeCompare(a.start_date);
+};
 import { TripGalleryOverlay } from "../components/TripGalleryOverlay";
 
 export function TripsPage() {
@@ -31,16 +38,18 @@ export function TripsPage() {
 
   const saveUpdate = (id: string) => {
     setTrips((prev) =>
-      prev.map((t) =>
-        t.id === id
-          ? {
-              ...t,
-              name: editName || t.name,
-              start_date: editStartDate || null,
-              end_date: editEndDate || null,
-            }
-          : t
-      )
+      prev
+        .map((t) =>
+          t.id === id
+            ? {
+                ...t,
+                name: editName || t.name,
+                start_date: editStartDate || null,
+                end_date: editEndDate || null,
+              }
+            : t
+        )
+        .sort(byStartDateDesc)
     );
     setEditing(null);
     api.patch(`/trips/${id}`, {
