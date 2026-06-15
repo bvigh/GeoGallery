@@ -72,12 +72,12 @@ func (r *MediaRegistrar) registerMedia(
 
 	var mediaType string
 	var tmpFile *os.File
+	var probe ingest.VideoProbeResult
 	if ingest.IsVideoExt(ext) && exifData.WidthPx == nil {
 		// Insta360 and similar cameras write moov at end of file, so EXIF
 		// dimension extraction from the head alone fails. Buffer the full
 		// video to a temp file so ffprobe can read the container metadata.
 		rest := io.MultiReader(bytes.NewReader(head), body)
-		var probe ingest.VideoProbeResult
 		tmpFile, probe, err = ingest.ProbeVideo(rest)
 		if err != nil {
 			return false, err
@@ -117,6 +117,9 @@ func (r *MediaRegistrar) registerMedia(
 	}
 
 	takenAt := exifData.TakenAt
+	if takenAt == nil {
+		takenAt = probe.CreatedAt
+	}
 	if takenAt == nil {
 		takenAt = fallbackMtime
 	}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/labstack/gommon/log"
 )
@@ -14,6 +15,7 @@ type VideoProbeResult struct {
 	WidthPx         int
 	HeightPx        int
 	Equirectangular bool
+	CreatedAt       *time.Time
 }
 
 // ProbeVideo writes the reader to a temp file, runs ffprobe, and returns
@@ -37,6 +39,7 @@ func ProbeVideo(r io.Reader) (*os.File, VideoProbeResult, error) {
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_streams",
+		"-show_format",
 		"-select_streams", "v:0",
 		tmp.Name(),
 	).Output()
@@ -45,6 +48,10 @@ func ProbeVideo(r io.Reader) (*os.File, VideoProbeResult, error) {
 		return tmp, VideoProbeResult{}, nil
 	}
 
+	return tmp, parseProbeOutput(out), nil
+}
+
+func parseProbeOutput(out []byte) VideoProbeResult {
 	var parsed struct {
 		Streams []struct {
 			Width    int `json:"width"`
@@ -54,9 +61,14 @@ func ProbeVideo(r io.Reader) (*os.File, VideoProbeResult, error) {
 				Projection string `json:"projection"`
 			} `json:"side_data_list"`
 		} `json:"streams"`
+		Format struct {
+			Tags struct {
+				CreationTime string `json:"creation_time"`
+			} `json:"tags"`
+		} `json:"format"`
 	}
 	if err := json.Unmarshal(out, &parsed); err != nil || len(parsed.Streams) == 0 {
-		return tmp, VideoProbeResult{}, nil
+		return VideoProbeResult{}
 	}
 
 	s := parsed.Streams[0]
@@ -68,9 +80,17 @@ func ProbeVideo(r io.Reader) (*os.File, VideoProbeResult, error) {
 		}
 	}
 
-	return tmp, VideoProbeResult{
-		WidthPx:        s.Width,
-		HeightPx:       s.Height,
+	var createdAt *time.Time
+	if raw := parsed.Format.Tags.CreationTime; raw != "" {
+		if t, err := time.Parse(time.RFC3339, raw); err == nil {
+			createdAt = &t
+		}
+	}
+
+	return VideoProbeResult{
+		WidthPx:         s.Width,
+		HeightPx:        s.Height,
 		Equirectangular: equirect,
-	}, nil
+		CreatedAt:       createdAt,
+	}
 }
