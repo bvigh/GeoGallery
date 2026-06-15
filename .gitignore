@@ -42,3 +42,7 @@ tsconfig.tsbuildinfo
 .DS_Store
 
 ingest/*
+
+# temporary artifacts produced by agents
+plan.md
+research.md

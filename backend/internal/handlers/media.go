@@ -360,6 +360,90 @@ func (h *MediaHandler) GetURL(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"url": url})
 }
 
+type locationRequest struct {
+	Lat float64 `json:"lat"`
+	Lng float64 `json:"lng"`
+}
+
+func (h *MediaHandler) UpdateLocation(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var req locationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if req.Lat < -90 || req.Lat > 90 {
+		http.Error(w, "lat out of range", http.StatusBadRequest)
+		return
+	}
+	if req.Lng < -180 || req.Lng > 180 {
+		http.Error(w, "lng out of range", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := h.pool.Begin(r.Context())
+	if err != nil {
+		slog.Error("media: update location begin tx failed", "id", id, "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	var takenAt *time.Time
+	if err := tx.QueryRow(r.Context(),
+		`SELECT taken_at FROM media WHERE id = $1`, id,
+	).Scan(&takenAt); err != nil {
+		if err == pgx.ErrNoRows {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("media: update location query failed", "id", id, "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := tx.Exec(r.Context(),
+		`UPDATE media
+		 SET location       = ST_SetSRID(ST_MakePoint($1, $2), 4326),
+		     gps_source     = 'manual',
+		     gps_confidence = 1.0
+		 WHERE id = $3`,
+		req.Lng, req.Lat, id,
+	); err != nil {
+		slog.Error("media: update location update failed", "id", id, "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if takenAt != nil {
+		if _, err := tx.Exec(r.Context(),
+			`INSERT INTO gps_tracks (source, recorded_at, location)
+			 VALUES ('manual', $1, ST_SetSRID(ST_MakePoint($2, $3), 4326))
+			 ON CONFLICT (source, recorded_at) DO UPDATE SET location = EXCLUDED.location`,
+			*takenAt, req.Lng, req.Lat,
+		); err != nil {
+			slog.Error("media: update location gps_tracks insert failed", "id", id, "err", err)
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		slog.Error("media: update location commit failed", "id", id, "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if takenAt != nil {
+		if err := h.runMatcher(r.Context(), h.matcherPool, h.matchWindow, true); err != nil {
+			slog.Error("media: GPS matcher failed after manual location update", "id", id, "err", err)
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *MediaHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 

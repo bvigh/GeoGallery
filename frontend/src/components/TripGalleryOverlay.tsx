@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { Trash2 } from "lucide-react";
+import { MapPin, Trash2 } from "lucide-react";
 import { MapContainer, TileLayer, Marker, useMap, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import type { MediaItem, Trip } from "../types";
 import { api } from "../api/client";
+import { EditLocationModal } from "./EditLocationModal";
 import Panorama360 from "./viewer/Panorama360";
 import Video360 from "./viewer/Video360";
 import "leaflet/dist/leaflet.css";
@@ -59,7 +60,7 @@ const currentMarkerIcon = L.divIcon({
 
 function markerIcon(item: MediaItem) {
   const color =
-    item.gps_confidence !== null && item.gps_confidence < 0.5 ? "#f97316" : "#3b82f6";
+    item.gps_confidence !== null && item.gps_confidence < 0.9 ? "#f97316" : "#3b82f6";
   return L.divIcon({
     className: "",
     html: `<div style="width:12px;height:12px;border-radius:50%;background:${color};border:2px solid white;box-shadow:0 1px 3px rgba(0,0,0,.4)"></div>`,
@@ -172,6 +173,7 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentUrl, setCurrentUrl] = useState<string | null>(null);
   const [urlLoading, setUrlLoading] = useState(false);
+  const [editingLocation, setEditingLocation] = useState(false);
   const [mapMinimized, setMapMinimized] = useState(false);
   const [mapHovered, setMapHovered] = useState(false);
   const [mapDragging, setMapDragging] = useState(false);
@@ -266,6 +268,18 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
     if (index !== -1) goTo(index);
   }
 
+  function handleLocationSaved(lat: number, lng: number) {
+    if (!currentItem) return;
+    setItems((prev) =>
+      prev.map((m) =>
+        m.id === currentItem.id
+          ? { ...m, lat, lng, gps_source: "manual" as const, gps_confidence: 1.0 }
+          : m
+      )
+    );
+    setEditingLocation(false);
+  }
+
   async function handleDeleteMedia() {
     const item = items[currentIndex];
     if (!item) return;
@@ -347,6 +361,16 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
       <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
         {currentItem && (
           <button
+            className="text-white/60 hover:text-white"
+            onClick={() => setEditingLocation(true)}
+            aria-label="Edit GPS location"
+            title="Edit GPS location"
+          >
+            <MapPin className="h-5 w-5" />
+          </button>
+        )}
+        {currentItem && (
+          <button
             className="text-white/60 hover:text-red-400"
             onClick={handleDeleteMedia}
             aria-label="Delete media"
@@ -368,6 +392,14 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
       <div className="absolute left-4 top-4 z-10 text-white text-sm font-medium bg-black/50 px-3 py-1 rounded-full pointer-events-none">
         {trip.name}
       </div>
+
+      {editingLocation && currentItem && (
+        <EditLocationModal
+          item={currentItem}
+          onClose={() => setEditingLocation(false)}
+          onSaved={handleLocationSaved}
+        />
+      )}
 
       {/* Media area */}
       <div className="relative flex-1">

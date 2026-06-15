@@ -77,6 +77,7 @@ func main() {
 		r.Get("/media", mediaH.List)
 		r.Post("/media/upload", mediaH.Upload)
 		r.Get("/media/{id}/url", mediaH.GetURL)
+		r.Patch("/media/{id}/location", mediaH.UpdateLocation)
 		r.Patch("/media/{id}/view-settings", mediaH.UpdateViewSettings)
 		r.Get("/media/{id}/keyframes", mediaH.GetKeyframes)
 		r.Put("/media/{id}/keyframes", mediaH.ReplaceKeyframes)
