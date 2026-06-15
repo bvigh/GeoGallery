@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bvigh/geogallery/internal/geo"
-	"github.com/bvigh/geogallery/internal/storage"
+	"codeberg.org/bvigh/geogallery/internal/geo"
+	"codeberg.org/bvigh/geogallery/internal/storage"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -171,14 +171,14 @@ type guessRequest struct {
 }
 
 type guessResult struct {
-	ActualLat    float64  `json:"actual_lat"`
-	ActualLng    float64  `json:"actual_lng"`
-	ActualDate   *string  `json:"actual_date"`
-	DistanceKm   float64  `json:"distance_km"`
-	DateDiffDays *float64 `json:"date_diff_days"`
-	LocationScore float64 `json:"location_score"`
+	ActualLat     float64  `json:"actual_lat"`
+	ActualLng     float64  `json:"actual_lng"`
+	ActualDate    *string  `json:"actual_date"`
+	DistanceKm    float64  `json:"distance_km"`
+	DateDiffDays  *float64 `json:"date_diff_days"`
+	LocationScore float64  `json:"location_score"`
 	TimeScore     *float64 `json:"time_score"`
-	TotalScore   float64  `json:"total_score"`
+	TotalScore    float64  `json:"total_score"`
 }
 
 func (h *GameHandler) SubmitGuess(w http.ResponseWriter, r *http.Request) {

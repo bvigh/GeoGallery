@@ -70,13 +70,13 @@ func TestIsValidGPS(t *testing.T) {
 		valid    bool
 	}{
 		{0, 0, false},
-		{0.001, 0.001, false},  // within null-island threshold
-		{0.02, 0, true},        // only one axis needs to exceed threshold
+		{0.001, 0.001, false}, // within null-island threshold
+		{0.02, 0, true},       // only one axis needs to exceed threshold
 		{0, 0.02, true},
-		{47.5, 19.0, true},     // Budapest
-		{-33.9, 18.4, true},    // Cape Town
-		{91, 0, false},         // lat out of range
-		{0, 181, false},        // lng out of range
+		{47.5, 19.0, true},  // Budapest
+		{-33.9, 18.4, true}, // Cape Town
+		{91, 0, false},      // lat out of range
+		{0, 181, false},     // lng out of range
 	}
 	for _, c := range cases {
 		got := IsValidGPS(c.lat, c.lng)

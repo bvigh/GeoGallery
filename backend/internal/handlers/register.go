@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bvigh/geogallery/internal/ingest"
+	"codeberg.org/bvigh/geogallery/internal/ingest"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
