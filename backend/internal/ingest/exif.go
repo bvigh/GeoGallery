@@ -8,7 +8,7 @@ import (
 
 	"github.com/rwcarlsen/goexif/exif"
 
-	"github.com/bvigh/geogallery/internal/geo"
+	"codeberg.org/bvigh/geogallery/internal/geo"
 )
 
 type ExifData struct {

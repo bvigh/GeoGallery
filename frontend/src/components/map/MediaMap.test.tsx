@@ -15,6 +15,7 @@ vi.mock("react-leaflet", () => ({
     </div>
   ),
   Popup: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  useMap: () => ({ addControl: vi.fn(), removeControl: vi.fn() }),
 }));
 
 vi.mock("@changey/react-leaflet-markercluster", () => ({
@@ -24,7 +25,10 @@ vi.mock("@changey/react-leaflet-markercluster", () => ({
 }));
 
 vi.mock("leaflet", () => ({
-  default: { divIcon: vi.fn(() => ({})) },
+  default: {
+    divIcon: vi.fn(() => ({})),
+    control: { zoom: vi.fn(() => ({ addTo: vi.fn(), remove: vi.fn() })) },
+  },
 }));
 
 function makeItem(overrides: Partial<MediaItem> = {}): MediaItem {

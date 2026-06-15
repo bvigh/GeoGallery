@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bvigh/geogallery/internal/storage"
+	"codeberg.org/bvigh/geogallery/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
