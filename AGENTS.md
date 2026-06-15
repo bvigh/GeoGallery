@@ -52,6 +52,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `PATCH` | `/api/media/{id}/view-settings` | Update 360° default view (`initial_yaw`, `initial_pitch`, `initial_fov`) |
 | `GET` | `/api/media/{id}/keyframes` | Get video orientation keyframes |
 | `PUT` | `/api/media/{id}/keyframes` | Replace all keyframes for a video |
+| `DELETE` | `/api/media/{id}` | Delete media from DB and MinIO (keyframes cascade); S3 delete is best-effort, logged on failure |
 | `GET` | `/api/trips` | List trips with media count + cover key |
 | `PATCH` | `/api/trips/{id}` | Rename a trip (`{"name": "..."}`) — sets `user_edited = true` |
 | `DELETE` | `/api/trips/{id}` | Delete a trip (only `user_edited = true` trips); unassigns media for re-detection |
@@ -73,6 +74,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 - Deduplication: `registerMedia` hashes first + last 64 KB of each file (`file_hash`). `ON CONFLICT (file_hash) DO NOTHING` — re-uploading or re-scanning the same file is always safe.
 - Auto-run order after ingest: `RunGPSMatcher` → `RunTripDetect`. Both are called at the end of scan and upload.
 - Trip deletion: `DELETE /api/trips/{id}` is only allowed for `user_edited = true` trips. Auto-detected trips are protected; renaming a trip flips it to `user_edited = true`.
+- Media deletion: `DELETE /api/media/{id}` removes the DB row (cascades to `video_keyframes`) then best-effort deletes the S3 object. S3 failure is logged but does not roll back the DB transaction — the DB is the source of truth.
 
 ## Frontend Conventions
 
@@ -160,6 +162,7 @@ GPS resolution priority: EXIF → timestamp-interpolated from `gps_tracks` → n
 - `internal/handlers/gps_matcher_test.go`, `gps_matcher_handler_test.go` — GPS matcher logic and handler
 - `internal/handlers/gps_tracks_test.go` — GPS track import endpoint
 - `internal/handlers/media_test.go`, `upload_scan_matcher_test.go` — media upload/scan/dedup flow
+- `internal/handlers/media_delete_test.go` — media delete handler (success, not-found, db-error)
 - `internal/handlers/exif_gps_track_test.go` — EXIF GPS track insertion
 - Use `testing` + [testify](https://github.com/stretchr/testify) (`assert`/`require`). Test files live alongside source.
 - Pure logic tests use no external deps. Handler tests use `net/http/httptest`.

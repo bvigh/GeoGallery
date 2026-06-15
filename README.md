@@ -5,6 +5,7 @@ A personal map-based media gallery and GeoGuessr-like game for reviewing trip ph
 - Browse media on an interactive map (Leaflet/OSM) with markers at each recording location
 - GPS resolved from EXIF metadata, or interpolated from imported external tracks (Google Timeline, Strava, etc.) using timestamp-based matching with confidence scoring
 - Auto-detected trips grouped by time gaps, with manual rename and deletion
+- Delete individual media items from both the map and trips views (removes from DB and object storage)
 - Game mode: guess where and when a photo/video was taken, scored on distance and date accuracy (relative to your media's geographic spread)
 - Filter media by date range, trip, and media type on both the map and game pages
 - 360° photo and video support with per-media default view and keyframe settings
@@ -109,6 +110,7 @@ geogallery/
 | `PATCH` | `/api/media/{id}/view-settings` | Set 360° default view (`initial_yaw`, `initial_pitch`, `initial_fov`) |
 | `GET` | `/api/media/{id}/keyframes` | Get video orientation keyframes |
 | `PUT` | `/api/media/{id}/keyframes` | Replace all keyframes for a video |
+| `DELETE` | `/api/media/{id}` | Delete a media item from DB and object storage |
 | `GET` | `/api/trips` | List trips |
 | `PATCH` | `/api/trips/{id}` | Rename a trip `{"name":"..."}` |
 | `DELETE` | `/api/trips/{id}` | Delete a user-edited trip (media unassigned, re-detected automatically) |
