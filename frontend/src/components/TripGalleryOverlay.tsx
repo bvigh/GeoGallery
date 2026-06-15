@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { MapPin, Trash2 } from "lucide-react";
+import { ExternalLink, MapPin, Trash2 } from "lucide-react";
 import { MapContainer, TileLayer, Marker, useMap, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import type { MediaItem, Trip } from "../types";
@@ -358,7 +358,19 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
   return (
     <div className="fixed inset-0 z-[1000] flex flex-col bg-black">
       {/* Header controls */}
-      <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
+      <div className="absolute right-4 top-4 z-10 flex items-center gap-2 rounded-xl bg-black/40 px-2 py-1.5 backdrop-blur-sm">
+        {currentItem?.lat !== null && currentItem?.lng !== null && currentItem && (
+          <a
+            href={`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${currentItem.lat},${currentItem.lng}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-white/60 hover:text-white"
+            aria-label="Open in Street View"
+            title="Open in Street View"
+          >
+            <ExternalLink className="h-5 w-5" />
+          </a>
+        )}
         {currentItem && (
           <button
             className="text-white/60 hover:text-white"
@@ -442,6 +454,9 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
             {/* Position label */}
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 text-white text-sm bg-black/50 px-3 py-1 rounded-full pointer-events-none">
               {currentIndex + 1} / {items.length}
+              {currentItem?.filename && (
+                <span className="ml-2 text-white/80">· {currentItem.filename}</span>
+              )}
               {currentItem?.taken_at && (
                 <span className="ml-2 text-white/60">
                   · {new Date(currentItem.taken_at).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
