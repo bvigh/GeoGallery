@@ -223,7 +223,7 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 - The side panel is dismissible (close button or pressing Escape).
 - Full-screen mode works for photos, videos, and 360° content.
 - The full-screen overlay closes on Escape or a close button.
-- Low-confidence GPS locations (< 0.5) are visually distinguished (e.g., different marker colour or icon).
+- Low-confidence GPS locations (< 0.9) are visually distinguished (e.g., different marker colour or icon).
 
 **Deployment/failure conditions:** If the API returns an error, the map renders empty with a visible error banner. No crash.
 

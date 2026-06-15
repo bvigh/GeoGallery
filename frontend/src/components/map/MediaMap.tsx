@@ -8,7 +8,7 @@ import L from "leaflet";
 
 function markerIcon(item: MediaItem) {
   const color =
-    item.gps_confidence !== null && item.gps_confidence < 0.5 ? "#f97316" : "#3b82f6";
+    item.gps_confidence !== null && item.gps_confidence < 0.9 ? "#f97316" : "#3b82f6";
   const is360 = item.media_type === "photo_360" || item.media_type === "video_360";
   const size = is360 ? 16 : 12;
   const half = size / 2;

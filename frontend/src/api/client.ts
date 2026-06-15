@@ -69,9 +69,17 @@ async function replaceKeyframes(id: string, keyframes: OrientationKeyframe[]): P
   });
 }
 
+async function updateLocation(id: string, lat: number, lng: number): Promise<void> {
+  await fetch(`${BASE}/media/${id}/location`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ lat, lng }),
+  });
+}
+
 async function del(path: string): Promise<void> {
   const res = await fetch(`${BASE}${path}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`DELETE ${path} failed: ${res.status}`);
 }
 
-export const api = { get, post, patch, delete: del, getMediaUrl, getKeyframes, updateViewSettings, replaceKeyframes };
+export const api = { get, post, patch, delete: del, getMediaUrl, getKeyframes, updateViewSettings, replaceKeyframes, updateLocation };

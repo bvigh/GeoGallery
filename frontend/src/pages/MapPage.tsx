@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
 import { MediaMap } from "../components/map/MediaMap";
 import { FilterPanel } from "../components/map/FilterPanel";
+import { EditLocationModal } from "../components/EditLocationModal";
 import type { FilterState, MediaItem, OrientationKeyframe, Trip } from "../types";
 import { api } from "../api/client";
 import Panorama360 from "../components/viewer/Panorama360";
@@ -344,6 +345,7 @@ export function MapPage() {
   const [clusterPeers, setClusterPeers] = useState<MediaItem[]>([]);
   const [clusterIndex, setClusterIndex] = useState(0);
   const [editingView, setEditingView] = useState(false);
+  const [editingLocation, setEditingLocation] = useState(false);
   const pendingId = useRef<string | null>(null);
 
   useEffect(() => {
@@ -522,6 +524,13 @@ export function MapPage() {
             </p>
           )}
 
+          <button
+            className="mt-1 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted"
+            onClick={() => setEditingLocation(true)}
+          >
+            Edit GPS location
+          </button>
+
           {(selected.media_type === "photo_360" || selected.media_type === "video_360") && (
             <button
               className="mt-2 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted"
@@ -583,6 +592,19 @@ export function MapPage() {
           onPrev={clusterPeers.length > 1 ? () => navigatePeer(-1) : undefined}
           onNext={clusterPeers.length > 1 ? () => navigatePeer(1) : undefined}
           peerLabel={clusterPeers.length > 1 ? `${clusterIndex + 1} / ${clusterPeers.length}` : undefined}
+        />
+      )}
+
+      {editingLocation && selected && (
+        <EditLocationModal
+          item={selected}
+          onClose={() => setEditingLocation(false)}
+          onSaved={(lat, lng) => {
+            const updated = { lat, lng, gps_source: "manual" as const, gps_confidence: 1.0 };
+            setSelected((prev) => (prev ? { ...prev, ...updated } : prev));
+            setItems((prev) => prev.map((i) => (i.id === selected.id ? { ...i, ...updated } : i)));
+            setEditingLocation(false);
+          }}
         />
       )}
 
