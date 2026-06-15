@@ -67,6 +67,7 @@ func main() {
 		r.Patch("/media/{id}/view-settings", mediaH.UpdateViewSettings)
 		r.Get("/media/{id}/keyframes", mediaH.GetKeyframes)
 		r.Put("/media/{id}/keyframes", mediaH.ReplaceKeyframes)
+		r.Delete("/media/{id}", mediaH.Delete)
 
 		r.Get("/trips", tripH.List)
 		r.Patch("/trips/{id}", tripH.Update)
