@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,11 +25,16 @@ type mediaDB interface {
 
 type mediaStorage interface {
 	PresignGet(ctx context.Context, key string) (string, error)
+	Delete(ctx context.Context, key string) error
+}
+
+type poolBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
 type MediaHandler struct {
 	db            mediaDB
-	pool          *pgxpool.Pool
+	pool          poolBeginner
 	storage       mediaStorage
 	registrar     *MediaRegistrar
 	matcherPool   matcherDB
@@ -338,4 +344,41 @@ func (h *MediaHandler) GetURL(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"url": url})
+}
+
+func (h *MediaHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	tx, err := h.pool.Begin(r.Context())
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	var storageKey string
+	if err = tx.QueryRow(r.Context(),
+		`SELECT storage_key FROM media WHERE id = $1`, id,
+	).Scan(&storageKey); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	if _, err = tx.Exec(r.Context(),
+		`DELETE FROM media WHERE id = $1`, id,
+	); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if err = tx.Commit(r.Context()); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if err = h.storage.Delete(r.Context(), storageKey); err != nil {
+		log.Printf("media delete: S3 object %s not removed: %v", storageKey, err)
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

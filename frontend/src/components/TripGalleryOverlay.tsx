@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Trash2 } from "lucide-react";
 import { MapContainer, TileLayer, Marker, useMap, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import type { MediaItem, Trip } from "../types";
@@ -162,9 +163,10 @@ function TripMapOverlay({
 interface Props {
   trip: Trip;
   onClose: () => void;
+  onMediaDeleted?: () => void;
 }
 
-export function TripGalleryOverlay({ trip, onClose }: Props) {
+export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
   const [items, setItems] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -264,6 +266,22 @@ export function TripGalleryOverlay({ trip, onClose }: Props) {
     if (index !== -1) goTo(index);
   }
 
+  async function handleDeleteMedia() {
+    const item = items[currentIndex];
+    if (!item) return;
+    if (!confirm(`Delete "${item.filename}"? This cannot be undone.`)) return;
+    try {
+      await api.delete(`/media/${item.id}`);
+      const newItems = items.filter((i) => i.id !== item.id);
+      setItems(newItems);
+      setCurrentIndex((prev) => Math.min(prev, Math.max(0, newItems.length - 1)));
+      if (newItems.length === 0) onClose();
+      onMediaDeleted?.();
+    } catch (e) {
+      console.error("Failed to delete media:", e);
+    }
+  }
+
   const itemsWithGps = items.filter((m) => m.lat !== null && m.lng !== null);
   const currentItem = items[currentIndex] ?? null;
 
@@ -325,14 +343,26 @@ export function TripGalleryOverlay({ trip, onClose }: Props) {
 
   return (
     <div className="fixed inset-0 z-[1000] flex flex-col bg-black">
-      {/* Close button */}
-      <button
-        className="absolute right-4 top-4 z-10 text-white text-2xl leading-none hover:opacity-70"
-        onClick={onClose}
-        aria-label="Close gallery"
-      >
-        ✕
-      </button>
+      {/* Header controls */}
+      <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
+        {currentItem && (
+          <button
+            className="text-white/60 hover:text-red-400"
+            onClick={handleDeleteMedia}
+            aria-label="Delete media"
+            title="Delete media"
+          >
+            <Trash2 className="h-5 w-5" />
+          </button>
+        )}
+        <button
+          className="text-white text-2xl leading-none hover:opacity-70"
+          onClick={onClose}
+          aria-label="Close gallery"
+        >
+          ✕
+        </button>
+      </div>
 
       {/* Trip name */}
       <div className="absolute left-4 top-4 z-10 text-white text-sm font-medium bg-black/50 px-3 py-1 rounded-full pointer-events-none">

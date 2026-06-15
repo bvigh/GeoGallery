@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Trash2 } from "lucide-react";
 import { MediaMap } from "../components/map/MediaMap";
 import { FilterPanel } from "../components/map/FilterPanel";
 import type { FilterState, MediaItem, OrientationKeyframe, Trip } from "../types";
@@ -407,6 +408,23 @@ export function MapPage() {
       .finally(() => { if (pendingId.current === item.id) setLoading(false); });
   }
 
+  async function handleDeleteMedia(item: MediaItem) {
+    if (!confirm(`Delete "${item.filename}"? This cannot be undone.`)) return;
+    try {
+      await api.delete(`/media/${item.id}`);
+      setItems((prev) => prev.filter((i) => i.id !== item.id));
+      setSelected(null);
+      setMediaUrl(null);
+      setClusterPeers((prev) => {
+        const next = prev.filter((i) => i.id !== item.id);
+        setClusterIndex((idx) => Math.min(idx, Math.max(0, next.length - 1)));
+        return next;
+      });
+    } catch (e) {
+      console.error("Failed to delete media:", e);
+    }
+  }
+
   function handleSelect(item: MediaItem | null, peers: MediaItem[] = []) {
     setSelected(item);
     setClusterPeers(peers);
@@ -469,15 +487,26 @@ export function MapPage() {
 
       {selected && (
         <div className="absolute right-4 top-4 z-[800] w-72 rounded-lg border bg-background p-3 shadow-lg">
-          <button
-            className="float-right text-muted-foreground hover:text-foreground"
-            onClick={() => handleSelect(null)}
-            aria-label="Close panel"
-          >
-            ✕
-          </button>
-
-          <p className="font-medium truncate pr-6">{selected.filename}</p>
+          <div className="flex items-start justify-between gap-2 mb-1">
+            <p className="font-medium truncate">{selected.filename}</p>
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                className="text-muted-foreground hover:text-destructive"
+                onClick={() => handleDeleteMedia(selected)}
+                aria-label="Delete media"
+                title="Delete media"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+              <button
+                className="text-muted-foreground hover:text-foreground"
+                onClick={() => handleSelect(null)}
+                aria-label="Close panel"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
 
           {selected.taken_at && (
             <p className="text-sm text-muted-foreground">

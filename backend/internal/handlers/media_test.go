@@ -52,6 +52,9 @@ func (m *mockStorage) Upload(_ context.Context, _ string, _ io.Reader, _ int64, 
 func (m *mockStorage) PresignGet(ctx context.Context, key string) (string, error) {
 	return m.presignFn(ctx, key)
 }
+func (m *mockStorage) Delete(_ context.Context, _ string) error {
+	panic("not expected in these tests")
+}
 
 // --- helpers ---
 

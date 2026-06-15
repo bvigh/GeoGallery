@@ -138,6 +138,9 @@ export function TripsPage() {
         <TripGalleryOverlay
           trip={selectedTrip}
           onClose={() => setSelectedTrip(null)}
+          onMediaDeleted={() => {
+            api.get<Trip[]>("/trips").then((data) => setTrips(data ?? [])).catch(console.error);
+          }}
         />
       )}
     </div>
