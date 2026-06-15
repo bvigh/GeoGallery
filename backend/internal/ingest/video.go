@@ -52,7 +52,7 @@ func TranscodeH264(srcPath string) (*os.File, error) {
 		"-c:v", "libx264",
 		"-preset", "fast",
 		"-crf", "23",
-		"-c:a", "copy",
+		"-c:a", "aac",
 		"-movflags", "+faststart",
 		outPath,
 	)
