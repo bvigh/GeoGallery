@@ -48,7 +48,7 @@ export function UploadPage() {
           type="file"
           className="hidden"
           multiple
-          accept="image/*,video/*"
+          accept="image/*,video/*,.3gp"
           onChange={(e) => setFiles(e.target.files)}
         />
       </div>

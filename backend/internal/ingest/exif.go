@@ -93,7 +93,7 @@ func DetectMediaTypeFromProbe(e ExifData, filename, ext string, probe VideoProbe
 
 func IsVideoExt(ext string) bool {
 	switch strings.ToLower(ext) {
-	case ".mp4", ".mov", ".avi", ".mkv":
+	case ".mp4", ".mov", ".avi", ".mkv", ".3gp":
 		return true
 	}
 	return false

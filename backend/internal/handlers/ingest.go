@@ -40,7 +40,7 @@ func NewIngestHandler(db *pgxpool.Pool, s *storage.Client, watchDir string, matc
 var supportedExts = map[string]bool{
 	".jpg": true, ".jpeg": true, ".png": true,
 	".heic": true, ".heif": true, ".webp": true,
-	".mp4": true, ".mov": true, ".avi": true, ".mkv": true,
+	".mp4": true, ".mov": true, ".avi": true, ".mkv": true, ".3gp": true,
 }
 
 func (h *IngestHandler) Scan(w http.ResponseWriter, r *http.Request) {
