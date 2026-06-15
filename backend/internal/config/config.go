@@ -17,6 +17,8 @@ type Config struct {
 	IngestWatchDir      string
 	GPSMatchWindowHours int
 	TripGapHours        int
+	LogLevel            string
+	LogFormat           string
 }
 
 func Load() (*Config, error) {
@@ -31,6 +33,8 @@ func Load() (*Config, error) {
 		IngestWatchDir:      getEnv("INGEST_WATCH_DIR", "./ingest"),
 		GPSMatchWindowHours: getEnvInt("GPS_MATCH_WINDOW_HOURS", 1),
 		TripGapHours:        getEnvInt("TRIP_GAP_HOURS", 24),
+		LogLevel:            getEnv("LOG_LEVEL", "info"),
+		LogFormat:           getEnv("LOG_FORMAT", "text"),
 	}
 
 	if cfg.DatabaseURL == "" {

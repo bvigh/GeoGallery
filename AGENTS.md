@@ -52,6 +52,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `PATCH` | `/api/media/{id}/view-settings` | Update 360° default view (`initial_yaw`, `initial_pitch`, `initial_fov`) |
 | `GET` | `/api/media/{id}/keyframes` | Get video orientation keyframes |
 | `PUT` | `/api/media/{id}/keyframes` | Replace all keyframes for a video |
+| `DELETE` | `/api/media/{id}` | Delete media from DB and MinIO (keyframes cascade); S3 delete is best-effort, logged on failure |
 | `GET` | `/api/trips` | List trips with media count + cover key |
 | `PATCH` | `/api/trips/{id}` | Rename a trip (`{"name": "..."}`) — sets `user_edited = true` |
 | `DELETE` | `/api/trips/{id}` | Delete a trip (only `user_edited = true` trips); unassigns media for re-detection |
@@ -67,12 +68,14 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 - Handler structs hold deps (`*pgxpool.Pool`, `*storage.Client`). Construct with `New*Handler(...)`.
 - New routes: register in `main.go` inside `r.Route("/api", ...)`.
 - New config values: add to `config.go` with a default that works locally without editing `.env`.
+- Logging: use `log/slog` (stdlib). `slog.SetDefault` is called in `main.go` — call `slog.Error/Warn/Info/Debug` directly anywhere in the backend. Always log before returning a 500: `slog.Error("context: what failed", "err", err)`. Per-item loops that continue on error must log at Error level, not silently skip.
 - Migrations: `000003_description.up.sql` / `.down.sql` — **never edit existing migration files**.
 - PostGIS geometry: `GEOGRAPHY(POINT, 4326)`, `ST_MakePoint(lng, lat)` (longitude first!), read back with `ST_Y` (lat) and `ST_X` (lng).
 - S3 keys: `media/{unix_nano}/{filename}`. Serve via presigned URLs only — never expose raw MinIO URLs to the frontend.
 - Deduplication: `registerMedia` hashes first + last 64 KB of each file (`file_hash`). `ON CONFLICT (file_hash) DO NOTHING` — re-uploading or re-scanning the same file is always safe.
 - Auto-run order after ingest: `RunGPSMatcher` → `RunTripDetect`. Both are called at the end of scan and upload.
 - Trip deletion: `DELETE /api/trips/{id}` is only allowed for `user_edited = true` trips. Auto-detected trips are protected; renaming a trip flips it to `user_edited = true`.
+- Media deletion: `DELETE /api/media/{id}` removes the DB row (cascades to `video_keyframes`) then best-effort deletes the S3 object. S3 failure is logged but does not roll back the DB transaction — the DB is the source of truth.
 
 ## Frontend Conventions
 
@@ -118,6 +121,8 @@ INGEST_WATCH_DIR          # default: ./ingest
 MIGRATIONS_PATH           # default: ./migrations (read in main.go, not config.go)
 GPS_MATCH_WINDOW_HOURS    # default: 1 — max hours to look for bracketing GPS track points
 TRIP_GAP_HOURS            # default: 24 — time gap (hours) that splits media into separate trips
+LOG_LEVEL                 # default: info — one of: debug, info, warn, error
+LOG_FORMAT                # default: text — text (human-readable) or json (structured/machine-parseable)
 ```
 
 Copy `.env.example` to `backend/.env` for local development.
@@ -160,6 +165,7 @@ GPS resolution priority: EXIF → timestamp-interpolated from `gps_tracks` → n
 - `internal/handlers/gps_matcher_test.go`, `gps_matcher_handler_test.go` — GPS matcher logic and handler
 - `internal/handlers/gps_tracks_test.go` — GPS track import endpoint
 - `internal/handlers/media_test.go`, `upload_scan_matcher_test.go` — media upload/scan/dedup flow
+- `internal/handlers/media_delete_test.go` — media delete handler (success, not-found, db-error)
 - `internal/handlers/exif_gps_track_test.go` — EXIF GPS track insertion
 - Use `testing` + [testify](https://github.com/stretchr/testify) (`assert`/`require`). Test files live alongside source.
 - Pure logic tests use no external deps. Handler tests use `net/http/httptest`.

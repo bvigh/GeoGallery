@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -43,6 +44,7 @@ var supportedExts = map[string]bool{
 }
 
 func (h *IngestHandler) Scan(w http.ResponseWriter, r *http.Request) {
+	slog.Info("ingest: scan started", "dir", h.watchDir)
 	var ingested, skipped int
 
 	err := filepath.WalkDir(h.watchDir, func(path string, d os.DirEntry, err error) error {
@@ -56,16 +58,19 @@ func (h *IngestHandler) Scan(w http.ResponseWriter, r *http.Request) {
 
 		info, err := d.Info()
 		if err != nil {
+			slog.Error("ingest: stat file failed", "path", path, "err", err)
 			return nil
 		}
 		f, err := os.Open(path)
 		if err != nil {
+			slog.Error("ingest: open file failed", "path", path, "err", err)
 			return nil
 		}
 		mtime := info.ModTime()
 		registered, err := h.registrar.registerMedia(r.Context(), f, info.Size(), d.Name(), &mtime)
 		f.Close()
 		if err != nil {
+			slog.Error("ingest: register media failed", "path", path, "err", err)
 			return nil
 		}
 		if registered {
@@ -76,20 +81,24 @@ func (h *IngestHandler) Scan(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
+		slog.Error("ingest: walk dir failed", "dir", h.watchDir, "err", err)
 		http.Error(w, "scan error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if err := h.runMatcher(r.Context(), h.matcherPool, h.matchWindow, true); err != nil {
+		slog.Error("ingest: GPS matcher failed", "err", err)
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
 
 	if err := h.runTripDetect(r.Context(), h.registrar.db, h.tripGapHours); err != nil {
+		slog.Error("ingest: trip detect failed", "err", err)
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
 
+	slog.Info("ingest: scan complete", "ingested", ingested, "skipped", skipped)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int{"ingested": ingested, "skipped": skipped})
 }

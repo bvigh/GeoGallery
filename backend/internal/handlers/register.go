@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +106,7 @@ func (r *MediaRegistrar) registerMedia(
 
 	key := fmt.Sprintf("media/%d/%s", time.Now().UnixNano(), filename)
 	if err := r.storage.Upload(ctx, key, uploadBody, size, contentTypeFor(ext)); err != nil {
+		slog.Error("register: S3 upload failed", "key", key, "err", err)
 		return false, err
 	}
 
@@ -142,7 +144,9 @@ func (r *MediaRegistrar) registerMedia(
 	}
 	if tag.RowsAffected() == 1 {
 		if exifData.Lat != nil && takenAt != nil {
-			insertExifGPSTrack(ctx, r.db, *exifData.Lat, *exifData.Lng, *takenAt)
+			if err := insertExifGPSTrack(ctx, r.db, *exifData.Lat, *exifData.Lng, *takenAt); err != nil {
+				slog.Warn("register: exif GPS track insert failed", "err", err)
+			}
 		}
 		return true, nil
 	}

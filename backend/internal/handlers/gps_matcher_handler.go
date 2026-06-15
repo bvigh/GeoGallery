@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -26,6 +27,7 @@ func NewGPSMatcherHandler(pool *pgxpool.Pool, matchWindow time.Duration) *GPSMat
 
 func (h *GPSMatcherHandler) Run(w http.ResponseWriter, r *http.Request) {
 	if err := h.runMatcher(r.Context(), h.matcherPool, h.matchWindow, true); err != nil {
+		slog.Error("gps-matcher: run failed", "err", err)
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}

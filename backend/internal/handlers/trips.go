@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -39,6 +40,7 @@ func (h *TripHandler) List(w http.ResponseWriter, r *http.Request) {
 		ORDER BY t.start_date DESC NULLS LAST
 	`)
 	if err != nil {
+		slog.Error("trips: list query failed", "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -48,6 +50,7 @@ func (h *TripHandler) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var t trip
 		if err := rows.Scan(&t.ID, &t.Name, &t.StartDate, &t.EndDate, &t.MediaCount, &t.CoverKey, &t.UserEdited); err != nil {
+			slog.Error("trips: list row scan failed", "err", err)
 			continue
 		}
 		trips = append(trips, t)
@@ -77,6 +80,7 @@ func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.db.Begin(r.Context())
 	if err != nil {
+		slog.Error("trips: update begin tx failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -91,6 +95,7 @@ func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 		WHERE id = $4
 	`, body.Name, body.StartDate, body.EndDate, id)
 	if err != nil {
+		slog.Error("trips: update exec failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -100,12 +105,12 @@ func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 		if err = tx.QueryRow(r.Context(),
 			`SELECT start_date::text, end_date::text FROM trips WHERE id = $1`, id,
 		).Scan(&startDate, &endDate); err != nil {
+			slog.Error("trips: update read dates failed", "id", id, "err", err)
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
 
 		if startDate != nil && endDate != nil {
-			// Pull unassigned and auto-detected media into this trip
 			if _, err = tx.Exec(r.Context(), `
 				UPDATE media
 				SET trip_id = $1
@@ -114,27 +119,28 @@ func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 				  AND (trip_id IS NULL
 				       OR trip_id IN (SELECT id FROM trips WHERE user_edited = FALSE))
 			`, id, *startDate, *endDate); err != nil {
+				slog.Error("trips: update reassign media failed", "id", id, "err", err)
 				http.Error(w, "db error", http.StatusInternalServerError)
 				return
 			}
 
-			// Delete auto-detected trips that are now empty
 			if _, err = tx.Exec(r.Context(), `
 				DELETE FROM trips
 				WHERE user_edited = FALSE
 				  AND id NOT IN (SELECT trip_id FROM media WHERE trip_id IS NOT NULL)
 			`); err != nil {
+				slog.Error("trips: update delete empty auto-trips failed", "err", err)
 				http.Error(w, "db error", http.StatusInternalServerError)
 				return
 			}
 
-			// Recompute date ranges for remaining auto-detected trips
 			if _, err = tx.Exec(r.Context(), `
 				UPDATE trips t
 				SET start_date = (SELECT MIN(taken_at)::date FROM media WHERE trip_id = t.id),
 				    end_date   = (SELECT MAX(taken_at)::date FROM media WHERE trip_id = t.id)
 				WHERE user_edited = FALSE
 			`); err != nil {
+				slog.Error("trips: update recompute dates failed", "err", err)
 				http.Error(w, "db error", http.StatusInternalServerError)
 				return
 			}
@@ -142,6 +148,7 @@ func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err = tx.Commit(r.Context()); err != nil {
+		slog.Error("trips: update commit failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -153,6 +160,7 @@ func (h *TripHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.db.Begin(r.Context())
 	if err != nil {
+		slog.Error("trips: delete begin tx failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -170,10 +178,10 @@ func (h *TripHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Unassign media from this trip so auto-detection can reclaim it
 	if _, err = tx.Exec(r.Context(),
 		`UPDATE media SET trip_id = NULL WHERE trip_id = $1`, id,
 	); err != nil {
+		slog.Error("trips: delete unassign media failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -181,18 +189,19 @@ func (h *TripHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if _, err = tx.Exec(r.Context(),
 		`DELETE FROM trips WHERE id = $1`, id,
 	); err != nil {
+		slog.Error("trips: delete exec failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
 
 	if err = tx.Commit(r.Context()); err != nil {
+		slog.Error("trips: delete commit failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
 
-	// Re-run auto-detection so the freed media gets grouped
 	if err = RunTripDetect(r.Context(), h.db, h.gapHours); err != nil {
-		// Non-fatal: trip is deleted, detection can be retried
+		slog.Error("trips: post-delete auto-detect failed", "err", err)
 		http.Error(w, "trip deleted but auto-detect failed", http.StatusInternalServerError)
 		return
 	}

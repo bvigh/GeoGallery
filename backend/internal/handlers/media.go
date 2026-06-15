@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -146,6 +146,7 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.db.Query(r.Context(), sql, args...)
 	if err != nil {
+		slog.Error("media: list query failed", "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -158,6 +159,7 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&m.ID, &m.Filename, &m.MediaType, &lat, &lng,
 			&m.Confidence, &m.GpsSource, &m.TakenAt, &m.StorageKey, &m.TripID,
 			&m.InitialYaw, &m.InitialPitch, &m.InitialFov); err != nil {
+			slog.Error("media: list row scan failed", "err", err)
 			continue
 		}
 		m.Lat = lat
@@ -187,6 +189,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	for i, fh := range files {
 		f, err := fh.Open()
 		if err != nil {
+			slog.Error("upload: open multipart file failed", "file", fh.Filename, "err", err)
 			continue
 		}
 
@@ -201,6 +204,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		registered, err := h.registrar.registerMedia(r.Context(), f, fh.Size, fh.Filename, fallbackMtime)
 		f.Close()
 		if err != nil {
+			slog.Error("upload: register media failed", "file", fh.Filename, "err", err)
 			continue
 		}
 		if registered {
@@ -210,10 +214,12 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	if len(uploaded) > 0 {
 		if err := h.runMatcher(r.Context(), h.matcherPool, h.matchWindow, true); err != nil {
+			slog.Error("upload: GPS matcher failed", "err", err)
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
 		if err := h.runTripDetect(r.Context(), h.registrar.db, h.tripGapHours); err != nil {
+			slog.Error("upload: trip detect failed", "err", err)
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
@@ -243,6 +249,7 @@ func (h *MediaHandler) UpdateViewSettings(w http.ResponseWriter, r *http.Request
 		req.InitialYaw, req.InitialPitch, req.InitialFov, id,
 	)
 	if err != nil {
+		slog.Error("media: update view settings failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -265,6 +272,7 @@ func (h *MediaHandler) GetKeyframes(w http.ResponseWriter, r *http.Request) {
 		id,
 	)
 	if err != nil {
+		slog.Error("media: get keyframes query failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -274,6 +282,7 @@ func (h *MediaHandler) GetKeyframes(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var kf orientationKeyframe
 		if err := rows.Scan(&kf.Time, &kf.Yaw, &kf.Pitch, &kf.Fov); err != nil {
+			slog.Error("media: keyframe row scan failed", "id", id, "err", err)
 			continue
 		}
 		keyframes = append(keyframes, kf)
@@ -294,6 +303,7 @@ func (h *MediaHandler) ReplaceKeyframes(w http.ResponseWriter, r *http.Request) 
 
 	tx, err := h.pool.Begin(r.Context())
 	if err != nil {
+		slog.Error("media: replace keyframes begin tx failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -302,6 +312,7 @@ func (h *MediaHandler) ReplaceKeyframes(w http.ResponseWriter, r *http.Request) 
 	if _, err := tx.Exec(r.Context(),
 		`DELETE FROM video_keyframes WHERE media_id=$1`, id,
 	); err != nil {
+		slog.Error("media: delete keyframes failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -311,12 +322,14 @@ func (h *MediaHandler) ReplaceKeyframes(w http.ResponseWriter, r *http.Request) 
 			`INSERT INTO video_keyframes (media_id, time_seconds, yaw, pitch, fov) VALUES ($1, $2, $3, $4, $5)`,
 			id, kf.Time, kf.Yaw, kf.Pitch, kf.Fov,
 		); err != nil {
+			slog.Error("media: insert keyframe failed", "id", id, "err", err)
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {
+		slog.Error("media: replace keyframes commit failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -338,6 +351,7 @@ func (h *MediaHandler) GetURL(w http.ResponseWriter, r *http.Request) {
 
 	url, err := h.storage.PresignGet(r.Context(), storageKey)
 	if err != nil {
+		slog.Error("media: presign failed", "id", id, "key", storageKey, "err", err)
 		http.Error(w, "presign error", http.StatusInternalServerError)
 		return
 	}
@@ -351,6 +365,7 @@ func (h *MediaHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.pool.Begin(r.Context())
 	if err != nil {
+		slog.Error("media: delete begin tx failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
@@ -367,17 +382,19 @@ func (h *MediaHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if _, err = tx.Exec(r.Context(),
 		`DELETE FROM media WHERE id = $1`, id,
 	); err != nil {
+		slog.Error("media: delete db failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
 
 	if err = tx.Commit(r.Context()); err != nil {
+		slog.Error("media: delete commit failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
 
 	if err = h.storage.Delete(r.Context(), storageKey); err != nil {
-		log.Printf("media delete: S3 object %s not removed: %v", storageKey, err)
+		slog.Warn("media: S3 delete failed — DB row removed, object orphaned", "id", id, "key", storageKey, "err", err)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
