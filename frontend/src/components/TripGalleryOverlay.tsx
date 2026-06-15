@@ -270,6 +270,7 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
 
   function handleLocationSaved(lat: number, lng: number) {
     if (!currentItem) return;
+    // Optimistically update the saved item immediately
     setItems((prev) =>
       prev.map((m) =>
         m.id === currentItem.id
@@ -278,6 +279,24 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
       )
     );
     setEditingLocation(false);
+    // Re-fetch all trip media so GPS-matched neighbours get their updated coordinates
+    api
+      .get<MediaItem[]>("/media", { trip_id: trip.id })
+      .then((data) => {
+        const sorted = (data ?? []).sort((a, b) => {
+          if (!a.taken_at && !b.taken_at) return 0;
+          if (!a.taken_at) return 1;
+          if (!b.taken_at) return -1;
+          return a.taken_at.localeCompare(b.taken_at);
+        });
+        setItems((prev) =>
+          sorted.map((fresh) => {
+            const existing = prev.find((m) => m.id === fresh.id);
+            return existing ? { ...fresh, keyframes: existing.keyframes } : fresh;
+          })
+        );
+      })
+      .catch(console.error);
   }
 
   async function handleDeleteMedia() {
