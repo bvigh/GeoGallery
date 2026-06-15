@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Trash2 } from "lucide-react";
+import { ExternalLink, Trash2 } from "lucide-react";
 import { MediaMap } from "../components/map/MediaMap";
 import { FilterPanel } from "../components/map/FilterPanel";
 import { EditLocationModal } from "../components/EditLocationModal";
@@ -522,6 +522,18 @@ export function MapPage() {
               {selected.gps_confidence !== null &&
                 ` (${Math.round(selected.gps_confidence * 100)}%)`}
             </p>
+          )}
+
+          {selected.lat !== null && selected.lng !== null && (
+            <a
+              href={`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${selected.lat},${selected.lng}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-1 flex items-center justify-center gap-1 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted"
+            >
+              <ExternalLink className="h-3 w-3" />
+              Open in Street View
+            </a>
           )}
 
           <button
