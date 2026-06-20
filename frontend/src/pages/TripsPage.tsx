@@ -60,7 +60,7 @@ export function TripsPage() {
   };
 
   return (
-    <div className="p-6">
+    <div className="h-full overflow-y-auto p-6">
       <h1 className="mb-4 text-xl font-semibold">Trips</h1>
       {trips.length === 0 && (
         <p className="text-muted-foreground">No trips yet. Upload some media to get started.</p>

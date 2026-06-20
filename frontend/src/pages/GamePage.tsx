@@ -7,6 +7,12 @@ import Panorama360 from "../components/viewer/Panorama360";
 import Video360 from "../components/viewer/Video360";
 import { FilterPanel } from "../components/map/FilterPanel";
 
+function parseDdMmYyyy(s: string): string {
+  const m = s.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (!m) return "";
+  return `${m[3]}-${m[2]}-${m[1]}`;
+}
+
 function ClickMarker({
   onPick,
 }: {
@@ -122,7 +128,7 @@ export function GamePage() {
       media_id: round.id,
       guess_lat: guess.lat,
       guess_lng: guess.lng,
-      guess_date: guessDate,
+      guess_date: parseDdMmYyyy(guessDate),
       max_dist_km: round.max_dist_km,
     });
     setResult(res);
@@ -228,7 +234,9 @@ export function GamePage() {
             </div>
             <div className="flex items-center gap-2 rounded-xl bg-black/70 px-3 py-2 backdrop-blur-sm">
               <input
-                type="date"
+                type="text"
+                placeholder="dd-mm-yyyy"
+                maxLength={10}
                 className="min-w-0 flex-1 rounded bg-white/10 px-2 py-1 text-sm text-white placeholder-white/50 focus:outline-none focus:ring-1 focus:ring-white/40"
                 value={guessDate}
                 onChange={(e) => setGuessDate(e.target.value)}

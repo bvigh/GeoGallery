@@ -159,6 +159,32 @@ function TripMapOverlay({
   );
 }
 
+// ── Data helpers ─────────────────────────────────────────────────────────────
+
+async function fetchAllTripMedia(tripId: string): Promise<MediaItem[]> {
+  const all: MediaItem[] = [];
+  let offset = 0;
+  while (true) {
+    const page = await api.get<MediaItem[]>("/media", {
+      trip_id: tripId,
+      offset: String(offset),
+    });
+    all.push(...(page ?? []));
+    if ((page ?? []).length < 500) break;
+    offset += 500;
+  }
+  return all;
+}
+
+function sortByTakenAt(items: MediaItem[]): MediaItem[] {
+  return [...items].sort((a, b) => {
+    if (!a.taken_at && !b.taken_at) return 0;
+    if (!a.taken_at) return 1;
+    if (!b.taken_at) return -1;
+    return a.taken_at.localeCompare(b.taken_at);
+  });
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 interface Props {
@@ -184,16 +210,9 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
   // Fetch all media for this trip, sorted chronologically
   useEffect(() => {
     setLoading(true);
-    api
-      .get<MediaItem[]>("/media", { trip_id: trip.id })
+    fetchAllTripMedia(trip.id)
       .then((data) => {
-        const sorted = (data ?? []).sort((a, b) => {
-          if (!a.taken_at && !b.taken_at) return 0;
-          if (!a.taken_at) return 1;
-          if (!b.taken_at) return -1;
-          return a.taken_at.localeCompare(b.taken_at);
-        });
-        setItems(sorted);
+        setItems(sortByTakenAt(data));
         setCurrentIndex(0);
       })
       .catch(console.error)
@@ -280,15 +299,9 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
     );
     setEditingLocation(false);
     // Re-fetch all trip media so GPS-matched neighbours get their updated coordinates
-    api
-      .get<MediaItem[]>("/media", { trip_id: trip.id })
+    fetchAllTripMedia(trip.id)
       .then((data) => {
-        const sorted = (data ?? []).sort((a, b) => {
-          if (!a.taken_at && !b.taken_at) return 0;
-          if (!a.taken_at) return 1;
-          if (!b.taken_at) return -1;
-          return a.taken_at.localeCompare(b.taken_at);
-        });
+        const sorted = sortByTakenAt(data);
         setItems((prev) =>
           sorted.map((fresh) => {
             const existing = prev.find((m) => m.id === fresh.id);
