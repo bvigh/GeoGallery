@@ -53,13 +53,13 @@ func (r *mockRows) Scan(dest ...any) error {
 	return nil
 }
 
-func (r *mockRows) Close()             {}
-func (r *mockRows) Err() error         { return nil }
-func (r *mockRows) CommandTag() pgconn.CommandTag { return pgconn.CommandTag{} }
+func (r *mockRows) Close()                                       {}
+func (r *mockRows) Err() error                                   { return nil }
+func (r *mockRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
 func (r *mockRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
-func (r *mockRows) Values() ([]any, error) { return nil, nil }
-func (r *mockRows) RawValues() [][]byte  { return nil }
-func (r *mockRows) Conn() *pgx.Conn     { return nil }
+func (r *mockRows) Values() ([]any, error)                       { return nil, nil }
+func (r *mockRows) RawValues() [][]byte                          { return nil }
+func (r *mockRows) Conn() *pgx.Conn                              { return nil }
 
 type mockMatcherDB struct {
 	queryFn    func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
