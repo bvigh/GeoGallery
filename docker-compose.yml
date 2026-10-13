@@ -36,7 +36,7 @@ services:
       retries: 10
 
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/aistor/mc
     depends_on:
       minio:
         condition: service_healthy
@@ -48,9 +48,31 @@ services:
       /bin/sh -c "
         mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
         mc mb --ignore-existing local/$$MINIO_BUCKET &&
-        mc anonymous set download local/$$MINIO_BUCKET
+        mc anonymous set none local/$$MINIO_BUCKET &&
         echo 'MinIO bucket ready'
       "
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.0
+    profiles: ["dev"]
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_PORT:-8180}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${KEYCLOAK_PORT:-8180}:8080"
+    volumes:
+      - ./deploy/keycloak:/opt/keycloak/data/import:ro
+      - keycloak_data:/opt/keycloak/data
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '200' <&3"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
 
   backend:
     build:
@@ -62,6 +84,9 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      keycloak:
+        condition: service_healthy
+        required: false
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-geogallery}:${POSTGRES_PASSWORD:-geogallery}@db:5432/${POSTGRES_DB:-geogallery}?sslmode=disable
       S3_ENDPOINT: http://minio:9000
@@ -71,6 +96,11 @@ services:
       S3_REGION: ${S3_REGION:-us-east-1}
       SERVER_PORT: ${SERVER_PORT:-8080}
       INGEST_WATCH_DIR: /ingest
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-http://localhost:${KEYCLOAK_PORT:-8180}/realms/geogallery}
+      OIDC_DISCOVERY_URL: ${OIDC_DISCOVERY_URL:-http://keycloak:8080/realms/geogallery}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-geogallery}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-geogallery-dev-secret}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:${FRONTEND_PORT:-5173}}
     ports:
       - "${SERVER_PORT:-8080}:8080"
     volumes:
@@ -89,3 +119,4 @@ services:
 volumes:
   db_data:
   minio_data:
+  keycloak_data:
