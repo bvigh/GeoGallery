@@ -110,6 +110,16 @@ describe("SettingsPage", () => {
     expect(within(dialog).getByRole("textbox")).toHaveValue("");
   });
 
+  it("lets the one-time panel shrink so the long curl example cannot push Done out of the dialog", async () => {
+    render(<SettingsPage />);
+    const dialog = await openCreateDialog();
+    await userEvent.type(within(dialog).getByRole("textbox"), "laptop");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create token" }));
+    const example = await within(dialog).findByText(/export GG_TOKEN=<the token above>/);
+    expect(example).toHaveClass("overflow-x-auto");
+    expect(within(dialog).getByTestId("one-time-token-panel")).toHaveClass("min-w-0");
+  });
+
   it("copies with navigator.clipboard when available", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });

@@ -91,7 +91,7 @@ function CreateTokenDialog({
           </DialogDescription>
         </DialogHeader>
         {created ? (
-          <div className="space-y-3 text-sm">
+          <div data-testid="one-time-token-panel" className="min-w-0 space-y-3 text-sm">
             <p className="font-medium text-red-600">You won't see this again. Copy the token now.</p>
             <CopyField value={created.token} label="New API token" />
             <div>
