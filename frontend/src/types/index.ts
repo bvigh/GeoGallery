@@ -50,6 +50,39 @@ export interface GameRound {
   max_dist_km: number;
 }
 
+export interface CurrentUser {
+  id: string;
+  email: string | null;
+  display_name: string | null;
+  role: "admin" | "user";
+}
+
+export interface AdminUser extends CurrentUser {
+  disabled: boolean;
+  last_login_at: string | null;
+  created_at: string;
+}
+
+export interface ApiToken {
+  id: string;
+  name: string;
+  display_hint: string;
+  created_at: string;
+  expires_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface CreatedApiToken extends ApiToken {
+  token: string;
+}
+
+export interface GpsImportResult {
+  inserted: number;
+  skipped: number;
+  errors: { row: number; reason: string }[];
+}
+
 export interface GuessResult {
   actual_lat: number;
   actual_lng: number;

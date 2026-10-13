@@ -1,11 +1,11 @@
 import { useState, useRef, useEffect } from "react";
 import { MapContainer, TileLayer, Marker, Polyline, useMapEvents, useMap } from "react-leaflet";
-import type { GameRound, GuessResult, OrientationKeyframe, Trip, FilterState } from "../types";
-import { api } from "../api/client";
+import type { GameRound, GuessResult, OrientationKeyframe, Trip, FilterState } from "@/types";
+import { api, ApiError } from "@/api/client";
 import L from "leaflet";
-import Panorama360 from "../components/viewer/Panorama360";
-import Video360 from "../components/viewer/Video360";
-import { FilterPanel } from "../components/map/FilterPanel";
+import Panorama360 from "@/components/viewer/Panorama360";
+import Video360 from "@/components/viewer/Video360";
+import { FilterPanel } from "@/components/map/FilterPanel";
 
 function parseDdMmYyyy(s: string): string {
   const m = s.match(/^(\d{2})-(\d{2})-(\d{4})$/);
@@ -92,6 +92,7 @@ export function GamePage() {
   const [mapHovered, setMapHovered] = useState(false);
   const [mapDragging, setMapDragging] = useState(false);
   const mapMouseLeft = useRef(false);
+  const [noMedia, setNoMedia] = useState(false);
 
   useEffect(() => {
     api.get<Trip[]>("/trips").then(setTrips);
@@ -109,7 +110,18 @@ export function GamePage() {
     if (filters.toDate) params.to_date = filters.toDate;
     if (filters.tripIds.length) params.trip_id = filters.tripIds;
     if (filters.mediaTypes.length) params.media_type = filters.mediaTypes;
-    const r = await api.get<GameRound>("/game/round", params);
+    let r: GameRound;
+    try {
+      r = await api.get<GameRound>("/game/round", params);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) {
+        setNoMedia(true);
+        setState("idle");
+        return;
+      }
+      throw e;
+    }
+    setNoMedia(false);
     setRound(r);
     setGuess(null);
     setGuessDate("");
@@ -151,6 +163,9 @@ export function GamePage() {
               You'll be shown a photo or video from your gallery. Guess where and
               when it was taken.
             </p>
+            {noMedia && (
+              <p className="mb-6 text-sm font-medium">No geolocated media yet</p>
+            )}
             <button
               className="rounded-lg bg-primary px-6 py-2 text-primary-foreground font-medium"
               onClick={startRound}
