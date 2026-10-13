@@ -8,13 +8,14 @@ import (
 	"net/http"
 	"time"
 
+	"codeberg.org/bvigh/geogallery/internal/auth"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type GPSMatcherHandler struct {
 	matcherPool matcherDB
 	matchWindow time.Duration
-	runMatcher  func(ctx context.Context, db matcherDB, maxWindow time.Duration, reprocess bool) error
+	runMatcher  func(ctx context.Context, db matcherDB, ownerID string, maxWindow time.Duration, reprocess bool) error
 }
 
 func NewGPSMatcherHandler(pool *pgxpool.Pool, matchWindow time.Duration) *GPSMatcherHandler {
@@ -26,7 +27,8 @@ func NewGPSMatcherHandler(pool *pgxpool.Pool, matchWindow time.Duration) *GPSMat
 }
 
 func (h *GPSMatcherHandler) Run(w http.ResponseWriter, r *http.Request) {
-	if err := h.runMatcher(r.Context(), h.matcherPool, h.matchWindow, true); err != nil {
+	ownerID := auth.MustUser(r.Context()).ID
+	if err := h.runMatcher(r.Context(), h.matcherPool, ownerID, h.matchWindow, true); err != nil {
 		slog.Error("gps-matcher: run failed", "err", err)
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return

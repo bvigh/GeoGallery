@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -74,7 +75,6 @@ func newTestRouter(t *testing.T) http.Handler {
 		media:      handlers.NewMediaHandler(nil, nil, time.Hour, 24),
 		trips:      handlers.NewTripHandler(nil, 24),
 		game:       handlers.NewGameHandler(nil, nil),
-		ingest:     handlers.NewIngestHandler(nil, nil, t.TempDir(), time.Hour, 24),
 		gpsTracks:  handlers.NewGPSTrackHandler(nil, time.Hour),
 		gpsMatcher: handlers.NewGPSMatcherHandler(nil, time.Hour),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
@@ -96,7 +96,7 @@ func TestRouter_AuthWiring(t *testing.T) {
 		{"health is public", http.MethodGet, "/api/health", false, "", nil, http.StatusOK},
 		{"anonymous media list", http.MethodGet, "/api/media", false, "", nil, http.StatusUnauthorized},
 		{"anonymous me", http.MethodGet, "/api/auth/me", false, "", nil, http.StatusUnauthorized},
-		{"anonymous ingest scan", http.MethodPost, "/api/ingest/scan", false, "", nil, http.StatusUnauthorized},
+		{"ingest scan route removed", http.MethodPost, "/api/ingest/scan", false, userSession, nil, http.StatusNotFound},
 		{"token me", http.MethodGet, "/api/auth/me", true, "", nil, http.StatusOK},
 		{"session me", http.MethodGet, "/api/auth/me", false, userSession, nil, http.StatusOK},
 
@@ -167,12 +167,96 @@ func TestRunSubcommand_UsageErrors(t *testing.T) {
 		{"stray argument", "users", []string{"extra"}},
 		{"rebind without --to", "rebind-issuer", []string{"--from", "a"}},
 		{"rebind same issuer", "rebind-issuer", []string{"--from", "a", "--to", "a"}},
+		{"scan without --user", "scan", nil},
+		{"scan stray argument", "scan", []string{"--user", "u", "extra"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var out bytes.Buffer
 			assert.Equal(t, 2, runSubcommand(tt.cmd, tt.args, &out))
 			assert.Empty(t, out.String())
+		})
+	}
+}
+
+func scanUsers() []auth.UserRecord {
+	return []auth.UserRecord{
+		{User: auth.User{ID: auth.LegacyOwnerID, Role: "admin"}},
+		{User: auth.User{ID: "active-user", Role: "user"}, Claimed: true},
+		{User: auth.User{ID: "disabled-user", Role: "user"}, Claimed: true, Disabled: true},
+	}
+}
+
+func TestScanTargetError(t *testing.T) {
+	tests := []struct {
+		name    string
+		userID  string
+		wantErr string
+	}{
+		{"active user accepted", "active-user", ""},
+		{"unknown user", "nobody", `unknown user "nobody"`},
+		{"disabled user", "disabled-user", "user disabled-user is disabled"},
+		{"unclaimed user", auth.LegacyOwnerID, "user is unclaimed: run `server invite --admin` and sign in first"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := scanTargetError(scanUsers(), tt.userID)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestRunScan(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		userID     string
+		res        handlers.ScanResult
+		scanErr    error
+		wantCalled bool
+		wantOut    string
+		wantErr    string
+	}{
+		{"success", context.Background(), "active-user", handlers.ScanResult{Ingested: 2, Skipped: 1}, nil,
+			true, "ingested=2 skipped=1 failed=0\n", ""},
+		{"failed files exit non-zero", context.Background(), "active-user", handlers.ScanResult{Ingested: 1, Failed: 1}, nil,
+			true, "ingested=1 skipped=0 failed=1\n", "1 file(s) failed"},
+		{"scan error", context.Background(), "active-user", handlers.ScanResult{}, errors.New("gps matcher: boom"),
+			true, "ingested=0 skipped=0 failed=0\n", "gps matcher: boom"},
+		{"interrupted", cancelled, "active-user", handlers.ScanResult{Ingested: 1}, context.Canceled,
+			true, "ingested=1 skipped=0 failed=0\n", "interrupted; re-run scan to finish"},
+		{"unclaimed user refused before scanning", context.Background(), auth.LegacyOwnerID, handlers.ScanResult{}, nil,
+			false, "", "user is unclaimed"},
+		{"uppercase id normalised", context.Background(), "ACTIVE-USER", handlers.ScanResult{Ingested: 1}, nil,
+			true, "ingested=1 skipped=0 failed=0\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			scan := func(_ context.Context, dir, ownerID string) (handlers.ScanResult, error) {
+				called = true
+				assert.Equal(t, "/ingest", dir)
+				assert.Equal(t, strings.ToLower(tt.userID), ownerID)
+				return tt.res, tt.scanErr
+			}
+			var out bytes.Buffer
+			err := runScan(tt.ctx, &out, scan, scanUsers(), tt.userID, "/ingest")
+			assert.Equal(t, tt.wantCalled, called)
+			assert.Equal(t, tt.wantOut, out.String())
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
 }

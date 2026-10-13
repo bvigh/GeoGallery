@@ -170,3 +170,103 @@ func TestMigration000007_Constraints(t *testing.T) {
 		}
 	})
 }
+
+var ownedTables = []string{"media", "trips", "gps_tracks"}
+
+func constraintExists(ctx context.Context, t *testing.T, conn *pgx.Conn, table, name string) bool {
+	t.Helper()
+	var exists bool
+	require.NoError(t, conn.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass($1) AND conname = $2)`,
+		"public."+table, name).Scan(&exists))
+	return exists
+}
+
+func columnExists(ctx context.Context, t *testing.T, conn *pgx.Conn, table, column string) bool {
+	t.Helper()
+	var exists bool
+	require.NoError(t, conn.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2)`,
+		table, column).Scan(&exists))
+	return exists
+}
+
+func assertOwnershipSchema(t *testing.T, dsn string) {
+	t.Helper()
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		for _, table := range ownedTables {
+			var owners []string
+			rows, err := conn.Query(ctx, `SELECT owner_id::text FROM `+table)
+			require.NoError(t, err)
+			for rows.Next() {
+				var o string
+				require.NoError(t, rows.Scan(&o))
+				owners = append(owners, o)
+			}
+			require.NoError(t, rows.Err())
+			assert.Equal(t, []string{legacyOwnerID}, owners, "legacy %s row is backfilled to the Owner", table)
+		}
+
+		var tripAssigned bool
+		require.NoError(t, conn.QueryRow(ctx, `SELECT trip_id IS NOT NULL FROM media`).Scan(&tripAssigned))
+		assert.True(t, tripAssigned, "trip assignment survives the composite FK swap")
+
+		for table, name := range map[string]string{
+			"media":      "media_owner_file_hash_key",
+			"gps_tracks": "gps_tracks_owner_source_recorded_at_key",
+			"trips":      "trips_id_owner_key",
+		} {
+			assert.True(t, constraintExists(ctx, t, conn, table, name), "%s.%s", table, name)
+		}
+		assert.True(t, constraintExists(ctx, t, conn, "media", "media_trip_owner_fkey"))
+		assert.False(t, constraintExists(ctx, t, conn, "media", "media_trip_id_fkey"))
+		assert.False(t, constraintExists(ctx, t, conn, "media", "media_file_hash_key"))
+
+		inserts := map[string]string{
+			"media": `INSERT INTO media (filename, media_type, storage_key, file_hash)
+				VALUES ('n.jpg', 'photo', 'media/null/n.jpg', 'nullownerhash')`,
+			"trips":      `INSERT INTO trips (name) VALUES ('no owner')`,
+			"gps_tracks": `INSERT INTO gps_tracks (source, recorded_at, location) VALUES ('x', NOW(), ST_MakePoint(0, 0)::geography)`,
+		}
+		for _, table := range ownedTables {
+			_, err := conn.Exec(ctx, inserts[table])
+			var pgErr *pgconn.PgError
+			require.True(t, errors.As(err, &pgErr), "%s insert without owner must fail, got %v", table, err)
+			assert.Equal(t, "23502", pgErr.Code, table)
+			assert.Equal(t, "owner_id", pgErr.ColumnName, table)
+		}
+
+		_, err := conn.Exec(ctx, `SELECT auto_detect_trips($1::uuid, 24)`, legacyOwnerID)
+		require.NoError(t, err, "per-owner auto_detect_trips exists")
+	})
+}
+
+func TestMigration000008_Ownership(t *testing.T) {
+	dsn := testdb.NewEmpty(t)
+	m := newMigrator(t, dsn)
+
+	migrateTo(t, m, 6)
+	seedLegacyData(t, dsn)
+
+	require.NoError(t, m.Up())
+	assertOwnershipSchema(t, dsn)
+
+	migrateTo(t, m, 6)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		for _, table := range ownedTables {
+			assert.False(t, columnExists(ctx, t, conn, table, "owner_id"), "%s.owner_id dropped", table)
+			var n int
+			require.NoError(t, conn.QueryRow(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n))
+			assert.Equal(t, 1, n, "legacy %s row survives the down migration", table)
+		}
+		assert.True(t, constraintExists(ctx, t, conn, "media", "media_file_hash_key"))
+		assert.True(t, constraintExists(ctx, t, conn, "media", "media_trip_id_fkey"))
+		assert.True(t, constraintExists(ctx, t, conn, "gps_tracks", "gps_tracks_source_recorded_at_key"))
+		_, err := conn.Exec(ctx, `SELECT auto_detect_trips(24)`)
+		require.NoError(t, err, "000004 auto_detect_trips(int) restored")
+	})
+
+	require.NoError(t, m.Up())
+	assertOwnershipSchema(t, dsn)
+}

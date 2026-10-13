@@ -63,7 +63,7 @@ func newChiRequest(method, path, paramKey, paramVal string) *http.Request {
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add(paramKey, paramVal)
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
-	return r
+	return withTestUser(r)
 }
 
 // --- Cycle 1: happy path ---
@@ -74,7 +74,9 @@ func TestGetURL_ReturnsPresignedURL(t *testing.T) {
 	const presignedURL = "https://minio.example/media/123/photo.jpg?X-Amz-Signature=sig"
 
 	db := &mockDB{
-		queryRowFn: func(_ context.Context, _ string, args ...any) pgx.Row {
+		queryRowFn: func(_ context.Context, sql string, args ...any) pgx.Row {
+			assert.Contains(t, sql, "owner_id = $2")
+			assert.Equal(t, []any{mediaID, testOwnerID}, args)
 			return &mockRow{scanFn: func(dest ...any) error {
 				*dest[0].(*string) = storageKey
 				return nil
@@ -154,7 +156,7 @@ func TestGetURL_PresignError_Returns500(t *testing.T) {
 func emptyRows() *mockRows { return &mockRows{} }
 
 func listRequest(query string) *http.Request {
-	return httptest.NewRequest("GET", "/api/media?"+query, nil)
+	return withTestUser(httptest.NewRequest("GET", "/api/media?"+query, nil))
 }
 
 func TestList_NoParams_ReturnsAll(t *testing.T) {
@@ -169,12 +171,11 @@ func TestList_NoParams_ReturnsAll(t *testing.T) {
 
 	h := &MediaHandler{db: db, storage: &mockStorage{}}
 	w := httptest.NewRecorder()
-	h.List(w, httptest.NewRequest("GET", "/api/media", nil))
+	h.List(w, withTestUser(httptest.NewRequest("GET", "/api/media", nil)))
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.NotContains(t, capturedSQL, "WHERE")
-	// only arg is offset=0
-	assert.Equal(t, []any{0}, capturedArgs)
+	assert.Regexp(t, `WHERE owner_id = \$1\s+ORDER BY`, capturedSQL, "owner is the only condition")
+	assert.Equal(t, []any{testOwnerID, 0}, capturedArgs)
 }
 
 func TestList_FromDate_FilteredInSQL(t *testing.T) {
@@ -193,7 +194,7 @@ func TestList_FromDate_FilteredInSQL(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, capturedSQL, "taken_at >=")
-	assert.Equal(t, "2024-03-01", capturedArgs[0])
+	assert.Equal(t, "2024-03-01", capturedArgs[1])
 }
 
 func TestList_ToDate_FilteredInSQL(t *testing.T) {
@@ -212,7 +213,7 @@ func TestList_ToDate_FilteredInSQL(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, capturedSQL, "taken_at <")
-	assert.Equal(t, "2024-03-31", capturedArgs[0])
+	assert.Equal(t, "2024-03-31", capturedArgs[1])
 }
 
 func TestList_TripID_FilteredInSQL(t *testing.T) {
@@ -231,7 +232,7 @@ func TestList_TripID_FilteredInSQL(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, capturedSQL, "trip_id = ANY")
-	assert.Equal(t, []string{"uuid-1"}, capturedArgs[0])
+	assert.Equal(t, []string{"uuid-1"}, capturedArgs[1])
 }
 
 func TestList_TripIDUnassigned_FilteredInSQL(t *testing.T) {
@@ -268,7 +269,7 @@ func TestList_TripIDMixed_FilteredInSQL(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, capturedSQL, "trip_id = ANY")
 	assert.Contains(t, capturedSQL, "trip_id IS NULL")
-	assert.Equal(t, []string{"uuid-1"}, capturedArgs[0])
+	assert.Equal(t, []string{"uuid-1"}, capturedArgs[1])
 }
 
 func TestList_MediaType_FilteredInSQL(t *testing.T) {
@@ -287,7 +288,7 @@ func TestList_MediaType_FilteredInSQL(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, capturedSQL, "media_type = ANY")
-	assert.Equal(t, []string{"photo", "video"}, capturedArgs[0])
+	assert.Equal(t, []string{"photo", "video"}, capturedArgs[1])
 }
 
 func TestList_Offset_PassedThrough(t *testing.T) {
@@ -327,8 +328,10 @@ func TestList_MultipleFilters_Combined(t *testing.T) {
 	assert.Contains(t, capturedSQL, "taken_at >=")
 	assert.Contains(t, capturedSQL, "trip_id = ANY")
 	assert.Contains(t, capturedSQL, "media_type = ANY")
-	assert.Equal(t, "2024-01-01", capturedArgs[0])
-	assert.Len(t, capturedArgs, 4) // from_date, media_type, trip_id, offset
+	assert.Contains(t, capturedSQL, "WHERE owner_id = $1 AND")
+	assert.Equal(t, testOwnerID, capturedArgs[0])
+	assert.Equal(t, "2024-01-01", capturedArgs[1])
+	assert.Len(t, capturedArgs, 5) // owner, from_date, media_type, trip_id, offset
 }
 
 func TestList_DBError_Returns500(t *testing.T) {
@@ -338,7 +341,7 @@ func TestList_DBError_Returns500(t *testing.T) {
 
 	h := &MediaHandler{db: db, storage: &mockStorage{}}
 	w := httptest.NewRecorder()
-	h.List(w, httptest.NewRequest("GET", "/api/media", nil))
+	h.List(w, withTestUser(httptest.NewRequest("GET", "/api/media", nil)))
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
@@ -350,7 +353,7 @@ func TestList_EmptyResult_ReturnsEmptyArray(t *testing.T) {
 
 	h := &MediaHandler{db: db, storage: &mockStorage{}}
 	w := httptest.NewRecorder()
-	h.List(w, httptest.NewRequest("GET", "/api/media", nil))
+	h.List(w, withTestUser(httptest.NewRequest("GET", "/api/media", nil)))
 
 	require.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()

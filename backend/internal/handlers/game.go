@@ -10,14 +10,19 @@ import (
 	"strings"
 	"time"
 
+	"codeberg.org/bvigh/geogallery/internal/auth"
 	"codeberg.org/bvigh/geogallery/internal/geo"
 	"codeberg.org/bvigh/geogallery/internal/storage"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type gameStorage interface {
+	PresignGet(ctx context.Context, key string) (string, error)
+}
+
 type GameHandler struct {
 	db      *pgxpool.Pool
-	storage *storage.Client
+	storage gameStorage
 }
 
 func NewGameHandler(db *pgxpool.Pool, s *storage.Client) *GameHandler {
@@ -41,9 +46,9 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 	tripIDs := q["trip_id"]
 	mediaTypes := q["media_type"]
 
-	conds := []string{"location IS NOT NULL"}
-	var args []any
-	n := 1
+	conds := []string{readableMediaCond("", 1), "location IS NOT NULL"}
+	args := []any{auth.MustUser(r.Context()).ID}
+	n := 2
 
 	if fromDate != "" {
 		conds = append(conds, fmt.Sprintf("taken_at >= $%d::date", n))
@@ -200,8 +205,8 @@ func (h *GameHandler) SubmitGuess(w http.ResponseWriter, r *http.Request) {
 	err := h.db.QueryRow(r.Context(), `
 		SELECT ST_Y(location::geometry), ST_X(location::geometry), taken_at::text,
 		       COALESCE(gps_confidence, 1.0)
-		FROM media WHERE id=$1
-	`, req.MediaID).Scan(&actual.Lat, &actual.Lng, &actual.TakenAt, &actual.GpsConfidence)
+		FROM media WHERE id=$1 AND `+readableMediaCond("", 2)+`
+	`, req.MediaID, auth.MustUser(r.Context()).ID).Scan(&actual.Lat, &actual.Lng, &actual.TakenAt, &actual.GpsConfidence)
 	if err != nil {
 		slog.Error("game: submit guess media lookup failed", "media_id", req.MediaID, "err", err)
 		http.Error(w, "media not found", http.StatusNotFound)

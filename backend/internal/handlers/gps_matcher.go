@@ -17,25 +17,27 @@ type matcherDB interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// RunGPSMatcher assigns interpolated GPS positions to media rows using bracketing
-// GPS track points. When reprocess is true, rows with gps_source='interpolated'
-// are included so improved track data can produce better estimates.
-func RunGPSMatcher(ctx context.Context, db matcherDB, maxWindow time.Duration, reprocess bool) error {
+// RunGPSMatcher assigns interpolated GPS positions to ownerID's media rows using bracketing
+// points from ownerID's GPS tracks only. When reprocess is true, rows with
+// gps_source='interpolated' are included so improved track data can produce better estimates.
+func RunGPSMatcher(ctx context.Context, db matcherDB, ownerID string, maxWindow time.Duration, reprocess bool) error {
 	var query string
 	if reprocess {
 		query = `
 			SELECT id, taken_at
 			FROM media
-			WHERE (gps_source IS NULL OR gps_source = 'interpolated') AND taken_at IS NOT NULL
+			WHERE owner_id = $1
+			  AND (gps_source IS NULL OR gps_source = 'interpolated') AND taken_at IS NOT NULL
 		`
 	} else {
 		query = `
 			SELECT id, taken_at
 			FROM media
-			WHERE location IS NULL AND gps_source IS NULL AND taken_at IS NOT NULL
+			WHERE owner_id = $1
+			  AND location IS NULL AND gps_source IS NULL AND taken_at IS NOT NULL
 		`
 	}
-	rows, err := db.Query(ctx, query)
+	rows, err := db.Query(ctx, query, ownerID)
 	if err != nil {
 		return err
 	}
@@ -58,7 +60,7 @@ func RunGPSMatcher(ctx context.Context, db matcherDB, maxWindow time.Duration, r
 	}
 
 	for _, item := range items {
-		before, after, err := bracketingPoints(ctx, db, item.takenAt, maxWindow)
+		before, after, err := bracketingPoints(ctx, db, ownerID, item.takenAt, maxWindow)
 		if err != nil {
 			return err
 		}
@@ -82,16 +84,16 @@ func RunGPSMatcher(ctx context.Context, db matcherDB, maxWindow time.Duration, r
 	return nil
 }
 
-func bracketingPoints(ctx context.Context, db matcherDB, at time.Time, maxWindow time.Duration) (*geo.Point, *geo.Point, error) {
+func bracketingPoints(ctx context.Context, db matcherDB, ownerID string, at time.Time, maxWindow time.Duration) (*geo.Point, *geo.Point, error) {
 	var before, after *geo.Point
 
 	row := db.QueryRow(ctx, `
 		SELECT ST_Y(location::geometry), ST_X(location::geometry), recorded_at
 		FROM gps_tracks
-		WHERE recorded_at <= $1 AND recorded_at >= $2
+		WHERE owner_id = $3 AND recorded_at <= $1 AND recorded_at >= $2
 		ORDER BY recorded_at DESC
 		LIMIT 1
-	`, at, at.Add(-maxWindow))
+	`, at, at.Add(-maxWindow), ownerID)
 	var lat, lng float64
 	var recordedAt time.Time
 	if err := row.Scan(&lat, &lng, &recordedAt); err == nil {
@@ -103,10 +105,10 @@ func bracketingPoints(ctx context.Context, db matcherDB, at time.Time, maxWindow
 	row = db.QueryRow(ctx, `
 		SELECT ST_Y(location::geometry), ST_X(location::geometry), recorded_at
 		FROM gps_tracks
-		WHERE recorded_at >= $1 AND recorded_at <= $2
+		WHERE owner_id = $3 AND recorded_at >= $1 AND recorded_at <= $2
 		ORDER BY recorded_at ASC
 		LIMIT 1
-	`, at, at.Add(maxWindow))
+	`, at, at.Add(maxWindow), ownerID)
 	if err := row.Scan(&lat, &lng, &recordedAt); err == nil {
 		after = &geo.Point{Lat: lat, Lng: lng, At: recordedAt}
 	} else if err != pgx.ErrNoRows {

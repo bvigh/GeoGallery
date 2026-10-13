@@ -17,7 +17,7 @@ import (
 func postRunMatcher(h *GPSMatcherHandler) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodPost, "/api/gps-matcher/run", nil)
 	w := httptest.NewRecorder()
-	h.Run(w, r)
+	h.Run(w, withTestUser(r))
 	return w
 }
 
@@ -25,10 +25,12 @@ func postRunMatcher(h *GPSMatcherHandler) *httptest.ResponseRecorder {
 
 func TestGPSMatcherHandler_Run_Returns200(t *testing.T) {
 	var capturedReprocess bool
+	var capturedOwner string
 	h := &GPSMatcherHandler{
 		matchWindow: time.Hour,
-		runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, reprocess bool) error {
+		runMatcher: func(_ context.Context, _ matcherDB, ownerID string, _ time.Duration, reprocess bool) error {
 			capturedReprocess = reprocess
+			capturedOwner = ownerID
 			return nil
 		},
 	}
@@ -37,6 +39,7 @@ func TestGPSMatcherHandler_Run_Returns200(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.True(t, capturedReprocess)
+	assert.Equal(t, testOwnerID, capturedOwner)
 
 	var body map[string]bool
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
@@ -48,7 +51,7 @@ func TestGPSMatcherHandler_Run_Returns200(t *testing.T) {
 func TestGPSMatcherHandler_Run_MatcherError_Returns500(t *testing.T) {
 	h := &GPSMatcherHandler{
 		matchWindow: time.Hour,
-		runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error {
+		runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error {
 			return errors.New("db unavailable")
 		},
 	}

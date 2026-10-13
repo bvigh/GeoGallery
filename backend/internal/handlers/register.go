@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -50,10 +51,11 @@ func (tc *tailCapture) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// registerMedia stores one media file. Returns (true, nil) if newly inserted,
-// (false, nil) if deduplicated by file_hash, or (false, err) on failure.
+// registerMedia stores one media file for ownerID. Returns (true, nil) if newly inserted,
+// (false, nil) if deduplicated by (owner_id, file_hash), or (false, err) on failure.
 func (r *MediaRegistrar) registerMedia(
 	ctx context.Context,
+	ownerID string,
 	body io.Reader,
 	size int64,
 	filename string,
@@ -119,7 +121,7 @@ func (r *MediaRegistrar) registerMedia(
 		uploadBody = io.MultiReader(bytes.NewReader(head), tc)
 	}
 
-	key := fmt.Sprintf("media/%d/%s", time.Now().UnixNano(), filename)
+	key := newStorageKey(ownerID, ext)
 	if err := r.storage.Upload(ctx, key, uploadBody, size, contentTypeFor(ext)); err != nil {
 		slog.Error("register: S3 upload failed", "key", key, "err", err)
 		return false, err
@@ -142,13 +144,13 @@ func (r *MediaRegistrar) registerMedia(
 	}
 
 	tag, err := r.db.Exec(ctx, `
-		INSERT INTO media (filename, media_type, location, gps_confidence, gps_source, taken_at, storage_key, file_hash)
-		VALUES ($1, $2,
-		        CASE WHEN $3::float8 IS NOT NULL THEN ST_SetSRID(ST_MakePoint($4, $3), 4326) END,
-		        $5, $6, $7, $8, $9)
-		ON CONFLICT (file_hash) DO NOTHING
+		INSERT INTO media (owner_id, filename, media_type, location, gps_confidence, gps_source, taken_at, storage_key, file_hash)
+		VALUES ($1, $2, $3,
+		        CASE WHEN $4::float8 IS NOT NULL THEN ST_SetSRID(ST_MakePoint($5, $4), 4326) END,
+		        $6, $7, $8, $9, $10)
+		ON CONFLICT (owner_id, file_hash) DO NOTHING
 	`,
-		filename, mediaType,
+		ownerID, filename, mediaType,
 		exifData.Lat, exifData.Lng,
 		nil, // confidence populated by background GPS matcher
 		gpsSource(exifData),
@@ -159,13 +161,25 @@ func (r *MediaRegistrar) registerMedia(
 	}
 	if tag.RowsAffected() == 1 {
 		if exifData.Lat != nil && takenAt != nil {
-			if err := insertExifGPSTrack(ctx, r.db, *exifData.Lat, *exifData.Lng, *takenAt); err != nil {
+			if err := insertExifGPSTrack(ctx, r.db, ownerID, *exifData.Lat, *exifData.Lng, *takenAt); err != nil {
 				slog.Warn("register: exif GPS track insert failed", "err", err)
 			}
 		}
 		return true, nil
 	}
 	return false, nil
+}
+
+// newStorageKey returns an opaque object key. The filename and upload time never enter it:
+// presigned URLs expose the key, and either would hint at the answer in the guessing game.
+func newStorageKey(ownerID, ext string) string {
+	ext = strings.ToLower(ext)
+	if !supportedExts[ext] {
+		ext = ""
+	}
+	b := make([]byte, 16)
+	_, _ = rand.Read(b) // crypto/rand.Read never returns an error since Go 1.24
+	return fmt.Sprintf("media/%s/%s%s", ownerID, hex.EncodeToString(b), ext)
 }
 
 func gpsSource(e ingest.ExifData) *string {

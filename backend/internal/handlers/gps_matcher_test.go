@@ -1,10 +1,11 @@
 package handlers
 
-// TODO: PostGIS integration tests (querying real gps_tracks rows) are deferred.
-// These unit tests mock the DB to exercise RunGPSMatcher's control flow.
+// These unit tests mock the DB to exercise RunGPSMatcher's control flow; owner isolation
+// against real gps_tracks rows is covered in ownership_integration_test.go.
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -110,7 +111,7 @@ func TestRunGPSMatcher_NoMedia_ReturnsNil(t *testing.T) {
 		},
 	}
 
-	err := RunGPSMatcher(context.Background(), db, time.Hour, false)
+	err := RunGPSMatcher(context.Background(), db, testOwnerID, time.Hour, false)
 
 	require.NoError(t, err)
 	assert.False(t, execCalled)
@@ -154,7 +155,7 @@ func TestRunGPSMatcher_BracketedMedia_UpdatesLocation(t *testing.T) {
 		},
 	}
 
-	err := RunGPSMatcher(context.Background(), db, 2*time.Hour, false)
+	err := RunGPSMatcher(context.Background(), db, testOwnerID, 2*time.Hour, false)
 
 	require.NoError(t, err)
 	assert.Equal(t, "media-1", execID)
@@ -186,7 +187,7 @@ func TestRunGPSMatcher_NoGPSTracks_SkipsMedia(t *testing.T) {
 		},
 	}
 
-	err := RunGPSMatcher(context.Background(), db, time.Hour, false)
+	err := RunGPSMatcher(context.Background(), db, testOwnerID, time.Hour, false)
 
 	require.NoError(t, err)
 	assert.False(t, execCalled)
@@ -221,7 +222,7 @@ func TestRunGPSMatcher_OnlyBeforePoint_UpdatesLocation(t *testing.T) {
 		},
 	}
 
-	err := RunGPSMatcher(context.Background(), db, time.Hour, false)
+	err := RunGPSMatcher(context.Background(), db, testOwnerID, time.Hour, false)
 
 	require.NoError(t, err)
 	assert.True(t, execCalled)
@@ -256,7 +257,7 @@ func TestRunGPSMatcher_OnlyAfterPoint_UpdatesLocation(t *testing.T) {
 		},
 	}
 
-	err := RunGPSMatcher(context.Background(), db, time.Hour, false)
+	err := RunGPSMatcher(context.Background(), db, testOwnerID, time.Hour, false)
 
 	require.NoError(t, err)
 	assert.True(t, execCalled)
@@ -291,8 +292,48 @@ func TestRunGPSMatcher_Reprocess_IncludesInterpolatedMedia(t *testing.T) {
 		},
 	}
 
-	err := RunGPSMatcher(context.Background(), db, time.Hour, true)
+	err := RunGPSMatcher(context.Background(), db, testOwnerID, time.Hour, true)
 
 	require.NoError(t, err)
 	assert.Contains(t, capturedSQL, "interpolated")
+}
+
+// --- Owner scoping: media select and both bracketing lookups filter on the owner ---
+
+func TestRunGPSMatcher_ScopesQueriesToOwner(t *testing.T) {
+	takenAt := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	for _, reprocess := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reprocess=%v", reprocess), func(t *testing.T) {
+			var querySQL string
+			var queryArgs []any
+			var rowSQLs []string
+			var rowArgs [][]any
+			db := &mockMatcherDB{
+				queryFn: func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+					querySQL, queryArgs = sql, args
+					return &mockRows{rows: [][]any{{"media-1", takenAt}}}, nil
+				},
+				queryRowFn: func(_ context.Context, sql string, args ...any) pgx.Row {
+					rowSQLs = append(rowSQLs, sql)
+					rowArgs = append(rowArgs, args)
+					return noRowsRow{}
+				},
+				execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+					t.Fatal("no track points, so no update expected")
+					return pgconn.CommandTag{}, nil
+				},
+			}
+
+			require.NoError(t, RunGPSMatcher(context.Background(), db, testOwnerID, time.Hour, reprocess))
+
+			assert.Contains(t, querySQL, "owner_id = $1")
+			assert.Equal(t, []any{testOwnerID}, queryArgs)
+			require.Len(t, rowSQLs, 2)
+			for i := range rowSQLs {
+				assert.Contains(t, rowSQLs[i], "owner_id = $3")
+				require.Len(t, rowArgs[i], 3)
+				assert.Equal(t, testOwnerID, rowArgs[i][2])
+			}
+		})
+	}
 }

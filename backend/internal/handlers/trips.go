@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"codeberg.org/bvigh/geogallery/internal/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -36,9 +37,10 @@ func (h *TripHandler) List(w http.ResponseWriter, r *http.Request) {
 		       t.user_edited
 		FROM trips t
 		LEFT JOIN media m ON m.trip_id = t.id
+		WHERE t.owner_id = $1
 		GROUP BY t.id
 		ORDER BY t.start_date DESC NULLS LAST
-	`)
+	`, auth.MustUser(r.Context()).ID)
 	if err != nil {
 		slog.Error("trips: list query failed", "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -46,7 +48,7 @@ func (h *TripHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var trips []trip
+	trips := []trip{}
 	for rows.Next() {
 		var t trip
 		if err := rows.Scan(&t.ID, &t.Name, &t.StartDate, &t.EndDate, &t.MediaCount, &t.CoverKey, &t.UserEdited); err != nil {
@@ -68,6 +70,7 @@ type updateBody struct {
 
 func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	ownerID := auth.MustUser(r.Context()).ID
 	var body updateBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
@@ -86,17 +89,22 @@ func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
-	_, err = tx.Exec(r.Context(), `
+	tag, err := tx.Exec(r.Context(), `
 		UPDATE trips
 		SET name        = COALESCE($1, name),
 		    start_date  = COALESCE($2::date, start_date),
 		    end_date    = COALESCE($3::date, end_date),
 		    user_edited = TRUE
-		WHERE id = $4
-	`, body.Name, body.StartDate, body.EndDate, id)
+		WHERE id = $4 AND owner_id = $5
+	`, body.Name, body.StartDate, body.EndDate, id, ownerID)
 	if err != nil {
 		slog.Error("trips: update exec failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	// Must precede the reassign step: it would otherwise move the caller's media into a foreign trip ID.
+	if tag.RowsAffected() == 0 {
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 
@@ -114,11 +122,12 @@ func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 			if _, err = tx.Exec(r.Context(), `
 				UPDATE media
 				SET trip_id = $1
-				WHERE taken_at::date >= $2::date
+				WHERE owner_id = $4
+				  AND taken_at::date >= $2::date
 				  AND taken_at::date <= $3::date
 				  AND (trip_id IS NULL
-				       OR trip_id IN (SELECT id FROM trips WHERE user_edited = FALSE))
-			`, id, *startDate, *endDate); err != nil {
+				       OR trip_id IN (SELECT id FROM trips WHERE user_edited = FALSE AND owner_id = $4))
+			`, id, *startDate, *endDate, ownerID); err != nil {
 				slog.Error("trips: update reassign media failed", "id", id, "err", err)
 				http.Error(w, "db error", http.StatusInternalServerError)
 				return
@@ -126,9 +135,9 @@ func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 			if _, err = tx.Exec(r.Context(), `
 				DELETE FROM trips
-				WHERE user_edited = FALSE
-				  AND id NOT IN (SELECT trip_id FROM media WHERE trip_id IS NOT NULL)
-			`); err != nil {
+				WHERE owner_id = $1 AND user_edited = FALSE
+				  AND id NOT IN (SELECT trip_id FROM media WHERE trip_id IS NOT NULL AND owner_id = $1)
+			`, ownerID); err != nil {
 				slog.Error("trips: update delete empty auto-trips failed", "err", err)
 				http.Error(w, "db error", http.StatusInternalServerError)
 				return
@@ -138,8 +147,8 @@ func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 				UPDATE trips t
 				SET start_date = (SELECT MIN(taken_at)::date FROM media WHERE trip_id = t.id),
 				    end_date   = (SELECT MAX(taken_at)::date FROM media WHERE trip_id = t.id)
-				WHERE user_edited = FALSE
-			`); err != nil {
+				WHERE user_edited = FALSE AND owner_id = $1
+			`, ownerID); err != nil {
 				slog.Error("trips: update recompute dates failed", "err", err)
 				http.Error(w, "db error", http.StatusInternalServerError)
 				return
@@ -157,6 +166,7 @@ func (h *TripHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 func (h *TripHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	ownerID := auth.MustUser(r.Context()).ID
 
 	tx, err := h.db.Begin(r.Context())
 	if err != nil {
@@ -168,7 +178,7 @@ func (h *TripHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	var userEdited bool
 	if err = tx.QueryRow(r.Context(),
-		`SELECT user_edited FROM trips WHERE id = $1`, id,
+		`SELECT user_edited FROM trips WHERE id = $1 AND owner_id = $2`, id, ownerID,
 	).Scan(&userEdited); err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -179,7 +189,7 @@ func (h *TripHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err = tx.Exec(r.Context(),
-		`UPDATE media SET trip_id = NULL WHERE trip_id = $1`, id,
+		`UPDATE media SET trip_id = NULL WHERE trip_id = $1 AND owner_id = $2`, id, ownerID,
 	); err != nil {
 		slog.Error("trips: delete unassign media failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -187,7 +197,7 @@ func (h *TripHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err = tx.Exec(r.Context(),
-		`DELETE FROM trips WHERE id = $1`, id,
+		`DELETE FROM trips WHERE id = $1 AND owner_id = $2`, id, ownerID,
 	); err != nil {
 		slog.Error("trips: delete exec failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -200,7 +210,7 @@ func (h *TripHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err = RunTripDetect(r.Context(), h.db, h.gapHours); err != nil {
+	if err = RunTripDetect(r.Context(), h.db, ownerID, h.gapHours); err != nil {
 		slog.Error("trips: post-delete auto-detect failed", "err", err)
 		http.Error(w, "trip deleted but auto-detect failed", http.StatusInternalServerError)
 		return

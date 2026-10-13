@@ -28,10 +28,12 @@ func TestInsertExifGPSTrack_WithGPS_InsertsRow(t *testing.T) {
 		},
 	}
 
-	err := insertExifGPSTrack(context.Background(), db, lat, lng, takenAt)
+	err := insertExifGPSTrack(context.Background(), db, testOwnerID, lat, lng, takenAt)
 
 	require.NoError(t, err)
 	assert.Contains(t, strings.ToLower(capturedSQL), "gps_tracks")
 	assert.Contains(t, capturedSQL, "exif")
 	require.NotEmpty(t, capturedArgs)
+	assert.Contains(t, capturedSQL, "owner_id")
+	assert.Equal(t, testOwnerID, capturedArgs[0])
 }
