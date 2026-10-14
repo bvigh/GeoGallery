@@ -85,7 +85,7 @@ Auth column:
 | `GET` | `/api/auth/callback` | public | OIDC callback. Creates the session or redirects to `/?auth_error=not_invited\|invite_invalid\|disabled` |
 | `POST` | `/api/auth/logout` | public | Delete session, clear cookie, `{"redirect_url": end_session URL with id_token_hint, or "/"}` |
 | `GET` | `/api/auth/me` | user | `{id, email, display_name, role}` |
-| `GET` | `/api/media` | user | List the caller's media (max 500, `offset`, ordered by `taken_at DESC`); supports `from_date`, `to_date`, `trip_id[]` (incl. `unassigned`), `media_type[]` filters |
+| `GET` | `/api/media` | user | List the caller's media (max 500, `offset`, ordered by `taken_at DESC`); supports `from_date`, `to_date`, `trip_id[]` (incl. `unassigned`), `media_type[]` filters; 400 on a malformed date or `trip_id` |
 | `POST` | `/api/media/upload` | user | Multipart upload (field: `files[]`, `file_mtime[]` ms-since-epoch); body limit 4 GiB |
 | `GET` | `/api/media/{id}/url` | user | Get presigned URL for a media item |
 | `PATCH` | `/api/media/{id}/location` | user | Manual location `{lat, lng}`: sets `gps_source='manual'`; if `taken_at` is known, also upserts a `manual` GPS track point and re-runs the matcher; 404 if not owned |
@@ -96,7 +96,7 @@ Auth column:
 | `GET` | `/api/trips` | user | List the caller's trips with media count + cover key (`[]` when none) |
 | `PATCH` | `/api/trips/{id}` | user | Edit a trip (`{"name"?, "start_date"?, "end_date"?}`, at least one) — sets `user_edited = true` |
 | `DELETE` | `/api/trips/{id}` | session-only | Delete a trip (only `user_edited = true` trips); unassigns media for re-detection |
-| `GET` | `/api/game/round` | user | Random geolocated media of the caller; supports same filters as `/api/media`; 404 when none |
+| `GET` | `/api/game/round` | user | Random geolocated media of the caller; supports same filters as `/api/media`; 404 when none, 400 on malformed filters |
 | `POST` | `/api/game/guess` | user | Submit a guess, returns scores |
 | `POST` | `/api/gps-tracks/import` | user | Bulk-insert GPS track points (JSON array of `{recorded_at, lat, lng, source, altitude_m?, accuracy_m?, activity?}`, body limit 100 MiB); returns `{inserted, skipped, errors}`; runs GPS matcher after insert |
 | `POST` | `/api/gps-matcher/run` | user | Re-run GPS matcher over the caller's media that has no EXIF or manual location (including previously interpolated rows) |
@@ -104,7 +104,7 @@ Auth column:
 | `POST` | `/api/tokens` | session-only | `{"name", "expires_in_days"?: 1–365, default 90}` → 201 with plaintext `token` once; max 25 active (409) |
 | `DELETE` | `/api/tokens/{id}` | session-only | Revoke (soft delete); 404 for non-UUID, foreign or already revoked |
 | `GET` | `/api/admin/users` | admin | List users |
-| `PATCH` | `/api/admin/users/{id}` | admin | `{"disabled": bool}` only; disabling deletes sessions and revokes tokens; self-disable → 400 |
+| `PATCH` | `/api/admin/users/{id}` | admin | `{"disabled": bool}` only; disabling deletes sessions and revokes tokens and the user's unused invites; self-disable → 400 |
 | `POST` | `/api/admin/invites` | admin | `{"role": "user"\|"admin"}` → 201 `{"url": "..."}` (72 h; never a claim invite) |
 
 There is no HTTP ingest route. Folder scans are `server scan --user <id>` only.
@@ -194,7 +194,7 @@ Docker Compose only (root `.env`): `POSTGRES_*`, `MINIO_*`, `FRONTEND_PORT` (def
 
 Copy `.env.example` to `backend/.env` for local development. The backend loads it with godotenv, which fills only variables that are unset.
 
-Changing `KEYCLOAK_PORT` or `FRONTEND_PORT` requires matching `redirectUris` / `post.logout.redirect.uris` in the realm file. Keycloak imports the realm only if it does not exist yet, and its state persists in the `keycloak_data` volume, so remove that volume to re-import. User IDs are pinned, so `sub` values survive.
+Changing `KEYCLOAK_PORT` or `FRONTEND_PORT` requires matching `redirectUris` / `post.logout.redirect.uris` in the realm file, and `PUBLIC_URL` / `OIDC_ISSUER_URL` must match if set (compose derives them from the ports when unset; native `config.go` defaults assume 5173/8180). Keycloak imports the realm only if it does not exist yet, and its state persists in the `keycloak_data` volume, so remove that volume to re-import. User IDs are pinned, so `sub` values survive.
 
 **MinIO AIStore note:** the Docker image is `quay.io/minio/aistor/minio` and requires a license file. Set `MINIO_LICENSE_PATH` in `.env` (default: `$HOME/minio/minio.license`). The license is mounted read-only into the container. `minio-init` uses `quay.io/minio/aistor/mc` and sets the bucket private (`mc anonymous set none`).
 
@@ -254,13 +254,14 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `internal/handlers/media_test.go`, `upload_scan_matcher_test.go` — media list/upload/scan/dedup flow, owner propagation, opaque keys
 - `internal/handlers/media_delete_test.go`, `media_location_test.go` — delete and manual location
 - `internal/handlers/exif_gps_track_test.go` — EXIF GPS track insertion
+- `internal/handlers/game_test.go` — game round/guess: no rows → 404, other DB errors → 500
 - Direct handler calls need a user in context: use `withTestUser(r)` (`testuser_test.go`); without it `MustUser` panics and kills the test binary.
 
 **Backend — integration tests (real PostGIS; skipped unless `TEST_DATABASE_URL` is set)**
 - `TEST_DATABASE_URL` must be a `postgres://` URL whose user may `CREATE DATABASE` (the compose user is a superuser). `testdb.New(t)` creates a uniquely named, fully migrated database and drops it `WITH (FORCE)` on cleanup. `testdb.NewEmpty(t)` returns an unmigrated DSN.
 - `internal/testdb/testdb_test.go`
 - `internal/db/migrations_integration_test.go` — migrate to 6, seed, up, assert backfill, down/up round trip
-- `internal/auth/store_integration_test.go` — invite consumption and claim races, `SetDisabled`, `RebindIssuer`, token SQL
+- `internal/auth/store_integration_test.go` — invite consumption and claim races, `SetDisabled` (incl. creator's invites), sessions/tokens refused for inactive users, `RebindIssuer`, token SQL
 - `internal/handlers/ownership_integration_test.go` — cross-user isolation on every route, matcher/trip-detection scoping, per-owner dedup, composite FK
 - `internal/handlers/ingest_scan_integration_test.go` — `RunIngestScan` ownership, re-run skip, per-owner dedup, failure count
 - Use `testing` + [testify](https://github.com/stretchr/testify) (`assert`/`require`). Test files live alongside source.

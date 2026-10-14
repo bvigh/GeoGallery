@@ -41,11 +41,12 @@ type Store interface {
 	UserForAPIToken(ctx context.Context, tokenHash []byte) (u User, tokenID string, err error)
 	TouchAPIToken(ctx context.Context, tokenID string) error
 	// CreateAPIToken inserts a token unless the user already has maxActive unrevoked, unexpired
-	// tokens, in which case it returns ErrTokenLimit.
+	// tokens, in which case it returns ErrTokenLimit. ErrNoUser if the user is disabled or unclaimed.
 	CreateAPIToken(ctx context.Context, userID, name string, tokenHash []byte, displayHint string, expiresAt time.Time, maxActive int) (APIToken, error)
 	ListAPITokens(ctx context.Context, userID string) ([]APIToken, error)
 	RevokeAPIToken(ctx context.Context, userID, tokenID string) error
 	SessionIDToken(ctx context.Context, tokenHash []byte) (string, error)
+	// CreateSession returns ErrNoUser if the user is disabled or unclaimed.
 	CreateSession(ctx context.Context, tokenHash []byte, userID, idToken string, expiresAt time.Time) error
 	DeleteSession(ctx context.Context, tokenHash []byte) error
 	FindUserByIdentity(ctx context.Context, issuer, subject string) (UserRecord, error)
@@ -54,7 +55,8 @@ type Store interface {
 	// CreateInvite revokes any earlier unused invite for the same ClaimUserID in the same transaction.
 	CreateInvite(ctx context.Context, inv Invite) error
 	ListUsers(ctx context.Context) ([]UserRecord, error)
-	// SetDisabled(true) also deletes the user's sessions and revokes all their API tokens.
+	// SetDisabled(true) also deletes the user's sessions and revokes all their API tokens and
+	// unused invites they created.
 	SetDisabled(ctx context.Context, userID string, disabled bool) error
 	RebindIssuer(ctx context.Context, from, to string) (int64, error)
 	DeleteExpiredSessions(ctx context.Context) error
@@ -124,7 +126,15 @@ func scanAPIToken(row pgx.Row) (APIToken, error) {
 }
 
 func (s *PGStore) CreateAPIToken(ctx context.Context, userID, name string, tokenHash []byte, displayHint string, expiresAt time.Time, maxActive int) (APIToken, error) {
-	t, err := scanAPIToken(s.db.QueryRow(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return APIToken{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockActiveUser(ctx, tx, userID); err != nil {
+		return APIToken{}, err
+	}
+	t, err := scanAPIToken(tx.QueryRow(ctx, `
 		INSERT INTO api_tokens (user_id, name, token_hash, display_hint, expires_at)
 		SELECT $1::uuid, $2::text, $3::bytea, $4::text, $5::timestamptz
 		WHERE (SELECT COUNT(*) FROM api_tokens
@@ -134,7 +144,29 @@ func (s *PGStore) CreateAPIToken(ctx context.Context, userID, name string, token
 	if errors.Is(err, pgx.ErrNoRows) {
 		return APIToken{}, ErrTokenLimit
 	}
-	return t, err
+	if err != nil {
+		return APIToken{}, fmt.Errorf("insert api token: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return APIToken{}, err
+	}
+	return t, nil
+}
+
+// lockActiveUser takes a FOR SHARE lock on an enabled, claimed user so a concurrent SetDisabled
+// (which locks the row for UPDATE) either waits for the insert to commit, and then revokes it, or
+// runs first and makes this return ErrNoUser.
+func lockActiveUser(ctx context.Context, tx pgx.Tx, userID string) error {
+	var one int
+	err := tx.QueryRow(ctx, `
+		SELECT 1 FROM users WHERE id = $1 AND disabled_at IS NULL AND issuer IS NOT NULL FOR SHARE`, userID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNoUser
+	}
+	if err != nil {
+		return fmt.Errorf("lock user: %w", err)
+	}
+	return nil
 }
 
 func (s *PGStore) ListAPITokens(ctx context.Context, userID string) ([]APIToken, error) {
@@ -178,10 +210,20 @@ func (s *PGStore) SessionIDToken(ctx context.Context, tokenHash []byte) (string,
 }
 
 func (s *PGStore) CreateSession(ctx context.Context, tokenHash []byte, userID, idToken string, expiresAt time.Time) error {
-	_, err := s.db.Exec(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockActiveUser(ctx, tx, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO sessions (token_hash, user_id, id_token, expires_at) VALUES ($1, $2, $3, $4)`,
-		tokenHash, userID, idToken, expiresAt)
-	return err
+		tokenHash, userID, idToken, expiresAt); err != nil {
+		return fmt.Errorf("insert session: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *PGStore) DeleteSession(ctx context.Context, tokenHash []byte) error {
@@ -219,6 +261,8 @@ func (s *PGStore) RegisterWithInvite(ctx context.Context, inviteHash []byte, iss
 	err = tx.QueryRow(ctx, `
 		UPDATE invites SET used_at = NOW()
 		WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()
+		  AND (created_by IS NULL OR EXISTS (
+		        SELECT 1 FROM users c WHERE c.id = invites.created_by AND c.disabled_at IS NULL))
 		RETURNING role, claim_user_id::text`, inviteHash).Scan(&role, &claimUserID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return UserRecord{}, ErrInviteInvalid
@@ -321,6 +365,10 @@ func (s *PGStore) SetDisabled(ctx context.Context, userID string, disabled bool)
 		if _, err := tx.Exec(ctx, `
 			UPDATE api_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`, userID); err != nil {
 			return fmt.Errorf("revoke api tokens: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE invites SET used_at = NOW() WHERE created_by = $1 AND used_at IS NULL`, userID); err != nil {
+			return fmt.Errorf("revoke invites: %w", err)
 		}
 	}
 	return tx.Commit(ctx)

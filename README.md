@@ -168,7 +168,7 @@ Every route except those marked *public* needs a session cookie or an API token 
 | `GET` | `/api/auth/callback` | public | OIDC redirect target |
 | `POST` | `/api/auth/logout` | public | End the session; returns `{"redirect_url": ...}` |
 | `GET` | `/api/auth/me` | user | Current user `{id, email, display_name, role}` |
-| `GET` | `/api/media` | user | List media (latest 500); filters: `from_date`, `to_date`, `trip_id[]`, `media_type[]` |
+| `GET` | `/api/media` | user | List media (latest 500); filters: `from_date`, `to_date` (`YYYY-MM-DD`), `trip_id[]`, `media_type[]`; malformed values → 400 |
 | `POST` | `/api/media/upload` | user | Upload files (multipart, field `files[]`, `file_mtime[]`) |
 | `GET` | `/api/media/{id}/url` | user | Get presigned URL for a media item |
 | `PATCH` | `/api/media/{id}/location` | user | Set a manual location `{"lat":..,"lng":..}` |
@@ -179,7 +179,7 @@ Every route except those marked *public* needs a session cookie or an API token 
 | `GET` | `/api/trips` | user | List trips |
 | `PATCH` | `/api/trips/{id}` | user | Edit a trip `{"name"?, "start_date"?, "end_date"?}` (at least one); marks it user-edited |
 | `DELETE` | `/api/trips/{id}` | session | Delete a user-edited trip (media unassigned, re-detected automatically) |
-| `GET` | `/api/game/round` | user | Get a random geolocated media item; supports same filters as `/api/media` |
+| `GET` | `/api/game/round` | user | Get a random geolocated media item; supports same filters as `/api/media`; 404 when none |
 | `POST` | `/api/game/guess` | user | Submit a guess, receive scored result |
 | `POST` | `/api/gps-tracks/import` | user | Bulk-insert GPS track points (JSON array) |
 | `POST` | `/api/gps-matcher/run` | user | Re-run GPS matcher over your media |
@@ -299,4 +299,4 @@ Defaults work out of the box for local development. Copy `.env.example` to `.env
 | `LOG_LEVEL` | `info` | Backend log level: `debug`, `info`, `warn`, `error` (native only; not passed through by `docker-compose.yml`) |
 | `LOG_FORMAT` | `text` | Backend log format: `text` (human-readable) or `json` (structured) (native only; not passed through by `docker-compose.yml`) |
 
-Changing `KEYCLOAK_PORT` or `FRONTEND_PORT` requires matching redirect and post-logout URIs in `deploy/keycloak/geogallery-realm.json`. Keycloak imports the realm only when it does not exist yet, and its state lives in the `keycloak_data` volume. To apply realm edits, remove the container and that volume (`docker compose --profile dev rm -sf keycloak && docker volume rm geogallery_keycloak_data`, where the prefix is your compose project name), then start it again. The test users' IDs are pinned, so existing GeoGallery accounts keep working.
+Changing `KEYCLOAK_PORT` or `FRONTEND_PORT` requires matching redirect and post-logout URIs in `deploy/keycloak/geogallery-realm.json`, and `PUBLIC_URL` / `OIDC_ISSUER_URL` must match the new ports if you set them (compose derives them from the ports when unset). Keycloak imports the realm only when it does not exist yet, and its state lives in the `keycloak_data` volume. To apply realm edits, remove the container and that volume (`docker compose --profile dev rm -sf keycloak && docker volume rm geogallery_keycloak_data`, where the prefix is your compose project name), then start it again. The test users' IDs are pinned, so existing GeoGallery accounts keep working.

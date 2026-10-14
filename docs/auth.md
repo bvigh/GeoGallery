@@ -127,7 +127,7 @@ Personal API tokens let scripts call the API as the user.
   - `DELETE /api/media/{id}` and `DELETE /api/trips/{id}`
   - `/api/tokens*` (a token cannot mint tokens)
   - `/api/admin/*`
-- Disabling a user deletes their sessions and revokes all their tokens. Re-enabling them does not bring the tokens back.
+- Disabling a user deletes their sessions and revokes all their tokens and any unused invites they created. Re-enabling them does not bring the tokens or invites back.
 - `last_used_at` is updated at most once every 5 minutes.
 - Tokens are for curl and scripts. A web page on another origin cannot use them: the API sends no CORS headers, so the browser blocks such a page from reading the responses.
 

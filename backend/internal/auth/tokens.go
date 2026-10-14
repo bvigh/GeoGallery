@@ -68,6 +68,10 @@ func (a *Auth) CreateToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many active tokens: revoke one first", http.StatusConflict)
 		return
 	}
+	if errors.Is(err, ErrNoUser) {
+		http.Error(w, "account disabled", http.StatusForbidden)
+		return
+	}
 	if err != nil {
 		slog.Error("auth: create api token failed", "user_id", u.ID, "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

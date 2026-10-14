@@ -124,6 +124,28 @@ func TestCreateToken_Cap(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
+func TestCreateToken_InactiveUser(t *testing.T) {
+	tests := []struct {
+		name     string
+		issuer   string
+		disabled bool
+	}{
+		{"disabled", "iss", true},
+		{"unclaimed", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStore()
+			u := store.addUser(tt.issuer, "s", "a@example.test", "user", tt.disabled)
+			a := newTestAuth(store, nil)
+			rec := httptest.NewRecorder()
+			a.CreateToken(rec, sessionReq(http.MethodPost, "/api/tokens", `{"name":"cron"}`, u))
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.Empty(t, store.tokens)
+		})
+	}
+}
+
 func TestListTokens(t *testing.T) {
 	store := newFakeStore()
 	alice := store.addUser("iss", "a", "a@example.test", "user", false)

@@ -228,11 +228,11 @@ func TestList_TripID_FilteredInSQL(t *testing.T) {
 
 	h := &MediaHandler{db: db, storage: &mockStorage{}}
 	w := httptest.NewRecorder()
-	h.List(w, listRequest("trip_id=uuid-1"))
+	h.List(w, listRequest("trip_id=11111111-1111-1111-1111-111111111111"))
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, capturedSQL, "trip_id = ANY")
-	assert.Equal(t, []string{"uuid-1"}, capturedArgs[1])
+	assert.Equal(t, []string{"11111111-1111-1111-1111-111111111111"}, capturedArgs[1])
 }
 
 func TestList_TripIDUnassigned_FilteredInSQL(t *testing.T) {
@@ -264,12 +264,12 @@ func TestList_TripIDMixed_FilteredInSQL(t *testing.T) {
 
 	h := &MediaHandler{db: db, storage: &mockStorage{}}
 	w := httptest.NewRecorder()
-	h.List(w, listRequest("trip_id=uuid-1&trip_id=unassigned"))
+	h.List(w, listRequest("trip_id=11111111-1111-1111-1111-111111111111&trip_id=unassigned"))
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, capturedSQL, "trip_id = ANY")
 	assert.Contains(t, capturedSQL, "trip_id IS NULL")
-	assert.Equal(t, []string{"uuid-1"}, capturedArgs[1])
+	assert.Equal(t, []string{"11111111-1111-1111-1111-111111111111"}, capturedArgs[1])
 }
 
 func TestList_MediaType_FilteredInSQL(t *testing.T) {
@@ -322,7 +322,7 @@ func TestList_MultipleFilters_Combined(t *testing.T) {
 
 	h := &MediaHandler{db: db, storage: &mockStorage{}}
 	w := httptest.NewRecorder()
-	h.List(w, listRequest("from_date=2024-01-01&trip_id=uuid-1&media_type=photo"))
+	h.List(w, listRequest("from_date=2024-01-01&trip_id=11111111-1111-1111-1111-111111111111&media_type=photo"))
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, capturedSQL, "taken_at >=")

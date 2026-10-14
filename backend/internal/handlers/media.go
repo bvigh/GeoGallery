@@ -78,6 +78,10 @@ type mediaItem struct {
 
 func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if err := validateMediaFilters(q); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	fromDate := q.Get("from_date")
 	toDate := q.Get("to_date")

@@ -362,8 +362,16 @@ func TestOwnership_MatcherIgnoresOtherOwnersTracks(t *testing.T) {
 
 func TestOwnership_TripDetectLeavesOtherOwnersTrips(t *testing.T) {
 	f := newOwnershipFixture(t)
+	bUnassigned := insertMedia(t, f.pool, mediaFixture{owner: f.userB, filename: "b2.jpg", takenAt: "2024-05-03T12:45:00Z"})
 
 	require.NoError(t, RunTripDetect(context.Background(), f.pool, f.userA, 24))
+
+	assert.Nil(t, snapshotMedia(t, f.pool, bUnassigned).tripID, "B's unassigned media is not grouped by A's detection")
+	var foreignInATrips int
+	require.NoError(t, f.pool.QueryRow(context.Background(), `
+		SELECT COUNT(*) FROM media m JOIN trips t ON t.id = m.trip_id
+		WHERE t.owner_id = $1 AND m.owner_id <> $1`, f.userA).Scan(&foreignInATrips))
+	assert.Zero(t, foreignInATrips, "no A trip contains B's media")
 
 	assert.Equal(t, "Trip 2024-05-03", tripName(t, f.pool, f.tripB), "B's auto trip survives A's detection")
 	assert.Equal(t, f.tripB, *snapshotMedia(t, f.pool, f.mediaB).tripID)
@@ -436,10 +444,13 @@ func TestOwnership_TripUpdateWithForeignTripID(t *testing.T) {
 
 func TestOwnership_DateRangeEditDoesNotMoveOtherOwnersMedia(t *testing.T) {
 	f := newOwnershipFixture(t)
+	bUnassigned := insertMedia(t, f.pool, mediaFixture{owner: f.userB, filename: "b2.jpg", takenAt: "2024-05-10T09:00:00Z"})
 
 	rec := do(t, f.router, f.userA, http.MethodPatch, "/api/trips/"+f.tripA,
 		`{"start_date":"2024-05-01","end_date":"2024-05-31"}`)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	assert.Nil(t, snapshotMedia(t, f.pool, bUnassigned).tripID, "B's unassigned media in the range stays unassigned")
 
 	assert.Equal(t, f.tripA, *snapshotMedia(t, f.pool, f.mediaAUnlocated).tripID, "A's media in range joins A's trip")
 	assert.Equal(t, f.tripB, *snapshotMedia(t, f.pool, f.mediaB).tripID, "B's media in the same range stays put")

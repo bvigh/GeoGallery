@@ -242,11 +242,133 @@ func TestPGStore_Sessions(t *testing.T) {
 	_, err = s.UserForSession(ctx, liveHash)
 	assert.ErrorIs(t, err, ErrNoSession)
 
-	// Unclaimed users cannot hold a working session.
+	// Unclaimed users cannot hold a working session, even one inserted behind the store's back.
 	_, ownerHash := newToken()
-	require.NoError(t, s.CreateSession(ctx, ownerHash, LegacyOwnerID, "x", time.Now().Add(time.Hour)))
+	_, err = pool.Exec(ctx, `INSERT INTO sessions (token_hash, user_id, id_token, expires_at) VALUES ($1, $2, 'x', NOW() + INTERVAL '1 hour')`,
+		ownerHash, LegacyOwnerID)
+	require.NoError(t, err)
 	_, err = s.UserForSession(ctx, ownerHash)
 	assert.ErrorIs(t, err, ErrNoSession)
+}
+
+func TestPGStore_CreateForInactiveUser(t *testing.T) {
+	s, pool := newPGStore(t)
+	ctx := context.Background()
+	disabled := insertUser(t, pool, testIssuer, "dis", "user")
+	require.NoError(t, s.SetDisabled(ctx, disabled, true))
+
+	tests := []struct {
+		name   string
+		userID string
+	}{
+		{"disabled", disabled},
+		{"unclaimed", LegacyOwnerID},
+		{"unknown", "00000000-0000-0000-0000-00000000dead"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, sessHash := newToken()
+			assert.ErrorIs(t, s.CreateSession(ctx, sessHash, tt.userID, "x", time.Now().Add(time.Hour)), ErrNoUser)
+			_, tokHash, hint := newAPIToken()
+			_, err := s.CreateAPIToken(ctx, tt.userID, "t", tokHash, hint, time.Now().Add(time.Hour), 25)
+			assert.ErrorIs(t, err, ErrNoUser)
+
+			var sessions, tokens int
+			require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM sessions WHERE user_id::text = $1`, tt.userID).Scan(&sessions))
+			require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM api_tokens WHERE user_id::text = $1`, tt.userID).Scan(&tokens))
+			assert.Zero(t, sessions)
+			assert.Zero(t, tokens)
+		})
+	}
+}
+
+func TestPGStore_SetDisabledWaitsForInFlightSession(t *testing.T) {
+	s, pool := newPGStore(t)
+	ctx := context.Background()
+	u := insertUser(t, pool, testIssuer, "racer", "user")
+
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+	require.NoError(t, lockActiveUser(ctx, tx, u))
+	_, sessHash := newToken()
+	_, err = tx.Exec(ctx, `INSERT INTO sessions (token_hash, user_id, id_token, expires_at) VALUES ($1, $2, 'x', NOW() + INTERVAL '1 hour')`,
+		sessHash, u)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- s.SetDisabled(ctx, u, true) }()
+	select {
+	case err := <-done:
+		t.Fatalf("SetDisabled finished while the session insert was uncommitted (err=%v)", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	require.NoError(t, tx.Commit(ctx))
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("SetDisabled did not finish after the insert committed")
+	}
+	_, err = s.UserForSession(ctx, sessHash)
+	assert.ErrorIs(t, err, ErrNoSession, "session inserted before the disable is deleted by it")
+}
+
+func TestPGStore_InvitesFromDisabledCreator(t *testing.T) {
+	s, pool := newPGStore(t)
+	ctx := context.Background()
+	usedAt := func(raw string) *time.Time {
+		var ts *time.Time
+		require.NoError(t, pool.QueryRow(ctx, `SELECT used_at FROM invites WHERE token_hash = $1`, hashToken(raw)).Scan(&ts))
+		return ts
+	}
+	inviteBy := func(creator string) string {
+		raw, hash := newToken()
+		require.NoError(t, s.CreateInvite(ctx, Invite{TokenHash: hash, Role: "user", CreatedBy: creator, ExpiresAt: time.Now().Add(time.Hour)}))
+		return raw
+	}
+
+	t.Run("SetDisabled revokes the creator's open invites", func(t *testing.T) {
+		b := insertUser(t, pool, testIssuer, "creator-b", "admin")
+		other := insertUser(t, pool, testIssuer, "creator-other", "admin")
+		raw := inviteBy(b)
+		otherRaw := inviteBy(other)
+
+		require.NoError(t, s.SetDisabled(ctx, b, true))
+		assert.NotNil(t, usedAt(raw), "invite revoked")
+		assert.Nil(t, usedAt(otherRaw), "other creator's invite untouched")
+
+		_, err := s.RegisterWithInvite(ctx, hashToken(raw), testIssuer, "via-disabled-b", "", "")
+		assert.ErrorIs(t, err, ErrInviteInvalid)
+		_, err = s.FindUserByIdentity(ctx, testIssuer, "via-disabled-b")
+		assert.ErrorIs(t, err, ErrNoUser)
+
+		require.NoError(t, s.SetDisabled(ctx, b, false))
+		_, err = s.RegisterWithInvite(ctx, hashToken(raw), testIssuer, "via-reenabled-b", "", "")
+		assert.ErrorIs(t, err, ErrInviteInvalid, "re-enabling never revives invites")
+	})
+
+	t.Run("consume rejects invites whose creator is disabled", func(t *testing.T) {
+		b := insertUser(t, pool, testIssuer, "creator-c", "admin")
+		raw := inviteBy(b)
+		_, err := pool.Exec(ctx, `UPDATE users SET disabled_at = NOW() WHERE id = $1`, b)
+		require.NoError(t, err)
+
+		_, err = s.RegisterWithInvite(ctx, hashToken(raw), testIssuer, "via-disabled-c", "", "")
+		assert.ErrorIs(t, err, ErrInviteInvalid)
+		assert.Nil(t, usedAt(raw), "not consumed")
+		_, err = s.FindUserByIdentity(ctx, testIssuer, "via-disabled-c")
+		assert.ErrorIs(t, err, ErrNoUser)
+	})
+
+	t.Run("invite from an enabled creator is accepted", func(t *testing.T) {
+		b := insertUser(t, pool, testIssuer, "creator-d", "admin")
+		raw := inviteBy(b)
+		u, err := s.RegisterWithInvite(ctx, hashToken(raw), testIssuer, "via-enabled-d", "", "")
+		require.NoError(t, err)
+		assert.Equal(t, "user", u.Role)
+	})
 }
 
 func TestPGStore_TouchLogin(t *testing.T) {
@@ -395,7 +517,10 @@ func TestPGStore_APITokens(t *testing.T) {
 		_, expiredHash, _ := mk(alice, time.Now().Add(-time.Minute))
 		_, disabledHash, _ := mk(disabled, time.Now().Add(time.Hour))
 		require.NoError(t, s.SetDisabled(ctx, disabled, true))
-		_, unclaimedHash, _ := mk(LegacyOwnerID, time.Now().Add(time.Hour))
+		_, unclaimedHash, _ := newAPIToken()
+		_, err := pool.Exec(ctx, `INSERT INTO api_tokens (user_id, name, token_hash, display_hint, expires_at)
+			VALUES ($1, 't', $2, 'gg_pat_x', NOW() + INTERVAL '1 hour')`, LegacyOwnerID, unclaimedHash)
+		require.NoError(t, err)
 
 		u, id, err := s.UserForAPIToken(ctx, okHash)
 		require.NoError(t, err)

@@ -73,7 +73,7 @@ func (e *loginEnv) login(t *testing.T, query string, extra ...*http.Cookie) *htt
 	require.Equal(t, "/api/auth/callback", cb.Path)
 
 	req := httptest.NewRequest(http.MethodGet, cb.RequestURI(), nil)
-	if c := findCookie(loginRec, loginStateCookie); c != nil {
+	if c := findCookie(loginRec, e.a.loginStateName); c != nil {
 		req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
 	}
 	for _, c := range extra {
@@ -211,6 +211,39 @@ func TestCallback_Outcomes(t *testing.T) {
 			},
 		},
 		{
+			name: "invite created by a disabled admin",
+			seed: func(e *loginEnv) string {
+				creator := e.fake.addUser(e.cfg.OIDCIssuerURL, "admin-sub", "", "admin", true)
+				raw := e.fake.addInvite("user", "", time.Now().Add(time.Hour))
+				e.fake.invites[string(hashToken(raw))].CreatedBy = creator.ID
+				return "invite=" + raw
+			},
+			wantStatus: http.StatusFound, wantLocation: "/?auth_error=invite_invalid",
+			check: func(t *testing.T, e *loginEnv) {
+				assert.Len(t, e.fake.users, 1, "no user registered")
+			},
+		},
+		{
+			name: "invite revoked by disabling its creator",
+			seed: func(e *loginEnv) string {
+				creator := e.fake.addUser(e.cfg.OIDCIssuerURL, "admin-sub", "", "admin", false)
+				raw := e.fake.addInvite("user", "", time.Now().Add(time.Hour))
+				e.fake.invites[string(hashToken(raw))].CreatedBy = creator.ID
+				if err := e.fake.SetDisabled(context.Background(), creator.ID, true); err != nil {
+					panic(err)
+				}
+				return "invite=" + raw
+			},
+			wantStatus: http.StatusFound, wantLocation: "/?auth_error=invite_invalid",
+			check: func(t *testing.T, e *loginEnv) {
+				assert.Len(t, e.fake.users, 1, "no user registered")
+				for _, inv := range e.fake.invites {
+					assert.NotNil(t, inv.usedAt, "SetDisabled revoked the invite")
+					assert.Empty(t, inv.usedBy)
+				}
+			},
+		},
+		{
 			name: "expired invite",
 			seed: func(e *loginEnv) string {
 				return "invite=" + e.fake.addInvite("user", "", time.Now().Add(-time.Hour))
@@ -284,10 +317,21 @@ func TestCallback_SecureCookies(t *testing.T) {
 	e := newLoginEnv(t, func(_ *oidctest.Issuer, cfg *config.Config) { cfg.CookieSecure = true })
 	e.fake.addUser(e.cfg.OIDCIssuerURL, "user-sub-1", "", "user", false)
 
-	loginRec, _ := e.startLogin(t, "")
-	if c := findCookie(loginRec, loginStateCookie); assert.NotNil(t, c) {
-		assert.True(t, c.Secure, "gg_oidc is Secure")
+	assertHostStateCookie := func(t *testing.T, rec *httptest.ResponseRecorder, wantMaxAge func(int) bool) {
+		t.Helper()
+		assert.Nil(t, findCookie(rec, loginStateCookie))
+		c := findCookie(rec, "__Host-gg_oidc")
+		require.NotNil(t, c)
+		assert.True(t, c.Secure)
+		assert.True(t, c.HttpOnly)
+		assert.Equal(t, http.SameSiteLaxMode, c.SameSite)
+		assert.Equal(t, "/", c.Path)
+		assert.Empty(t, c.Domain)
+		assert.True(t, wantMaxAge(c.MaxAge), "MaxAge %d", c.MaxAge)
 	}
+
+	loginRec, _ := e.startLogin(t, "")
+	assertHostStateCookie(t, loginRec, func(m int) bool { return m == loginStateMaxAge })
 
 	rec := e.login(t, "")
 	require.Equal(t, http.StatusFound, rec.Code, rec.Body.String())
@@ -298,8 +342,26 @@ func TestCallback_SecureCookies(t *testing.T) {
 	assert.Equal(t, "/", c.Path)
 	assert.Empty(t, c.Domain)
 	assert.True(t, e.fake.hasSession(c.Value))
-	if st := findCookie(rec, loginStateCookie); assert.NotNil(t, st) {
-		assert.True(t, st.Secure, "gg_oidc clear is Secure")
+	assertHostStateCookie(t, rec, func(m int) bool { return m < 0 })
+
+	e.iss.Set(func(i *oidctest.Issuer) { i.Sub = "stranger" })
+	rejected := e.login(t, "")
+	require.Equal(t, "/?auth_error=not_invited", rejected.Header().Get("Location"))
+	assertHostStateCookie(t, rejected, func(m int) bool { return m < 0 })
+}
+
+func TestCallback_UserDisabledBeforeSessionInsert(t *testing.T) {
+	e := newLoginEnv(t, nil)
+	e.fake.addUser(e.cfg.OIDCIssuerURL, "user-sub-1", "", "user", false)
+	e.fake.afterTouchLogin = func(u *fakeUser) { u.Disabled = true }
+
+	rec := e.login(t, "")
+	require.Equal(t, http.StatusFound, rec.Code, rec.Body.String())
+	assert.Equal(t, "/?auth_error=disabled", rec.Header().Get("Location"))
+	assert.Empty(t, sessionValue(rec))
+	assert.Zero(t, e.fake.sessionCount())
+	if c := findCookie(rec, loginStateCookie); assert.NotNil(t, c) {
+		assert.Negative(t, c.MaxAge)
 	}
 }
 
@@ -368,7 +430,7 @@ func TestCallback_ReturnToRevalidatedFromCookie(t *testing.T) {
 	e := newLoginEnv(t, nil)
 	e.fake.addUser(e.cfg.OIDCIssuerURL, "user-sub-1", "", "user", false)
 	loginRec, authURL := e.startLogin(t, "")
-	st, err := readLoginStateFromRecorder(loginRec)
+	st, err := e.readLoginStateFromRecorder(loginRec)
 	require.NoError(t, err)
 	st.ReturnTo = "//evil.com" // gg_oidc is unsigned: a tampered cookie must still be safe
 	tampered := httptest.NewRecorder()
@@ -386,10 +448,10 @@ func TestCallback_ReturnToRevalidatedFromCookie(t *testing.T) {
 	assert.Equal(t, "/", rec.Header().Get("Location"))
 }
 
-func readLoginStateFromRecorder(rec *httptest.ResponseRecorder) (loginState, error) {
+func (e *loginEnv) readLoginStateFromRecorder(rec *httptest.ResponseRecorder) (loginState, error) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(findCookie(rec, loginStateCookie))
-	return readLoginState(req)
+	req.AddCookie(findCookie(rec, e.a.loginStateName))
+	return e.a.readLoginState(req)
 }
 
 func TestCallback_StoresConfiguredIssuer(t *testing.T) {

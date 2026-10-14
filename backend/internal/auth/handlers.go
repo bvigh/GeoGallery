@@ -15,30 +15,35 @@ import (
 )
 
 const (
-	loginStateCookie = "gg_oidc"
-	loginStatePath   = "/api/auth"
-	loginStateMaxAge = 600
+	loginStateCookie       = "gg_oidc"
+	secureLoginStateCookie = "__Host-gg_oidc"
+	loginStatePath         = "/api/auth"
+	loginStateMaxAge       = 600
 )
 
 type Auth struct {
 	store             Store
 	p                 *Provider
 	sessionCookieName string
+	loginStateName    string
+	loginStatePath    string
 	secure            bool
 	sessionTTL        time.Duration
 	publicOrigin      string
 }
 
 func New(store Store, p *Provider, cfg *config.Config) *Auth {
-	name := "gg_session"
+	name, stateName, statePath := "gg_session", loginStateCookie, loginStatePath
 	if cfg.CookieSecure {
 		// __Host- forces Secure, Path=/ and no Domain, so a sibling subdomain cannot plant it.
-		name = "__Host-gg_session"
+		name, stateName, statePath = "__Host-gg_session", secureLoginStateCookie, "/"
 	}
 	return &Auth{
 		store:             store,
 		p:                 p,
 		sessionCookieName: name,
+		loginStateName:    stateName,
+		loginStatePath:    statePath,
 		secure:            cfg.CookieSecure,
 		sessionTTL:        time.Duration(cfg.SessionTTLHours) * time.Hour,
 		publicOrigin:      cfg.PublicOrigin,
@@ -56,22 +61,22 @@ type loginState struct {
 func (a *Auth) writeLoginState(w http.ResponseWriter, st loginState) {
 	b, _ := json.Marshal(st)
 	http.SetCookie(w, &http.Cookie{
-		Name: loginStateCookie, Value: base64.RawURLEncoding.EncodeToString(b),
-		Path: loginStatePath, MaxAge: loginStateMaxAge,
+		Name: a.loginStateName, Value: base64.RawURLEncoding.EncodeToString(b),
+		Path: a.loginStatePath, MaxAge: loginStateMaxAge,
 		HttpOnly: true, Secure: a.secure, SameSite: http.SameSiteLaxMode,
 	})
 }
 
 func (a *Auth) clearLoginState(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
-		Name: loginStateCookie, Path: loginStatePath, MaxAge: -1,
+		Name: a.loginStateName, Path: a.loginStatePath, MaxAge: -1,
 		HttpOnly: true, Secure: a.secure, SameSite: http.SameSiteLaxMode,
 	})
 }
 
-func readLoginState(r *http.Request) (loginState, error) {
+func (a *Auth) readLoginState(r *http.Request) (loginState, error) {
 	var st loginState
-	c, err := r.Cookie(loginStateCookie)
+	c, err := r.Cookie(a.loginStateName)
 	if err != nil {
 		return st, err
 	}
@@ -123,7 +128,7 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	q := r.URL.Query()
-	st, err := readLoginState(r)
+	st, err := a.readLoginState(r)
 	if err != nil || st.State == "" || q.Get("state") != st.State {
 		http.Error(w, "invalid login state", http.StatusBadRequest)
 		return
@@ -227,7 +232,12 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	raw, hash := newToken()
-	if err := a.store.CreateSession(ctx, hash, u.ID, rawID, time.Now().Add(a.sessionTTL)); err != nil {
+	err = a.store.CreateSession(ctx, hash, u.ID, rawID, time.Now().Add(a.sessionTTL))
+	if errors.Is(err, ErrNoUser) {
+		a.authErrorRedirect(w, r, "disabled")
+		return
+	}
+	if err != nil {
 		slog.Error("auth: create session failed", "user_id", u.ID, "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -237,7 +247,7 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 	a.setSessionCookie(w, raw)
 	a.clearLoginState(w)
-	// Re-validated: gg_oidc is unsigned.
+	// Re-validated: the login-state cookie is unsigned.
 	http.Redirect(w, r, safeReturnTo(st.ReturnTo), http.StatusFound)
 }
 

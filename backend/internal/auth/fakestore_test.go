@@ -43,6 +43,8 @@ type fakeStore struct {
 	invites   map[string]*fakeInvite
 	touched   []string
 	issuerArg []string // issuer values passed to FindUserByIdentity/RegisterWithInvite
+	// afterTouchLogin runs under the lock, e.g. to simulate a concurrent disable mid-login.
+	afterTouchLogin func(u *fakeUser)
 }
 
 func newFakeStore() *fakeStore {
@@ -169,6 +171,9 @@ func (s *fakeStore) CreateAPIToken(_ context.Context, userID, name string, hash 
 	if s.err != nil {
 		return APIToken{}, s.err
 	}
+	if _, ok := s.usableUser(userID); !ok {
+		return APIToken{}, ErrNoUser
+	}
 	if s.activeTokens(userID) >= maxActive {
 		return APIToken{}, ErrTokenLimit
 	}
@@ -226,6 +231,9 @@ func (s *fakeStore) CreateSession(_ context.Context, hash []byte, userID, idToke
 	if s.err != nil {
 		return s.err
 	}
+	if _, ok := s.usableUser(userID); !ok {
+		return ErrNoUser
+	}
 	s.sessions[string(hash)] = &fakeSession{userID: userID, idToken: idToken, expiresAt: expiresAt}
 	return nil
 }
@@ -270,6 +278,9 @@ func (s *fakeStore) TouchLogin(_ context.Context, userID, email, displayName str
 		}
 		now := time.Now()
 		u.LastLoginAt = &now
+		if s.afterTouchLogin != nil {
+			s.afterTouchLogin(u)
+		}
 	}
 	return nil
 }
@@ -283,6 +294,9 @@ func (s *fakeStore) RegisterWithInvite(_ context.Context, inviteHash []byte, iss
 	}
 	inv, ok := s.invites[string(inviteHash)]
 	if !ok || inv.usedAt != nil || !inv.ExpiresAt.After(time.Now()) {
+		return UserRecord{}, ErrInviteInvalid
+	}
+	if c, ok := s.users[inv.CreatedBy]; ok && c.Disabled {
 		return UserRecord{}, ErrInviteInvalid
 	}
 	var u *fakeUser
@@ -343,6 +357,24 @@ func (s *fakeStore) SetDisabled(_ context.Context, userID string, disabled bool)
 		return ErrNoUser
 	}
 	u.Disabled = disabled
+	if disabled {
+		now := time.Now()
+		for k, sess := range s.sessions {
+			if sess.userID == userID {
+				delete(s.sessions, k)
+			}
+		}
+		for _, t := range s.tokens {
+			if t.userID == userID && t.RevokedAt == nil {
+				t.RevokedAt = &now
+			}
+		}
+		for _, inv := range s.invites {
+			if inv.CreatedBy == userID && inv.usedAt == nil {
+				inv.usedAt = &now
+			}
+		}
+	}
 	return nil
 }
 
