@@ -160,7 +160,9 @@ The compose `keycloak` service and `deploy/keycloak/geogallery-realm.json` are f
 For production:
 
 - Run Keycloak in production mode (`kc.sh start`) with its own PostgreSQL database (`KC_DB=postgres`, …) and TLS. Set `KC_HOSTNAME` to its public https URL.
-- Create a realm. Under realm settings, turn off **User registration**.
+- Create a realm. Under **Realm settings → Login**, choose whether **User registration** is on:
+  - On: an invitee clicks **Register** on the Keycloak login page and creates their own account. GeoGallery's invite gate still sends uninvited sign-ups to `not_invited`.
+  - Off: an invitee without a Keycloak account gets "Invalid username or password." Create each person under **Users** before you send the invite.
 - Create an OpenID Connect client that mirrors the dev realm's client settings:
   - **Client authentication** on (confidential client, client secret authenticator). Copy the generated secret to `OIDC_CLIENT_SECRET`.
   - **Standard flow** on; **implicit flow** and **direct access grants** off.

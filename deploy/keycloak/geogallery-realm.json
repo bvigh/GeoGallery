@@ -1,7 +1,7 @@
 {
   "realm": "geogallery",
   "enabled": true,
-  "registrationAllowed": false,
+  "registrationAllowed": true,
   "clients": [
     {
       "clientId": "geogallery",

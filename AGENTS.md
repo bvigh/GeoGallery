@@ -27,7 +27,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `backend/internal/geo/gps.go` | GPS interpolation (Haversine + confidence scoring) |
 | `backend/internal/storage/s3.go` | S3/MinIO client wrapper (presigned GETs, 15 min) |
 | `backend/migrations/` | golang-migrate SQL, numbered `000001_…` |
-| `deploy/keycloak/geogallery-realm.json` | Dev/E2E Keycloak realm (client + test users alice/bob/carol). Dev only |
+| `deploy/keycloak/geogallery-realm.json` | Dev/E2E Keycloak realm (client + test users alice/bob/carol, self-registration on). Dev only |
 | `docs/auth.md` | Identity provider setup (Logto, other providers, production Keycloak), API tokens, port hardening |
 | `frontend/src/api/client.ts` | Typed fetch wrapper — all backend calls go here; a 401 redirects to login |
 | `frontend/src/types/index.ts` | Canonical TypeScript types shared across the app |

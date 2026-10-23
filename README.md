@@ -40,7 +40,7 @@ cp .env.example .env
 docker compose --profile dev up --build
 ```
 
-The `dev` profile adds Keycloak with a dev realm (`deploy/keycloak/geogallery-realm.json`) and test users `alice`, `bob` and `carol`, each with a password equal to the username.
+The `dev` profile adds Keycloak with a dev realm (`deploy/keycloak/geogallery-realm.json`) and test users `alice`, `bob` and `carol`, each with a password equal to the username. The realm allows self-registration, so someone with an invite link can click **Register** on the Keycloak login page to create a new account.
 
 Create the first admin and sign in:
 
