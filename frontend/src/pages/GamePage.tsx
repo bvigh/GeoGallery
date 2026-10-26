@@ -3,6 +3,7 @@ import { MapContainer, TileLayer, Marker, Polyline, useMapEvents, useMap } from 
 import type { GameRound, GuessResult, OrientationKeyframe, Trip, FilterState } from "@/types";
 import { api, ApiError } from "@/api/client";
 import L from "leaflet";
+import "leaflet/dist/leaflet.css";
 import Panorama360 from "@/components/viewer/Panorama360";
 import Video360 from "@/components/viewer/Video360";
 import { FilterPanel } from "@/components/map/FilterPanel";
@@ -243,7 +244,7 @@ export function GamePage() {
                 />
                 <ClickMarker onPick={(lat, lng) => setGuess({ lat, lng })} />
                 {guess && (
-                  <Marker position={[guess.lat, guess.lng]} ref={markerRef} />
+                  <Marker position={[guess.lat, guess.lng]} icon={guessIcon} ref={markerRef} />
                 )}
               </MapContainer>
             </div>
