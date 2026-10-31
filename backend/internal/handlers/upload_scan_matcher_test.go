@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -244,6 +245,41 @@ func TestUpload_BodyTooLarge_Returns413(t *testing.T) {
 
 	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
 	assert.Empty(t, store.keys)
+}
+
+// failOnceStorage fails the upload of the file whose key matches the nth call (0-based).
+type failOnceStorage struct {
+	mockUploadStorage
+	failAt int
+	calls  int
+}
+
+func (m *failOnceStorage) Upload(ctx context.Context, key string, body io.Reader, size int64, ct string) error {
+	defer func() { m.calls++ }()
+	if m.calls == m.failAt {
+		return fmt.Errorf("s3 down")
+	}
+	return m.mockUploadStorage.Upload(ctx, key, body, size, ct)
+}
+
+func TestUpload_ReportsFailedFiles(t *testing.T) {
+	h := &MediaHandler{
+		registrar:     &MediaRegistrar{db: &mockRegistrarDB{rowsAffected: 1}, storage: &failOnceStorage{failAt: 1}},
+		runMatcher:    noopMatcher,
+		runTripDetect: noopTripDetect,
+	}
+
+	w := httptest.NewRecorder()
+	h.Upload(w, uploadFiles("a.jpg", "b.jpg", "c.jpg"))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		Uploaded []string `json:"uploaded"`
+		Failed   []string `json:"failed"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, []string{"a.jpg", "c.jpg"}, resp.Uploaded)
+	assert.Equal(t, []string{"b.jpg"}, resp.Failed)
 }
 
 // --- RunIngestScan (fake deps) ---

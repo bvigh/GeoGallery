@@ -178,30 +178,44 @@ var maxUploadBodyBytes int64 = 4 << 30 // var so tests can lower it
 
 func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	ownerID := auth.MustUser(r.Context()).ID
+	start := time.Now()
+	// ContentLength is -1 for chunked bodies; nginx/Caddy limits apply before this point.
+	slog.Info("upload: request received", "owner", ownerID, "content_length", r.ContentLength, "limit", maxUploadBodyBytes)
+
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodyBytes)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
+			slog.Warn("upload: request body too large", "owner", ownerID,
+				"content_length", r.ContentLength, "limit", maxUploadBodyBytes)
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
+		// Includes client disconnects and a full temp dir while spooling parts to disk.
+		slog.Warn("upload: parse multipart form failed", "owner", ownerID,
+			"content_length", r.ContentLength, "elapsed", time.Since(start), "err", err)
 		http.Error(w, "parse form", http.StatusBadRequest)
 		return
 	}
 
 	files := r.MultipartForm.File["files"]
 	if len(files) == 0 {
+		slog.Warn("upload: no files in form", "owner", ownerID)
 		http.Error(w, "no files", http.StatusBadRequest)
 		return
 	}
+	slog.Info("upload: form parsed", "owner", ownerID, "files", len(files), "elapsed", time.Since(start))
 
 	mtimes := r.MultipartForm.Value["file_mtime"]
 
-	var uploaded []string
+	var uploaded, failed []string
+	duplicates := 0
 	for i, fh := range files {
+		fileStart := time.Now()
 		f, err := fh.Open()
 		if err != nil {
 			slog.Error("upload: open multipart file failed", "file", fh.Filename, "err", err)
+			failed = append(failed, fh.Filename)
 			continue
 		}
 
@@ -216,11 +230,16 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		registered, err := h.registrar.registerMedia(r.Context(), ownerID, f, fh.Size, fh.Filename, fallbackMtime)
 		f.Close()
 		if err != nil {
-			slog.Error("upload: register media failed", "file", fh.Filename, "err", err)
+			slog.Error("upload: register media failed", "file", fh.Filename, "size", fh.Size, "err", err)
+			failed = append(failed, fh.Filename)
 			continue
 		}
 		if registered {
 			uploaded = append(uploaded, fh.Filename)
+			slog.Info("upload: file stored", "file", fh.Filename, "size", fh.Size, "elapsed", time.Since(fileStart))
+		} else {
+			duplicates++
+			slog.Info("upload: duplicate skipped", "file", fh.Filename, "size", fh.Size)
 		}
 	}
 
@@ -237,8 +256,10 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	slog.Info("upload: done", "owner", ownerID, "uploaded", len(uploaded), "duplicates", duplicates,
+		"failed", len(failed), "elapsed", time.Since(start))
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"uploaded": uploaded})
+	json.NewEncoder(w).Encode(map[string]any{"uploaded": uploaded, "failed": failed})
 }
 
 type viewSettingsRequest struct {

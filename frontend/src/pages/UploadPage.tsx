@@ -1,12 +1,17 @@
 import { useState, useRef } from "react";
 import { Upload } from "lucide-react";
 import { api } from "@/api/client";
+import { MAX_FILE_BYTES, planUploadBatches } from "@/lib/uploadBatches";
 import type { GpsImportResult } from "@/types";
+
+const GiB = 1024 ** 3;
 
 export function UploadPage() {
   const [files, setFiles] = useState<FileList | null>(null);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<string[] | null>(null);
+  const [failed, setFailed] = useState<string[]>([]);
+  const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const gpsInputRef = useRef<HTMLInputElement>(null);
@@ -33,22 +38,42 @@ export function UploadPage() {
     if (!files || files.length === 0) return;
     setUploading(true);
     setError(null);
+    setResult(null);
+    setFailed([]);
 
-    const form = new FormData();
-    for (const file of Array.from(files)) {
-      form.append("files", file);
-      form.append("file_mtime", String(file.lastModified)); // ms since epoch
+    // One request for everything would exceed the 4 GiB request limit (413), so send batches.
+    const { batches, tooLarge } = planUploadBatches(Array.from(files));
+    const uploaded: string[] = [];
+    const failedNames: string[] = tooLarge.map(
+      (f) => `${f.name} (larger than ${(MAX_FILE_BYTES / GiB).toFixed(1)} GiB)`
+    );
+    const errors: string[] = [];
+
+    for (const [i, batch] of batches.entries()) {
+      setProgress(`Uploading batch ${i + 1} of ${batches.length} (${uploaded.length} file(s) done)`);
+      const form = new FormData();
+      for (const file of batch) {
+        form.append("files", file);
+        form.append("file_mtime", String(file.lastModified)); // ms since epoch
+      }
+      try {
+        const data = await api.upload(form);
+        uploaded.push(...(data.uploaded ?? []));
+        failedNames.push(...(data.failed ?? []));
+      } catch (e: unknown) {
+        errors.push(e instanceof Error ? e.message : "Upload failed");
+        failedNames.push(...batch.map((f) => f.name));
+      }
     }
 
-    try {
-      const data = await api.upload(form);
-      setResult(data.uploaded ?? []);
+    setResult(uploaded);
+    setFailed(failedNames);
+    setError(errors.length > 0 ? [...new Set(errors)].join("; ") : null);
+    setProgress(null);
+    setUploading(false);
+    if (failedNames.length === 0) {
       setFiles(null);
       if (inputRef.current) inputRef.current.value = "";
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Upload failed");
-    } finally {
-      setUploading(false);
     }
   };
 
@@ -85,6 +110,7 @@ export function UploadPage() {
           >
             {uploading ? "Uploading…" : "Upload"}
           </button>
+          {progress && <p className="mt-2 text-sm text-muted-foreground">{progress}</p>}
         </div>
       )}
 
@@ -93,6 +119,17 @@ export function UploadPage() {
           <p className="font-medium">Uploaded {result.length} file(s)</p>
           <ul className="mt-1 list-disc pl-4 text-muted-foreground">
             {result.map((f) => (
+              <li key={f}>{f}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {failed.length > 0 && (
+        <div className="mt-4 rounded-lg border border-red-300 p-3 text-sm">
+          <p className="font-medium text-red-500">{failed.length} file(s) failed</p>
+          <ul className="mt-1 list-disc pl-4 text-muted-foreground">
+            {failed.map((f) => (
               <li key={f}>{f}</li>
             ))}
           </ul>

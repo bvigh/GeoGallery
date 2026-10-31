@@ -46,6 +46,40 @@ describe("UploadPage", () => {
     expect(await screen.findByText("POST /media/upload failed: 500")).toBeInTheDocument();
   });
 
+  it("splits large selections into several requests and lists failures", async () => {
+    mockApi.upload
+      .mockResolvedValueOnce({ uploaded: ["a.mp4"], failed: [] })
+      .mockRejectedValueOnce(new Error("POST /media/upload failed: 502"))
+      .mockResolvedValueOnce({ uploaded: [], failed: ["c.mp4"] });
+    const { container } = render(<UploadPage />);
+    const big = (name: string) => {
+      const f = new File(["x"], name, { type: "video/mp4" });
+      Object.defineProperty(f, "size", { value: 400 * 1024 ** 2 });
+      return f;
+    };
+    await userEvent.upload(mediaInput(container), [big("a.mp4"), big("b.mp4"), big("c.mp4")]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    expect(await screen.findByText("Uploaded 1 file(s)")).toBeInTheDocument();
+    expect(mockApi.upload).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("2 file(s) failed")).toBeInTheDocument();
+    expect(screen.getByText("b.mp4")).toBeInTheDocument();
+    expect(screen.getByText("c.mp4")).toBeInTheDocument();
+    expect(screen.getByText("POST /media/upload failed: 502")).toBeInTheDocument();
+  });
+
+  it("does not send files over the per-request limit", async () => {
+    const { container } = render(<UploadPage />);
+    const huge = new File(["x"], "huge.mp4", { type: "video/mp4" });
+    Object.defineProperty(huge, "size", { value: 5 * 1024 ** 3 });
+    await userEvent.upload(mediaInput(container), huge);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    expect(await screen.findByText("1 file(s) failed")).toBeInTheDocument();
+    expect(screen.getByText(/^huge\.mp4 \(larger than/)).toBeInTheDocument();
+    expect(mockApi.upload).not.toHaveBeenCalled();
+  });
+
   it("imports a GPS JSON file and shows the counts", async () => {
     render(<UploadPage />);
     const file = new File(["[]"], "points.json", { type: "application/json" });

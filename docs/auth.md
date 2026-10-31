@@ -60,10 +60,12 @@ This is the setup for the hosted instance.
    - Redirect URI: `{PUBLIC_URL}/api/auth/callback`
    - Post sign-out redirect URI: `{PUBLIC_URL}/`
    - Copy the **App ID** to `OIDC_CLIENT_ID` and the **App secret** to `OIDC_CLIENT_SECRET`.
-2. **Set up the custom domain before anything else** (Console → **Custom domain**). Wait until it is active.
-   - The issuer is `https://<custom-domain>/oidc`, with no trailing slash. Check it against `https://<custom-domain>/oidc/.well-known/openid-configuration`.
+2. **Choose the issuer hostname (optional custom domain).** Every tenant has a default issuer, `https://<tenant>.logto.app/oidc`, shown on the application page as **Issuer endpoint** (read-only there). You can use it as is, or serve Logto from your own subdomain, such as `auth.example.com`. Decide **before** running `server invite --admin`: users are keyed by the issuer string, so switching later means running `rebind-issuer` (see [Issuer stability](#issuer-stability)).
+   - To use a custom domain, first add a DNS record at your DNS host: type **CNAME**, host = the subdomain only (e.g. `auth`), value `domains.logto.app` (use the CNAME value Logto's Domains table shows if it differs). It is a CNAME, not an IP address. The name must be a subdomain; Logto does not accept a bare domain.
+   - Then add the domain in the Console under **Settings → Domains**. If the record does not resolve yet, Logto rejects it with "custom hostname does not CNAME to this zone". Check with `dig +short CNAME auth.example.com`, which must print `domains.logto.app.`
+   - Wait until both DNS and SSL show as active. This usually takes minutes but can take up to 24 hours. CAA records on your domain must allow Logto's certificate authority.
+   - The issuer is `https://<hostname>/oidc`, with no trailing slash. Check it against `https://<hostname>/oidc/.well-known/openid-configuration`.
    - Set `OIDC_ISSUER_URL` and `OIDC_DISCOVERY_URL` to that value.
-   - Do this **before** running `server invite --admin`. Users are keyed by the issuer string, so starting on `https://<tenant>.logto.app/oidc` and switching later means running `rebind-issuer` (see below).
 3. **Add social connectors.** Under **Connectors → Social connectors**, add Google and Facebook with **your own** OAuth app credentials. Then enable them on the sign-in page under **Sign-in & account → Sign-up and sign-in**.
    - Google: create an OAuth client in Google Cloud and register Logto's callback URI there, as shown in the connector setup.
    - Facebook: create a Meta app. Meta requires a privacy policy URL and a data-deletion URL before the app can go live.
