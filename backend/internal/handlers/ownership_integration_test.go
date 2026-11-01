@@ -413,7 +413,7 @@ func TestOwnership_SameFileUploadedByTwoUsers(t *testing.T) {
 	require.Equal(t, http.StatusOK, uploadAs(t, f.router, f.userB, "shared.jpg", content).Code)
 	rec := uploadAs(t, f.router, f.userA, "renamed.jpg", content)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"uploaded":null,"failed":null}`, rec.Body.String(), "A's re-upload is deduplicated")
+	assert.JSONEq(t, `{"uploaded":null,"skipped":["renamed.jpg"],"failed":null}`, rec.Body.String(), "A's re-upload is deduplicated")
 
 	rows, err := f.pool.Query(context.Background(),
 		`SELECT owner_id::text, storage_key FROM media WHERE filename = 'shared.jpg' ORDER BY owner_id`)

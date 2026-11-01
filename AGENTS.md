@@ -86,7 +86,7 @@ Auth column:
 | `POST` | `/api/auth/logout` | public | Delete session, clear cookie, `{"redirect_url": end_session URL with id_token_hint, or "/"}` |
 | `GET` | `/api/auth/me` | user | `{id, email, display_name, role}` |
 | `GET` | `/api/media` | user | List the caller's media (max 500, `offset`, ordered by `taken_at DESC`); supports `from_date`, `to_date`, `trip_id[]` (incl. `unassigned`), `media_type[]` filters; 400 on a malformed date or `trip_id` |
-| `POST` | `/api/media/upload` | user | Multipart upload (field: `files[]`, `file_mtime[]` ms-since-epoch); body limit 4 GiB |
+| `POST` | `/api/media/upload` | user | Multipart upload (field: `files[]`, `file_mtime[]` ms-since-epoch); body limit 4 GiB; returns `{uploaded, skipped, failed}` filename lists (`skipped` = per-owner duplicates) |
 | `GET` | `/api/media/{id}/url` | user | Get presigned URL for a media item |
 | `PATCH` | `/api/media/{id}/location` | user | Manual location `{lat, lng}`: sets `gps_source='manual'`; if `taken_at` is known, also upserts a `manual` GPS track point and re-runs the matcher; 404 if not owned |
 | `PATCH` | `/api/media/{id}/view-settings` | user | Update 360° default view (`initial_yaw`, `initial_pitch`, `initial_fov`); 404 if not owned |

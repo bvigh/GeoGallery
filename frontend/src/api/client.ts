@@ -115,7 +115,11 @@ async function logout(): Promise<void> {
   window.location.assign(data.redirect_url);
 }
 
-async function upload(form: FormData): Promise<{ uploaded: string[] | null; failed?: string[] | null }> {
+async function upload(form: FormData): Promise<{
+  uploaded: string[] | null;
+  skipped?: string[] | null;
+  failed?: string[] | null;
+}> {
   const res = await request("/media/upload", { method: "POST", body: form });
   if (!res.ok) throw new ApiError(`POST /media/upload failed: ${res.status}`, res.status);
   return res.json();
