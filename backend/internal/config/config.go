@@ -1,9 +1,17 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
+)
+
+const (
+	DevOIDCClientSecret = "geogallery-dev-secret"
+	devS3Credential     = "minioadmin"
 )
 
 type Config struct {
@@ -19,14 +27,24 @@ type Config struct {
 	TripGapHours        int
 	LogLevel            string
 	LogFormat           string
+
+	PublicURL        string // normalised to scheme://host[:port]
+	PublicOrigin     string // CSRF trusted origin, redirect_uri and post-logout URI base
+	CookieSecure     bool   // PublicURL scheme is https
+	OIDCIssuerURL    string // used verbatim: must match the discovery issuer byte for byte
+	OIDCDiscoveryURL string // only differs from OIDCIssuerURL for the Docker/Keycloak split
+	OIDCClientID     string
+	OIDCClientSecret string
+	OIDCScopes       []string
+	SessionTTLHours  int
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{
 		DatabaseURL:         getEnv("DATABASE_URL", ""),
 		S3Endpoint:          getEnv("S3_ENDPOINT", "http://localhost:9000"),
-		S3AccessKey:         getEnv("S3_ACCESS_KEY", "minioadmin"),
-		S3SecretKey:         getEnv("S3_SECRET_KEY", "minioadmin"),
+		S3AccessKey:         getEnv("S3_ACCESS_KEY", devS3Credential),
+		S3SecretKey:         getEnv("S3_SECRET_KEY", devS3Credential),
 		S3Bucket:            getEnv("S3_BUCKET", "geogallery"),
 		S3Region:            getEnv("S3_REGION", "us-east-1"),
 		ServerPort:          getEnv("SERVER_PORT", "8080"),
@@ -35,13 +53,65 @@ func Load() (*Config, error) {
 		TripGapHours:        getEnvInt("TRIP_GAP_HOURS", 24),
 		LogLevel:            getEnv("LOG_LEVEL", "info"),
 		LogFormat:           getEnv("LOG_FORMAT", "text"),
+		OIDCIssuerURL:       getEnv("OIDC_ISSUER_URL", "http://localhost:8180/realms/geogallery"),
+		OIDCClientID:        getEnv("OIDC_CLIENT_ID", "geogallery"),
+		OIDCClientSecret:    getEnv("OIDC_CLIENT_SECRET", DevOIDCClientSecret),
+		OIDCScopes:          strings.Fields(getEnv("OIDC_SCOPES", "openid profile email")),
+		SessionTTLHours:     getEnvInt("SESSION_TTL_HOURS", 720),
 	}
+	cfg.OIDCDiscoveryURL = getEnv("OIDC_DISCOVERY_URL", cfg.OIDCIssuerURL)
 
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
 
+	origin, err := normalisePublicURL(getEnv("PUBLIC_URL", "http://localhost:5173"))
+	if err != nil {
+		return nil, err
+	}
+	cfg.PublicURL = origin
+	cfg.PublicOrigin = origin
+	cfg.CookieSecure = strings.HasPrefix(origin, "https://")
+
+	if cfg.SessionTTLHours <= 0 {
+		return nil, fmt.Errorf("SESSION_TTL_HOURS must be positive, got %d", cfg.SessionTTLHours)
+	}
+
+	if cfg.CookieSecure {
+		if cfg.OIDCClientSecret == DevOIDCClientSecret {
+			return nil, errors.New("refusing to start over https with the dev OIDC_CLIENT_SECRET")
+		}
+		if cfg.S3AccessKey == devS3Credential || cfg.S3SecretKey == devS3Credential {
+			return nil, errors.New("refusing to start over https with the default minioadmin S3 credentials")
+		}
+	}
+
 	return cfg, nil
+}
+
+// normalisePublicURL trims one trailing slash and rejects anything beyond scheme://host[:port]:
+// AddTrustedOrigin rejects paths, and a leftover slash would yield "//api/auth/callback".
+func normalisePublicURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSuffix(raw, "/"))
+	if err != nil {
+		return "", fmt.Errorf("PUBLIC_URL %q: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("PUBLIC_URL %q: scheme must be http or https", raw)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("PUBLIC_URL %q: host is required", raw)
+	}
+	if u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", fmt.Errorf("PUBLIC_URL %q: must be scheme://host[:port] with no path, query or fragment", raw)
+	}
+	// Browsers send Origin with a lowercase host and no default port, and CrossOriginProtection
+	// compares trusted origins as exact strings.
+	host := strings.ToLower(u.Host)
+	if (u.Scheme == "https" && u.Port() == "443") || (u.Scheme == "http" && u.Port() == "80") {
+		host = strings.TrimSuffix(host, ":"+u.Port())
+	}
+	return u.Scheme + "://" + host, nil
 }
 
 func getEnv(key, fallback string) string {

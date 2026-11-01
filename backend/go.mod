@@ -1,6 +1,6 @@
 module codeberg.org/bvigh/geogallery
 
-go 1.24
+go 1.26.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.42.0
@@ -8,14 +8,16 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.24
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.2.10
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.103.3
+	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/go-chi/chi/v5 v5.1.0
-	github.com/go-chi/cors v1.2.1
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/golang-migrate/migrate/v4 v4.18.1
 	github.com/jackc/pgx/v5 v5.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/labstack/gommon v0.5.0
 	github.com/rwcarlsen/goexif v0.0.0-20190401172101-9e8deecbddbd
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/oauth2 v0.37.0
 )
 
 require (

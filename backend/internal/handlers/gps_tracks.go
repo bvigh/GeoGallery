@@ -3,12 +3,14 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"codeberg.org/bvigh/geogallery/internal/auth"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -21,7 +23,7 @@ type GPSTrackHandler struct {
 	db          gpsTrackDB
 	matcherPool matcherDB // same *pgxpool.Pool in production; nil in tests (runMatcher is mocked)
 	matchWindow time.Duration
-	runMatcher  func(ctx context.Context, db matcherDB, maxWindow time.Duration, reprocess bool) error
+	runMatcher  func(ctx context.Context, db matcherDB, ownerID string, maxWindow time.Duration, reprocess bool) error
 }
 
 func NewGPSTrackHandler(pool *pgxpool.Pool, matchWindow time.Duration) *GPSTrackHandler {
@@ -56,9 +58,18 @@ type importResponse struct {
 
 const importBatchSize = 1000
 
+var maxImportBodyBytes int64 = 100 << 20 // var so tests can lower it
+
 func (h *GPSTrackHandler) Import(w http.ResponseWriter, r *http.Request) {
+	ownerID := auth.MustUser(r.Context()).ID
+	r.Body = http.MaxBytesReader(w, r.Body, maxImportBodyBytes)
 	var points []gpsPointInput
 	if err := json.NewDecoder(r.Body).Decode(&points); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
 	}
@@ -120,16 +131,17 @@ func (h *GPSTrackHandler) Import(w http.ResponseWriter, r *http.Request) {
 		batch := valid[start:end]
 
 		var sb strings.Builder
-		sb.WriteString(`INSERT INTO gps_tracks (source, recorded_at, location, altitude_m, accuracy_m, activity) VALUES `)
-		args := make([]any, 0, len(batch)*7)
+		sb.WriteString(`INSERT INTO gps_tracks (owner_id, source, recorded_at, location, altitude_m, accuracy_m, activity) VALUES `)
+		const paramsPerRow = 8
+		args := make([]any, 0, len(batch)*paramsPerRow)
 		for j, vp := range batch {
 			if j > 0 {
 				sb.WriteString(", ")
 			}
-			base := j*7 + 1
-			sb.WriteString(fmt.Sprintf("($%d, $%d, ST_SetSRID(ST_MakePoint($%d, $%d), 4326), $%d, $%d, $%d)",
-				base, base+1, base+2, base+3, base+4, base+5, base+6))
-			args = append(args, vp.source, vp.recordedAt, vp.lng, vp.lat, vp.altitudeM, vp.accuracyM, vp.activity)
+			base := j*paramsPerRow + 1
+			sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, ST_SetSRID(ST_MakePoint($%d, $%d), 4326), $%d, $%d, $%d)",
+				base, base+1, base+2, base+3, base+4, base+5, base+6, base+7))
+			args = append(args, ownerID, vp.source, vp.recordedAt, vp.lng, vp.lat, vp.altitudeM, vp.accuracyM, vp.activity)
 		}
 		sb.WriteString(` ON CONFLICT DO NOTHING`)
 
@@ -145,7 +157,7 @@ func (h *GPSTrackHandler) Import(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(valid) > 0 {
-		if err := h.runMatcher(ctx, h.matcherPool, h.matchWindow, true); err != nil {
+		if err := h.runMatcher(ctx, h.matcherPool, ownerID, h.matchWindow, true); err != nil {
 			slog.Error("gps-tracks: GPS matcher failed after import", "err", err)
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return

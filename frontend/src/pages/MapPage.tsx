@@ -10,7 +10,10 @@ import Video360 from "../components/viewer/Video360";
 
 const PAGE_SIZE = 500;
 
-function MediaPreview({
+// crossOrigin matters: the fullscreen 360° viewers load this same presigned URL
+// as a CORS request (WebGL texture). A plain no-CORS preview fetch gets cached
+// without Access-Control-Allow-Origin, and the browser would reuse it and fail.
+export function MediaPreview({
   item,
   url,
   onFullscreen,
@@ -29,6 +32,7 @@ function MediaPreview({
       {isVideo ? (
         <video
           src={url}
+          crossOrigin="anonymous"
           className="w-full rounded object-cover"
           style={{ maxHeight: 160 }}
           muted
@@ -37,6 +41,7 @@ function MediaPreview({
       ) : (
         <img
           src={url}
+          crossOrigin="anonymous"
           alt={item.filename}
           className="w-full rounded object-cover"
           style={{ maxHeight: 160 }}

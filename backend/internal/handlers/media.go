@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"codeberg.org/bvigh/geogallery/internal/auth"
 	"codeberg.org/bvigh/geogallery/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -39,9 +41,9 @@ type MediaHandler struct {
 	registrar     *MediaRegistrar
 	matcherPool   matcherDB
 	matchWindow   time.Duration
-	runMatcher    func(ctx context.Context, db matcherDB, maxWindow time.Duration, reprocess bool) error
+	runMatcher    func(ctx context.Context, db matcherDB, ownerID string, maxWindow time.Duration, reprocess bool) error
 	tripGapHours  int
-	runTripDetect func(ctx context.Context, db tripDetectDB, gapHours int) error
+	runTripDetect func(ctx context.Context, db tripDetectDB, ownerID string, gapHours int) error
 }
 
 func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Duration, tripGapHours int) *MediaHandler {
@@ -76,6 +78,10 @@ type mediaItem struct {
 
 func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if err := validateMediaFilters(q); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	fromDate := q.Get("from_date")
 	toDate := q.Get("to_date")
@@ -83,9 +89,9 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	mediaTypes := q["media_type"]
 	offset, _ := strconv.Atoi(q.Get("offset"))
 
-	var conds []string
-	var args []any
-	n := 1
+	conds := []string{readableMediaCond("", 1)}
+	args := []any{auth.MustUser(r.Context()).ID}
+	n := 2
 
 	if fromDate != "" {
 		conds = append(conds, fmt.Sprintf("taken_at >= $%d::date", n))
@@ -126,10 +132,7 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	where := ""
-	if len(conds) > 0 {
-		where = "WHERE " + strings.Join(conds, " AND ")
-	}
+	where := "WHERE " + strings.Join(conds, " AND ")
 
 	args = append(args, offset)
 	sql := fmt.Sprintf(`
@@ -171,25 +174,48 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(items)
 }
 
+var maxUploadBodyBytes int64 = 4 << 30 // var so tests can lower it
+
 func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
+	ownerID := auth.MustUser(r.Context()).ID
+	start := time.Now()
+	// ContentLength is -1 for chunked bodies; nginx/Caddy limits apply before this point.
+	slog.Info("upload: request received", "owner", ownerID, "content_length", r.ContentLength, "limit", maxUploadBodyBytes)
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodyBytes)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			slog.Warn("upload: request body too large", "owner", ownerID,
+				"content_length", r.ContentLength, "limit", maxUploadBodyBytes)
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		// Includes client disconnects and a full temp dir while spooling parts to disk.
+		slog.Warn("upload: parse multipart form failed", "owner", ownerID,
+			"content_length", r.ContentLength, "elapsed", time.Since(start), "err", err)
 		http.Error(w, "parse form", http.StatusBadRequest)
 		return
 	}
 
 	files := r.MultipartForm.File["files"]
 	if len(files) == 0 {
+		slog.Warn("upload: no files in form", "owner", ownerID)
 		http.Error(w, "no files", http.StatusBadRequest)
 		return
 	}
+	slog.Info("upload: form parsed", "owner", ownerID, "files", len(files), "elapsed", time.Since(start))
 
 	mtimes := r.MultipartForm.Value["file_mtime"]
 
-	var uploaded []string
+	var uploaded, failed []string
+	duplicates := 0
 	for i, fh := range files {
+		fileStart := time.Now()
 		f, err := fh.Open()
 		if err != nil {
 			slog.Error("upload: open multipart file failed", "file", fh.Filename, "err", err)
+			failed = append(failed, fh.Filename)
 			continue
 		}
 
@@ -201,32 +227,39 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		registered, err := h.registrar.registerMedia(r.Context(), f, fh.Size, fh.Filename, fallbackMtime)
+		registered, err := h.registrar.registerMedia(r.Context(), ownerID, f, fh.Size, fh.Filename, fallbackMtime)
 		f.Close()
 		if err != nil {
-			slog.Error("upload: register media failed", "file", fh.Filename, "err", err)
+			slog.Error("upload: register media failed", "file", fh.Filename, "size", fh.Size, "err", err)
+			failed = append(failed, fh.Filename)
 			continue
 		}
 		if registered {
 			uploaded = append(uploaded, fh.Filename)
+			slog.Info("upload: file stored", "file", fh.Filename, "size", fh.Size, "elapsed", time.Since(fileStart))
+		} else {
+			duplicates++
+			slog.Info("upload: duplicate skipped", "file", fh.Filename, "size", fh.Size)
 		}
 	}
 
 	if len(uploaded) > 0 {
-		if err := h.runMatcher(r.Context(), h.matcherPool, h.matchWindow, true); err != nil {
+		if err := h.runMatcher(r.Context(), h.matcherPool, ownerID, h.matchWindow, true); err != nil {
 			slog.Error("upload: GPS matcher failed", "err", err)
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
-		if err := h.runTripDetect(r.Context(), h.registrar.db, h.tripGapHours); err != nil {
+		if err := h.runTripDetect(r.Context(), h.registrar.db, ownerID, h.tripGapHours); err != nil {
 			slog.Error("upload: trip detect failed", "err", err)
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
 	}
 
+	slog.Info("upload: done", "owner", ownerID, "uploaded", len(uploaded), "duplicates", duplicates,
+		"failed", len(failed), "elapsed", time.Since(start))
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"uploaded": uploaded})
+	json.NewEncoder(w).Encode(map[string]any{"uploaded": uploaded, "failed": failed})
 }
 
 type viewSettingsRequest struct {
@@ -244,13 +277,17 @@ func (h *MediaHandler) UpdateViewSettings(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	_, err := h.db.Exec(r.Context(),
-		`UPDATE media SET initial_yaw=$1, initial_pitch=$2, initial_fov=$3 WHERE id=$4`,
-		req.InitialYaw, req.InitialPitch, req.InitialFov, id,
+	tag, err := h.db.Exec(r.Context(),
+		`UPDATE media SET initial_yaw=$1, initial_pitch=$2, initial_fov=$3 WHERE id=$4 AND owner_id=$5`,
+		req.InitialYaw, req.InitialPitch, req.InitialFov, id, auth.MustUser(r.Context()).ID,
 	)
 	if err != nil {
 		slog.Error("media: update view settings failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 
@@ -267,9 +304,13 @@ type orientationKeyframe struct {
 func (h *MediaHandler) GetKeyframes(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
+	// Foreign and missing IDs both yield [], so they stay indistinguishable.
 	rows, err := h.db.Query(r.Context(),
-		`SELECT time_seconds, yaw, pitch, fov FROM video_keyframes WHERE media_id=$1 ORDER BY time_seconds ASC`,
-		id,
+		`SELECT k.time_seconds, k.yaw, k.pitch, k.fov
+		 FROM video_keyframes k JOIN media m ON m.id = k.media_id
+		 WHERE k.media_id=$1 AND `+readableMediaCond("m.", 2)+`
+		 ORDER BY k.time_seconds ASC`,
+		id, auth.MustUser(r.Context()).ID,
 	)
 	if err != nil {
 		slog.Error("media: get keyframes query failed", "id", id, "err", err)
@@ -309,6 +350,19 @@ func (h *MediaHandler) ReplaceKeyframes(w http.ResponseWriter, r *http.Request) 
 	}
 	defer tx.Rollback(r.Context())
 
+	var one int
+	if err := tx.QueryRow(r.Context(),
+		`SELECT 1 FROM media WHERE id=$1 AND owner_id=$2 FOR UPDATE`, id, auth.MustUser(r.Context()).ID,
+	).Scan(&one); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		slog.Error("media: replace keyframes owner check failed", "id", id, "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
 	if _, err := tx.Exec(r.Context(),
 		`DELETE FROM video_keyframes WHERE media_id=$1`, id,
 	); err != nil {
@@ -342,7 +396,7 @@ func (h *MediaHandler) GetURL(w http.ResponseWriter, r *http.Request) {
 
 	var storageKey string
 	err := h.db.QueryRow(r.Context(),
-		`SELECT storage_key FROM media WHERE id=$1`, id,
+		`SELECT storage_key FROM media WHERE id=$1 AND `+readableMediaCond("", 2), id, auth.MustUser(r.Context()).ID,
 	).Scan(&storageKey)
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -367,6 +421,7 @@ type locationRequest struct {
 
 func (h *MediaHandler) UpdateLocation(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	ownerID := auth.MustUser(r.Context()).ID
 
 	var req locationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -392,7 +447,7 @@ func (h *MediaHandler) UpdateLocation(w http.ResponseWriter, r *http.Request) {
 
 	var takenAt *time.Time
 	if err := tx.QueryRow(r.Context(),
-		`SELECT taken_at FROM media WHERE id = $1`, id,
+		`SELECT taken_at FROM media WHERE id = $1 AND owner_id = $2 FOR UPDATE`, id, ownerID,
 	).Scan(&takenAt); err != nil {
 		if err == pgx.ErrNoRows {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -408,8 +463,8 @@ func (h *MediaHandler) UpdateLocation(w http.ResponseWriter, r *http.Request) {
 		 SET location       = ST_SetSRID(ST_MakePoint($1, $2), 4326),
 		     gps_source     = 'manual',
 		     gps_confidence = 1.0
-		 WHERE id = $3`,
-		req.Lng, req.Lat, id,
+		 WHERE id = $3 AND owner_id = $4`,
+		req.Lng, req.Lat, id, ownerID,
 	); err != nil {
 		slog.Error("media: update location update failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -418,10 +473,10 @@ func (h *MediaHandler) UpdateLocation(w http.ResponseWriter, r *http.Request) {
 
 	if takenAt != nil {
 		if _, err := tx.Exec(r.Context(),
-			`INSERT INTO gps_tracks (source, recorded_at, location)
-			 VALUES ('manual', $1, ST_SetSRID(ST_MakePoint($2, $3), 4326))
-			 ON CONFLICT (source, recorded_at) DO UPDATE SET location = EXCLUDED.location`,
-			*takenAt, req.Lng, req.Lat,
+			`INSERT INTO gps_tracks (owner_id, source, recorded_at, location)
+			 VALUES ($1, 'manual', $2, ST_SetSRID(ST_MakePoint($3, $4), 4326))
+			 ON CONFLICT (owner_id, source, recorded_at) DO UPDATE SET location = EXCLUDED.location`,
+			ownerID, *takenAt, req.Lng, req.Lat,
 		); err != nil {
 			slog.Error("media: update location gps_tracks insert failed", "id", id, "err", err)
 			http.Error(w, "db error", http.StatusInternalServerError)
@@ -436,7 +491,7 @@ func (h *MediaHandler) UpdateLocation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if takenAt != nil {
-		if err := h.runMatcher(r.Context(), h.matcherPool, h.matchWindow, true); err != nil {
+		if err := h.runMatcher(r.Context(), h.matcherPool, ownerID, h.matchWindow, true); err != nil {
 			slog.Error("media: GPS matcher failed after manual location update", "id", id, "err", err)
 		}
 	}
@@ -446,6 +501,7 @@ func (h *MediaHandler) UpdateLocation(w http.ResponseWriter, r *http.Request) {
 
 func (h *MediaHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	ownerID := auth.MustUser(r.Context()).ID
 
 	tx, err := h.pool.Begin(r.Context())
 	if err != nil {
@@ -457,14 +513,14 @@ func (h *MediaHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	var storageKey string
 	if err = tx.QueryRow(r.Context(),
-		`SELECT storage_key FROM media WHERE id = $1`, id,
+		`SELECT storage_key FROM media WHERE id = $1 AND owner_id = $2`, id, ownerID,
 	).Scan(&storageKey); err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 
 	if _, err = tx.Exec(r.Context(),
-		`DELETE FROM media WHERE id = $1`, id,
+		`DELETE FROM media WHERE id = $1 AND owner_id = $2`, id, ownerID,
 	); err != nil {
 		slog.Error("media: delete db failed", "id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)

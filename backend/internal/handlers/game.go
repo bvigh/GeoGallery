@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -10,14 +11,24 @@ import (
 	"strings"
 	"time"
 
+	"codeberg.org/bvigh/geogallery/internal/auth"
 	"codeberg.org/bvigh/geogallery/internal/geo"
 	"codeberg.org/bvigh/geogallery/internal/storage"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type gameStorage interface {
+	PresignGet(ctx context.Context, key string) (string, error)
+}
+
+type gameDB interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 type GameHandler struct {
-	db      *pgxpool.Pool
-	storage *storage.Client
+	db      gameDB
+	storage gameStorage
 }
 
 func NewGameHandler(db *pgxpool.Pool, s *storage.Client) *GameHandler {
@@ -36,14 +47,18 @@ type roundMedia struct {
 
 func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if err := validateMediaFilters(q); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	fromDate := q.Get("from_date")
 	toDate := q.Get("to_date")
 	tripIDs := q["trip_id"]
 	mediaTypes := q["media_type"]
 
-	conds := []string{"location IS NOT NULL"}
-	var args []any
-	n := 1
+	conds := []string{readableMediaCond("", 1), "location IS NOT NULL"}
+	args := []any{auth.MustUser(r.Context()).ID}
+	n := 2
 
 	if fromDate != "" {
 		conds = append(conds, fmt.Sprintf("taken_at >= $%d::date", n))
@@ -109,8 +124,13 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := h.db.QueryRow(r.Context(), sql, args...).Scan(&m.ID, &m.MediaType, &m.StorageKey, &m.Lat, &m.Lng, &m.TakenAt, &m.InitialYaw, &m.InitialPitch, &m.InitialFov)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "no media available", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		slog.Error("game: new round query failed", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
@@ -190,6 +210,11 @@ func (h *GameHandler) SubmitGuess(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
+	mediaID, ok := auth.CanonicalUUID(req.MediaID)
+	if !ok {
+		http.Error(w, "media not found", http.StatusNotFound)
+		return
+	}
 
 	var actual struct {
 		Lat           float64
@@ -200,11 +225,15 @@ func (h *GameHandler) SubmitGuess(w http.ResponseWriter, r *http.Request) {
 	err := h.db.QueryRow(r.Context(), `
 		SELECT ST_Y(location::geometry), ST_X(location::geometry), taken_at::text,
 		       COALESCE(gps_confidence, 1.0)
-		FROM media WHERE id=$1
-	`, req.MediaID).Scan(&actual.Lat, &actual.Lng, &actual.TakenAt, &actual.GpsConfidence)
-	if err != nil {
-		slog.Error("game: submit guess media lookup failed", "media_id", req.MediaID, "err", err)
+		FROM media WHERE id=$1 AND `+readableMediaCond("", 2)+`
+	`, mediaID, auth.MustUser(r.Context()).ID).Scan(&actual.Lat, &actual.Lng, &actual.TakenAt, &actual.GpsConfidence)
+	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "media not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		slog.Error("game: submit guess media lookup failed", "media_id", mediaID, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 

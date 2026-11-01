@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { api } from "../api/client";
-import { MapPage } from "./MapPage";
+import { MapPage, MediaPreview } from "./MapPage";
 import type { MediaItem, Trip } from "../types";
 
 vi.mock("../api/client", () => ({
@@ -133,5 +133,24 @@ describe("MapPage", () => {
       expect(mediaCalls.length).toBeGreaterThanOrEqual(1);
       expect(mediaCalls[0][1]).toMatchObject({ offset: "0" });
     });
+  });
+});
+
+describe("MediaPreview", () => {
+  // The fullscreen 360° viewers re-load the same URL as a CORS request; a
+  // no-CORS preview would poison the browser cache for it.
+  it.each([
+    ["photo_360", "img"],
+    ["photo", "img"],
+    ["video_360", "video"],
+    ["video", "video"],
+  ] as const)("loads %s preview in CORS mode", (mediaType, tag) => {
+    const item = { ...makeItem("p"), media_type: mediaType };
+    const { container } = render(
+      <MediaPreview item={item} url="https://s3.example/x" onFullscreen={() => {}} />,
+    );
+    const el = container.querySelector(tag);
+    expect(el).not.toBeNull();
+    expect(el!.getAttribute("crossorigin")).toBe("anonymous");
   });
 });

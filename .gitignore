@@ -37,6 +37,10 @@ __debug*
 frontend/node_modules
 frontend/.vite
 frontend/dist
+frontend/e2e/.auth/
+frontend/test-results/
+frontend/playwright-report/
+backend/.e2e/
 tsconfig.tsbuildinfo
 
 .DS_Store

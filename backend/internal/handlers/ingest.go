@@ -2,10 +2,8 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,26 +13,31 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type IngestHandler struct {
+// IngestDeps holds what RunIngestScan needs; the operator `server scan` command builds it.
+type IngestDeps struct {
 	registrar     *MediaRegistrar
-	watchDir      string
 	matcherPool   matcherDB
 	matchWindow   time.Duration
-	runMatcher    func(ctx context.Context, db matcherDB, maxWindow time.Duration, reprocess bool) error
+	runMatcher    func(ctx context.Context, db matcherDB, ownerID string, maxWindow time.Duration, reprocess bool) error
 	tripGapHours  int
-	runTripDetect func(ctx context.Context, db tripDetectDB, gapHours int) error
+	runTripDetect func(ctx context.Context, db tripDetectDB, ownerID string, gapHours int) error
 }
 
-func NewIngestHandler(db *pgxpool.Pool, s *storage.Client, watchDir string, matchWindow time.Duration, tripGapHours int) *IngestHandler {
-	return &IngestHandler{
-		registrar:     &MediaRegistrar{db: db, storage: s},
-		watchDir:      watchDir,
-		matcherPool:   db,
+func NewIngestDeps(pool *pgxpool.Pool, s *storage.Client, matchWindow time.Duration, gapHours int) IngestDeps {
+	return IngestDeps{
+		registrar:     &MediaRegistrar{db: pool, storage: s},
+		matcherPool:   pool,
 		matchWindow:   matchWindow,
-		tripGapHours:  tripGapHours,
+		tripGapHours:  gapHours,
 		runMatcher:    RunGPSMatcher,
 		runTripDetect: RunTripDetect,
 	}
+}
+
+type ScanResult struct {
+	Ingested int
+	Skipped  int
+	Failed   int
 }
 
 var supportedExts = map[string]bool{
@@ -43,11 +46,18 @@ var supportedExts = map[string]bool{
 	".mp4": true, ".mov": true, ".avi": true, ".mkv": true, ".3gp": true,
 }
 
-func (h *IngestHandler) Scan(w http.ResponseWriter, r *http.Request) {
-	slog.Info("ingest: scan started", "dir", h.watchDir)
-	var ingested, skipped int
+// RunIngestScan walks dir and ingests every supported file into ownerID's library, then runs
+// the GPS matcher and trip detection for that owner. Per-file failures are logged, counted in
+// Failed and skipped. On cancellation the walk stops after the current file, the matcher and
+// trip detection are skipped, and ctx.Err() is returned.
+func RunIngestScan(ctx context.Context, deps IngestDeps, dir, ownerID string) (ScanResult, error) {
+	slog.Info("ingest: scan started", "dir", dir, "owner_id", ownerID)
+	var res ScanResult
 
-	err := filepath.WalkDir(h.watchDir, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil || d.IsDir() {
 			return err
 		}
@@ -59,46 +69,48 @@ func (h *IngestHandler) Scan(w http.ResponseWriter, r *http.Request) {
 		info, err := d.Info()
 		if err != nil {
 			slog.Error("ingest: stat file failed", "path", path, "err", err)
+			res.Failed++
 			return nil
 		}
 		f, err := os.Open(path)
 		if err != nil {
 			slog.Error("ingest: open file failed", "path", path, "err", err)
+			res.Failed++
 			return nil
 		}
 		mtime := info.ModTime()
-		registered, err := h.registrar.registerMedia(r.Context(), f, info.Size(), d.Name(), &mtime)
+		registered, err := deps.registrar.registerMedia(ctx, ownerID, f, info.Size(), d.Name(), &mtime)
 		f.Close()
 		if err != nil {
 			slog.Error("ingest: register media failed", "path", path, "err", err)
+			res.Failed++
 			return nil
 		}
 		if registered {
-			ingested++
+			res.Ingested++
 		} else {
-			skipped++
+			res.Skipped++
 		}
 		return nil
 	})
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		slog.Warn("ingest: scan interrupted", "ingested", res.Ingested, "skipped", res.Skipped, "failed", res.Failed)
+		return res, ctxErr
+	}
 	if err != nil {
-		slog.Error("ingest: walk dir failed", "dir", h.watchDir, "err", err)
-		http.Error(w, "scan error: "+err.Error(), http.StatusInternalServerError)
-		return
+		slog.Error("ingest: walk dir failed", "dir", dir, "err", err)
+		return res, fmt.Errorf("walk %s: %w", dir, err)
 	}
 
-	if err := h.runMatcher(r.Context(), h.matcherPool, h.matchWindow, true); err != nil {
+	if err := deps.runMatcher(ctx, deps.matcherPool, ownerID, deps.matchWindow, true); err != nil {
 		slog.Error("ingest: GPS matcher failed", "err", err)
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-		return
+		return res, fmt.Errorf("gps matcher: %w", err)
 	}
-
-	if err := h.runTripDetect(r.Context(), h.registrar.db, h.tripGapHours); err != nil {
+	if err := deps.runTripDetect(ctx, deps.registrar.db, ownerID, deps.tripGapHours); err != nil {
 		slog.Error("ingest: trip detect failed", "err", err)
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-		return
+		return res, fmt.Errorf("trip detect: %w", err)
 	}
 
-	slog.Info("ingest: scan complete", "ingested", ingested, "skipped", skipped)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]int{"ingested": ingested, "skipped": skipped})
+	slog.Info("ingest: scan complete", "ingested", res.Ingested, "skipped", res.Skipped, "failed", res.Failed)
+	return res, nil
 }

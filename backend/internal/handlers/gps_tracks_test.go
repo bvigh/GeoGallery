@@ -37,7 +37,7 @@ func postImport(h *GPSTrackHandler, body any) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodPost, "/api/gps-tracks/import", bytes.NewReader(b))
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	h.Import(w, r)
+	h.Import(w, withTestUser(r))
 	return w
 }
 
@@ -49,7 +49,7 @@ func TestImport_SingleValidPoint_ReturnsInserted1(t *testing.T) {
 			return makeTag(1), nil
 		},
 	}
-	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error { return nil }}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
 
 	w := postImport(h, []map[string]any{
 		{"recorded_at": "2024-06-15T12:00:00Z", "lat": 47.5, "lng": 19.0, "source": "strava"},
@@ -73,7 +73,7 @@ func TestImport_InvalidRecordedAt_ReturnsRowError(t *testing.T) {
 			return makeTag(0), nil
 		},
 	}
-	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error { return nil }}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
 
 	w := postImport(h, []map[string]any{
 		{"recorded_at": "not-a-date", "lat": 47.5, "lng": 19.0, "source": "strava"},
@@ -93,7 +93,7 @@ func TestImport_InvalidRecordedAt_ReturnsRowError(t *testing.T) {
 
 func TestImport_LatitudeOutOfRange_ReturnsRowError(t *testing.T) {
 	db := &mockGPSTrackDB{execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) { return makeTag(0), nil }}
-	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error { return nil }}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
 
 	w := postImport(h, []map[string]any{
 		{"recorded_at": "2024-06-15T12:00:00Z", "lat": 91.0, "lng": 19.0, "source": "strava"},
@@ -110,7 +110,7 @@ func TestImport_LatitudeOutOfRange_ReturnsRowError(t *testing.T) {
 
 func TestImport_LongitudeOutOfRange_ReturnsRowError(t *testing.T) {
 	db := &mockGPSTrackDB{execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) { return makeTag(0), nil }}
-	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error { return nil }}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
 
 	w := postImport(h, []map[string]any{
 		{"recorded_at": "2024-06-15T12:00:00Z", "lat": 47.5, "lng": -181.0, "source": "strava"},
@@ -126,7 +126,7 @@ func TestImport_LongitudeOutOfRange_ReturnsRowError(t *testing.T) {
 
 func TestImport_EmptySource_ReturnsRowError(t *testing.T) {
 	db := &mockGPSTrackDB{execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) { return makeTag(0), nil }}
-	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error { return nil }}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
 
 	w := postImport(h, []map[string]any{
 		{"recorded_at": "2024-06-15T12:00:00Z", "lat": 47.5, "lng": 19.0, "source": ""},
@@ -148,7 +148,7 @@ func TestImport_AllInvalidRows_NoDBCall(t *testing.T) {
 			return makeTag(0), nil
 		},
 	}
-	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error { return nil }}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
 
 	w := postImport(h, []map[string]any{
 		{"recorded_at": "bad", "lat": 47.5, "lng": 19.0, "source": "s"},
@@ -171,7 +171,7 @@ func TestImport_DuplicateRows_CountedAsSkipped(t *testing.T) {
 			return makeTag(1), nil // 1 inserted, 1 skipped by ON CONFLICT
 		},
 	}
-	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error { return nil }}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
 
 	w := postImport(h, []map[string]any{
 		{"recorded_at": "2024-06-15T12:00:00Z", "lat": 47.5, "lng": 19.0, "source": "strava"},
@@ -197,7 +197,7 @@ func TestImport_ValidPoints_MatcherCalled(t *testing.T) {
 	h := &GPSTrackHandler{
 		db:          db,
 		matchWindow: time.Hour,
-		runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error {
+		runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error {
 			matcherCalled = true
 			return nil
 		},
@@ -210,16 +210,72 @@ func TestImport_ValidPoints_MatcherCalled(t *testing.T) {
 	assert.True(t, matcherCalled)
 }
 
+// --- Owner propagation: owner_id is in every row and the matcher runs for the caller ---
+
+func TestImport_PropagatesOwner(t *testing.T) {
+	var capturedSQL string
+	var capturedArgs []any
+	db := &mockGPSTrackDB{
+		execFn: func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+			capturedSQL, capturedArgs = sql, args
+			return makeTag(2), nil
+		},
+	}
+	var matcherOwner string
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour,
+		runMatcher: func(_ context.Context, _ matcherDB, ownerID string, _ time.Duration, _ bool) error {
+			matcherOwner = ownerID
+			return nil
+		}}
+
+	w := postImport(h, []map[string]any{
+		{"recorded_at": "2024-06-15T12:00:00Z", "lat": 47.5, "lng": 19.0, "source": "strava"},
+		{"recorded_at": "2024-06-15T12:00:01Z", "lat": 47.6, "lng": 19.1, "source": "strava"},
+	})
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, capturedSQL, "INSERT INTO gps_tracks (owner_id, source,")
+	require.Len(t, capturedArgs, 16, "8 bind params per row")
+	assert.Equal(t, testOwnerID, capturedArgs[0])
+	assert.Equal(t, testOwnerID, capturedArgs[8])
+	assert.Equal(t, testOwnerID, matcherOwner)
+}
+
+// --- Body over the size limit → 413, nothing inserted ---
+
+func TestImport_BodyTooLarge_Returns413(t *testing.T) {
+	assert.Equal(t, int64(100<<20), maxImportBodyBytes)
+	orig := maxImportBodyBytes
+	maxImportBodyBytes = 1024
+	t.Cleanup(func() { maxImportBodyBytes = orig })
+
+	execCalled := false
+	db := &mockGPSTrackDB{execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+		execCalled = true
+		return makeTag(0), nil
+	}}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
+
+	body := `[{"recorded_at":"2024-06-15T12:00:00Z","lat":47.5,"lng":19.0,"source":"` +
+		strings.Repeat("x", int(maxImportBodyBytes)) + `"}]`
+	r := httptest.NewRequest(http.MethodPost, "/api/gps-tracks/import", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.Import(w, withTestUser(r))
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+	assert.False(t, execCalled)
+}
+
 // --- Cycle 9: invalid JSON body → 400 ---
 
 func TestImport_InvalidJSON_Returns400(t *testing.T) {
 	db := &mockGPSTrackDB{execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) { return makeTag(0), nil }}
-	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error { return nil }}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
 
 	r := httptest.NewRequest(http.MethodPost, "/api/gps-tracks/import", strings.NewReader("not json"))
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	h.Import(w, r)
+	h.Import(w, withTestUser(r))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
@@ -234,7 +290,7 @@ func TestImport_1001Rows_TwoDBBatches(t *testing.T) {
 			return makeTag(1000), nil
 		},
 	}
-	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ time.Duration, _ bool) error { return nil }}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour, runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
 
 	rows := make([]map[string]any, 1001)
 	for i := range rows {

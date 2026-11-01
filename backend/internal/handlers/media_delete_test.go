@@ -30,7 +30,7 @@ func (m *mockTx) Commit(ctx context.Context) error   { return m.commitErr }
 func (m *mockTx) Rollback(ctx context.Context) error { return nil }
 
 // Remaining pgx.Tx methods — not used by the delete handler.
-func (m *mockTx) Begin(ctx context.Context) (pgx.Tx, error)                          { panic("unexpected") }
+func (m *mockTx) Begin(ctx context.Context) (pgx.Tx, error) { panic("unexpected") }
 func (m *mockTx) CopyFrom(_ context.Context, _ pgx.Identifier, _ []string, _ pgx.CopyFromSource) (int64, error) {
 	panic("unexpected")
 }
@@ -74,14 +74,17 @@ func TestDeleteMedia_Success_Returns204(t *testing.T) {
 	const mediaID = "media-uuid-1"
 	const storageKey = "media/1234/photo.jpg"
 
+	var selectArgs, deleteArgs []any
 	tx := &mockTx{
 		queryRowFn: func(_ context.Context, _ string, args ...any) pgx.Row {
+			selectArgs = args
 			return &mockRow{scanFn: func(dest ...any) error {
 				*dest[0].(*string) = storageKey
 				return nil
 			}}
 		},
-		execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+		execFn: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+			deleteArgs = args
 			return pgconn.NewCommandTag("DELETE 1"), nil
 		},
 	}
@@ -95,6 +98,8 @@ func TestDeleteMedia_Success_Returns204(t *testing.T) {
 
 	require.Equal(t, http.StatusNoContent, w.Code)
 	assert.Equal(t, storageKey, store.deletedKey)
+	assert.Equal(t, []any{mediaID, testOwnerID}, selectArgs)
+	assert.Equal(t, []any{mediaID, testOwnerID}, deleteArgs)
 }
 
 func TestDeleteMedia_NotFound_Returns404(t *testing.T) {

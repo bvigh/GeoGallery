@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"codeberg.org/bvigh/geogallery/internal/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -58,12 +59,15 @@ func (c *Client) Upload(ctx context.Context, key string, body io.Reader, size in
 	return nil
 }
 
+// presignTTL bounds how long a URL stays usable after logout or a user being disabled.
+const presignTTL = 15 * time.Minute
+
 func (c *Client) PresignGet(ctx context.Context, key string) (string, error) {
 	presigner := s3.NewPresignClient(c.s3)
 	req, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(key),
-	})
+	}, s3.WithPresignExpires(presignTTL))
 	if err != nil {
 		return "", fmt.Errorf("presign %s: %w", key, err)
 	}
