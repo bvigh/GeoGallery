@@ -208,8 +208,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	mtimes := r.MultipartForm.Value["file_mtime"]
 
-	var uploaded, failed []string
-	duplicates := 0
+	var uploaded, skipped, failed []string
 	for i, fh := range files {
 		fileStart := time.Now()
 		f, err := fh.Open()
@@ -238,7 +237,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			uploaded = append(uploaded, fh.Filename)
 			slog.Info("upload: file stored", "file", fh.Filename, "size", fh.Size, "elapsed", time.Since(fileStart))
 		} else {
-			duplicates++
+			skipped = append(skipped, fh.Filename)
 			slog.Info("upload: duplicate skipped", "file", fh.Filename, "size", fh.Size)
 		}
 	}
@@ -256,10 +255,10 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	slog.Info("upload: done", "owner", ownerID, "uploaded", len(uploaded), "duplicates", duplicates,
+	slog.Info("upload: done", "owner", ownerID, "uploaded", len(uploaded), "duplicates", len(skipped),
 		"failed", len(failed), "elapsed", time.Since(start))
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"uploaded": uploaded, "failed": failed})
+	json.NewEncoder(w).Encode(map[string]any{"uploaded": uploaded, "skipped": skipped, "failed": failed})
 }
 
 type viewSettingsRequest struct {

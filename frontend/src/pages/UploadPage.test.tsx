@@ -35,7 +35,50 @@ describe("UploadPage", () => {
     const form = mockApi.upload.mock.calls[0][0] as FormData;
     expect((form.getAll("files") as File[]).map((f) => f.name)).toEqual(["a.jpg", "b.mp4"]);
     expect(form.getAll("file_mtime")).toEqual(["1700000000000", "1700000001000"]);
-    expect(await screen.findByText("Uploaded 2 file(s)")).toBeInTheDocument();
+    expect(await screen.findByText("Uploaded 2 files")).toBeInTheDocument();
+    expect(screen.getByText("Uploaded 2 files, skipped 0, failed 0")).toBeInTheDocument();
+  });
+
+  it("lists duplicates the server skipped", async () => {
+    mockApi.upload.mockResolvedValue({ uploaded: ["a.jpg"], skipped: ["b.jpg", "c.jpg"], failed: null });
+    const { container } = render(<UploadPage />);
+    await userEvent.upload(mediaInput(container), [
+      new File(["a"], "a.jpg", { type: "image/jpeg" }),
+      new File(["b"], "b.jpg", { type: "image/jpeg" }),
+      new File(["c"], "c.jpg", { type: "image/jpeg" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    expect(await screen.findByText("Uploaded 1 file, skipped 2, failed 0")).toBeInTheDocument();
+    expect(screen.getByText("2 files skipped (already in your library)")).toBeInTheDocument();
+    expect(screen.getByText("b.jpg")).toBeInTheDocument();
+    expect(screen.getByText("c.jpg")).toBeInTheDocument();
+    expect(screen.queryByText(/failed$/)).not.toBeInTheDocument();
+  });
+
+  it("counts files a backend without `skipped` left out as skipped", async () => {
+    mockApi.upload.mockResolvedValue({ uploaded: ["a.jpg"], failed: null });
+    const { container } = render(<UploadPage />);
+    await userEvent.upload(mediaInput(container), [
+      new File(["a"], "a.jpg", { type: "image/jpeg" }),
+      new File(["b"], "b.jpg", { type: "image/jpeg" }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    expect(await screen.findByText("Uploaded 1 file, skipped 1, failed 0")).toBeInTheDocument();
+    expect(screen.getByText("b.jpg")).toBeInTheDocument();
+  });
+
+  it("keeps long result lists inside a scrollable box", async () => {
+    const names = Array.from({ length: 300 }, (_, i) => `img${i}.jpg`);
+    mockApi.upload.mockResolvedValue({ uploaded: names });
+    const { container } = render(<UploadPage />);
+    await userEvent.upload(mediaInput(container), new File(["a"], "img0.jpg", { type: "image/jpeg" }));
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    const list = (await screen.findByText("img299.jpg")).closest("ul");
+    expect(list).toHaveClass("max-h-48", "overflow-y-auto");
+    expect(container.firstElementChild).toHaveClass("h-full", "overflow-y-auto");
   });
 
   it("shows the upload error", async () => {
@@ -60,9 +103,9 @@ describe("UploadPage", () => {
     await userEvent.upload(mediaInput(container), [big("a.mp4"), big("b.mp4"), big("c.mp4")]);
     await userEvent.click(screen.getByRole("button", { name: "Upload" }));
 
-    expect(await screen.findByText("Uploaded 1 file(s)")).toBeInTheDocument();
+    expect(await screen.findByText("Uploaded 1 file")).toBeInTheDocument();
     expect(mockApi.upload).toHaveBeenCalledTimes(3);
-    expect(screen.getByText("2 file(s) failed")).toBeInTheDocument();
+    expect(screen.getByText("2 files failed")).toBeInTheDocument();
     expect(screen.getByText("b.mp4")).toBeInTheDocument();
     expect(screen.getByText("c.mp4")).toBeInTheDocument();
     expect(screen.getByText("POST /media/upload failed: 502")).toBeInTheDocument();
@@ -75,7 +118,7 @@ describe("UploadPage", () => {
     await userEvent.upload(mediaInput(container), huge);
     await userEvent.click(screen.getByRole("button", { name: "Upload" }));
 
-    expect(await screen.findByText("1 file(s) failed")).toBeInTheDocument();
+    expect(await screen.findByText("1 file failed")).toBeInTheDocument();
     expect(screen.getByText(/^huge\.mp4 \(larger than/)).toBeInTheDocument();
     expect(mockApi.upload).not.toHaveBeenCalled();
   });

@@ -204,6 +204,7 @@ func TestUpload_SkipsTripDetectWhenNothingUploaded(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.False(t, tripDetectCalled)
+	assert.JSONEq(t, `{"uploaded":null,"skipped":["photo.jpg"],"failed":null}`, w.Body.String())
 }
 
 func TestUpload_TripDetectError_Returns500(t *testing.T) {
