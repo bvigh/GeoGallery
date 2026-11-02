@@ -44,6 +44,15 @@ export function LoginScreen() {
             Sign in with a different account
           </a>
         )}
+        <p className="mt-6 text-xs text-muted-foreground">
+          <a href="/privacy.html" className="hover:underline">
+            Privacy Policy
+          </a>
+          {" · "}
+          <a href="/terms.html" className="hover:underline">
+            Terms of Service
+          </a>
+        </p>
       </div>
     </div>
   );

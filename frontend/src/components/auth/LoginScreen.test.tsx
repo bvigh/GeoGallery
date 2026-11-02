@@ -16,6 +16,12 @@ describe("LoginScreen", () => {
     expect(screen.queryByRole("link", { name: "Sign in with a different account" })).not.toBeInTheDocument();
   });
 
+  it("links the privacy policy and terms of service", () => {
+    render(<LoginScreen />);
+    expect(screen.getByRole("link", { name: "Privacy Policy" })).toHaveAttribute("href", "/privacy.html");
+    expect(screen.getByRole("link", { name: "Terms of Service" })).toHaveAttribute("href", "/terms.html");
+  });
+
   it.each([
     ["not_invited", "This account isn't invited"],
     ["invite_invalid", "This invite link is invalid"],
