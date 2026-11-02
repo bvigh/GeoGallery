@@ -146,6 +146,13 @@ async function upload(form: FormData, albumId?: string): Promise<{
   return res.json();
 }
 
+// Which of these file hashes (src/lib/mediaHash.ts, at most 5000) the caller's own library holds:
+// hash → media ID.
+async function knownHashes(hashes: string[]): Promise<Record<string, string>> {
+  const data = await post<{ known: Record<string, string> }>("/media/known-hashes", { hashes });
+  return data.known;
+}
+
 async function importGpsTracks(file: File): Promise<GpsImportResult> {
   const res = await request("/gps-tracks/import", {
     method: "POST",
@@ -245,6 +252,7 @@ export const api = {
   me,
   logout,
   upload,
+  knownHashes,
   importGpsTracks,
   listTokens,
   createToken,

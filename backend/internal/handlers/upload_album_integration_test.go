@@ -193,7 +193,8 @@ func TestUploadToAlbum_AddsNewFilesAndDuplicates(t *testing.T) {
 	assert.NotEqual(t, oldID, aCopy)
 	assert.Equal(t, sorted(append(want, aCopy)...), albumContents(t, f.pool, f.family))
 
-	assert.Len(t, f.store.deleted, 5, "one object per skipped file")
+	assert.Len(t, f.store.keys, 4, "old, new1, new2 and A's old: skipped files never reach S3")
+	assert.Empty(t, f.store.deleted)
 	assertNoOrphans(t, f.pool, f.store)
 }
 
@@ -232,6 +233,7 @@ func TestRegisterMedia_Integration_ReturnsExistingIDForDuplicates(t *testing.T) 
 		`SELECT filename, storage_key FROM media WHERE id = $1`, first).Scan(&filename, &key))
 	assert.Equal(t, "one.jpg", filename, "the duplicate leaves the existing row alone")
 	assert.Equal(t, store.keys[0], key)
-	assert.Equal(t, []string{store.keys[1]}, store.deleted, "only the duplicate's object is deleted")
+	assert.Len(t, store.keys, 2, "A's and B's one.jpg: the duplicate is never uploaded")
+	assert.Empty(t, store.deleted)
 	assertNoOrphans(t, pool, store)
 }

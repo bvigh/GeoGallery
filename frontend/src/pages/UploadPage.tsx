@@ -2,6 +2,7 @@ import { useState, useRef } from "react";
 import { Upload, X } from "lucide-react";
 import { api, ApiError } from "@/api/client";
 import { MAX_FILE_BYTES, planUploadBatches } from "@/lib/uploadBatches";
+import { canHashFiles, mediaHash } from "@/lib/mediaHash";
 import type { Album, GpsImportResult } from "@/types";
 import { AlbumPickerDialog } from "@/components/albums/AlbumPickerDialog";
 
@@ -38,6 +39,48 @@ function unreported(batch: File[], ...reported: (string[] | null | undefined)[])
       if (n > 0) remaining.set(name, n - 1);
       return n === 0;
     });
+}
+
+// The most hashes one known-hashes request and media IDs one album add take.
+const MAX_IDS_PER_REQUEST = 5000;
+
+function chunks<T>(items: T[], size = MAX_IDS_PER_REQUEST): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+interface KnownFiles {
+  known: { file: File; mediaId: string }[];
+  fresh: File[];
+}
+
+// Splits the selection into files the caller's library already holds and files to send, so a
+// re-upload costs a few KB per file instead of the whole file. Any failure sends everything:
+// the server deduplicates on its own.
+async function findKnownFiles(files: File[], onProgress: (msg: string) => void): Promise<KnownFiles> {
+  if (!canHashFiles()) return { known: [], fresh: files };
+  try {
+    const hashes: string[] = [];
+    for (const [i, file] of files.entries()) {
+      if (i % 50 === 0) onProgress(`Checking for files already in your library (${i} of ${files.length})`);
+      hashes.push(await mediaHash(file));
+    }
+    const ids = new Map<string, string>();
+    for (const part of chunks([...new Set(hashes)])) {
+      for (const [hash, id] of Object.entries(await api.knownHashes(part))) ids.set(hash, id);
+    }
+    const result: KnownFiles = { known: [], fresh: [] };
+    files.forEach((file, i) => {
+      const mediaId = ids.get(hashes[i]);
+      if (mediaId) result.known.push({ file, mediaId });
+      else result.fresh.push(file);
+    });
+    return result;
+  } catch (e) {
+    console.warn("Duplicate check failed, sending every file:", e);
+    return { known: [], fresh: files };
+  }
 }
 
 // Long selections produce hundreds of names, so each list scrolls inside a fixed height.
@@ -115,14 +158,41 @@ export function UploadPage() {
       return;
     }
 
-    // One request for everything would exceed the 4 GiB request limit (413), so send batches.
-    const { batches, tooLarge } = planUploadBatches(Array.from(files));
+    const { known, fresh } = await findKnownFiles(Array.from(files), setProgress);
     const uploaded: string[] = [];
     const skipped: string[] = [];
-    const failedNames: string[] = tooLarge.map(
-      (f) => `${f.name} (larger than ${(MAX_FILE_BYTES / GiB).toFixed(1)} GiB)`
-    );
+    const failedNames: string[] = [];
     const errors: string[] = [];
+    let albumGone = false;
+
+    // Files already in the library are not sent, but still go into the album, as the server
+    // does with the duplicates it skips.
+    if (album && known.length > 0) {
+      setProgress(`Adding ${plural(known.length)} already in your library to "${album.name}"`);
+      try {
+        for (const part of chunks([...new Set(known.map((k) => k.mediaId))])) {
+          albumAdded += (await api.addToAlbum(album.id, { mediaIds: part })).added;
+        }
+        skipped.push(...known.map((k) => k.file.name));
+      } catch (e: unknown) {
+        failedNames.push(...known.map((k) => k.file.name));
+        const is404 = e instanceof ApiError && e.status === 404;
+        if (is404 || (await albumStillListed(album.id)) === false) {
+          // Every upload would be refused the same way: do not send any.
+          albumGone = true;
+          errors.push(albumGoneMessage(album.name));
+          failedNames.push(...fresh.map((f) => f.name));
+        } else {
+          errors.push(e instanceof Error ? e.message : "Adding to the album failed");
+        }
+      }
+    } else {
+      skipped.push(...known.map((k) => k.file.name));
+    }
+
+    // One request for everything would exceed the 4 GiB request limit (413), so send batches.
+    const { batches, tooLarge } = planUploadBatches(albumGone ? [] : fresh);
+    failedNames.push(...tooLarge.map((f) => `${f.name} (larger than ${(MAX_FILE_BYTES / GiB).toFixed(1)} GiB)`));
 
     for (const [i, batch] of batches.entries()) {
       const done = uploaded.length + skipped.length;
