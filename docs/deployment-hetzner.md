@@ -96,7 +96,7 @@ Users are keyed by the OIDC issuer string (see [auth.md → Issuer stability](au
      --endpoint-url https://fsn1.your-objectstorage.com --region fsn1
    ```
 
-4. **Optional: a second bucket `geogallery-<you>-backups`** for the database dumps in §11.
+4. **A second bucket `geogallery-<you>-backups`** for the database dumps in §11, with the expiry rule described there.
 
 **The bucket is the only copy of your originals.** Hetzner does not back up Object Storage. Do one of the following:
 - Keep the original files somewhere else.
@@ -202,6 +202,19 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
   > /etc/apt/sources.list.d/docker.list
 apt update && apt -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
+# Container logs go to journald, which deletes them after 14 days (see "Log retention" below)
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/10-retention.conf <<'EOF'
+[Journal]
+MaxFileSec=1day
+MaxRetentionSec=13day
+SystemMaxUse=2G
+ForwardToSyslog=no
+EOF
+systemctl restart systemd-journald
+echo '{ "log-driver": "journald" }' > /etc/docker/daemon.json
+systemctl restart docker
+
 # 4 GB swap: protects against OOM when ffmpeg and an image build run at the same time
 fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
 echo '/swapfile none swap sw 0 0' >> /etc/fstab
@@ -224,6 +237,13 @@ KbdInteractiveAuthentication no
 ```
 
 Run `systemctl reload ssh`. **Before you close the root session, test `ssh deploy@<ipv4>` in a second terminal.**
+
+**Log retention.** The privacy policy (`frontend/public/privacy.html`) promises that server logs are deleted after 14 days at the latest. Caddy writes no access log, but nginx logs each request with the client IP (from Caddy's `X-Forwarded-For`), and Docker's default `json-file` driver never deletes anything. Docker can only rotate its logs by size, not by age, so the setup above sends container logs to journald instead:
+- `MaxFileSec=1day` starts a new journal file every day. journald deletes a whole file once its **oldest** entry is older than `MaxRetentionSec`, so 13 days keeps every entry for at most about 14.
+- `ForwardToSyslog=no` stops rsyslog from copying the entries into `/var/log/syslog`, which logrotate keeps for 4 weeks.
+- `SystemMaxUse=2G` caps disk use; on a busy instance the oldest entries go even sooner.
+
+`docker compose logs` works the same with journald. The log driver only applies to containers created after the change: on a server that already runs the stack, run `docker compose up -d --force-recreate`. Check with `docker inspect -f '{{.HostConfig.LogConfig.Type}}' $(docker compose ps -q frontend)` (prints `journald`) and `journalctl --disk-usage`.
 
 Clone the repository as `deploy`:
 
@@ -434,6 +454,33 @@ Configure the `hetzner` remote with `rclone config` as the `deploy` user. Then a
 ```
 30 3 * * * /srv/geogallery/backup.sh >> /srv/geogallery/backups/backup.log 2>&1
 ```
+
+**Expire old dumps after 30 days.** The privacy policy promises that deleted data leaves the backups within 30 days. The script deletes local dumps after 14 days, and Hetzner keeps its server backups for 7. The copies in the bucket need a lifecycle rule. Save this as `lifecycle.json`:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "expire-db-dumps",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "db/" },
+      "Expiration": { "Days": 28 }
+    }
+  ]
+}
+```
+
+S3 expiry counts days from the upload, rounds up to the next midnight UTC and then deletes in a background job, so 28 days keeps every dump below 30. Apply the rule from your laptop, as for CORS in §3:
+
+```bash
+aws s3api put-bucket-lifecycle-configuration --bucket geogallery-<you>-backups \
+  --lifecycle-configuration file://lifecycle.json \
+  --endpoint-url https://fsn1.your-objectstorage.com --region fsn1
+aws s3api get-bucket-lifecycle-configuration --bucket geogallery-<you>-backups \
+  --endpoint-url https://fsn1.your-objectstorage.com --region fsn1
+```
+
+Leave versioning off on this bucket: with versioning on, an expired dump only becomes a noncurrent version and stays stored. If you mirror the media bucket (§3), use `rclone sync`, which deletes files from the mirror that were deleted in GeoGallery. `rclone copy` keeps them forever.
 
 **Test a restore once.** Load a dump into a scratch database: `docker compose exec db createdb -U geogallery restore_test`, then `pg_restore` into it.
 
