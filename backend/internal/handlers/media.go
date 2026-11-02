@@ -78,6 +78,13 @@ type mediaItem struct {
 	InitialFov   *float64   `json:"initial_fov"`
 }
 
+// Page sizes for GET /api/media. The map asks for the maximum to load a large library in few
+// requests: every page re-runs the whole filtered sort, so OFFSET pages are not cheaper.
+const (
+	defaultListLimit = 500
+	maxListLimit     = 5000
+)
+
 func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if err := validateMediaFilters(q); err != nil {
@@ -85,10 +92,19 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	limit := defaultListLimit
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxListLimit {
+			http.Error(w, fmt.Sprintf("invalid limit: want 1-%d", maxListLimit), http.StatusBadRequest)
+			return
+		}
+		limit = n
+	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
 
 	conds, args := buildMediaFilter(q, auth.MustUser(r.Context()).ID)
-	args = append(args, offset)
+	args = append(args, limit, offset)
 	sql := fmt.Sprintf(`
 		SELECT m.id, m.filename, m.media_type,
 		       ST_Y(m.location::geometry) AS lat, ST_X(m.location::geometry) AS lng,
@@ -100,8 +116,8 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 		FROM media m JOIN users u ON u.id = m.owner_id
 		WHERE %s
 		ORDER BY m.taken_at DESC NULLS LAST, m.id -- id breaks taken_at ties, so OFFSET pages never overlap
-		LIMIT 500 OFFSET $%d
-	`, strings.Join(conds, " AND "), len(args))
+		LIMIT $%d OFFSET $%d
+	`, strings.Join(conds, " AND "), len(args)-1, len(args))
 
 	rows, err := h.db.Query(r.Context(), sql, args...)
 	if err != nil {

@@ -11,7 +11,8 @@ import { AlbumMenu } from "@/components/albums/AlbumMenu";
 import Panorama360 from "../components/viewer/Panorama360";
 import Video360 from "../components/viewer/Video360";
 
-const PAGE_SIZE = 500;
+// The backend's maximum page: every page re-runs the whole filtered query, so fewer is faster.
+const PAGE_SIZE = 5000;
 
 // crossOrigin matters: the fullscreen 360° viewers load this same presigned URL
 // as a CORS request (WebGL texture). A plain no-CORS preview fetch gets cached
@@ -337,7 +338,9 @@ function EditViewModal({
   );
 }
 
-export function MapPage() {
+// App keeps this page mounted while another tab is open (active false), so the map and its
+// markers survive tab switches.
+export function MapPage({ active = true }: { active?: boolean }) {
   const user = useCurrentUser();
   const [items, setItems] = useState<MediaItem[]>([]);
   const [trips, setTrips] = useState<Trip[]>([]);
@@ -356,29 +359,52 @@ export function MapPage() {
   const [editingLocation, setEditingLocation] = useState(false);
   // Bumped to refetch the media list under the same filters.
   const [mediaReload, setMediaReload] = useState(0);
+  // Bumped when the tab is shown again: other tabs may have uploaded, deleted or shared media.
+  const [revisit, setRevisit] = useState(0);
+  const wasActive = useRef(active);
+  // The filter params of the list on the map.
+  const shownQuery = useRef<string | null>(null);
   const pendingId = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (active && !wasActive.current) setRevisit((n) => n + 1);
+    wasActive.current = active;
+  }, [active]);
 
   useEffect(() => {
     let cancelled = false;
 
-    setItems([]);
+    const params = filterParams(filters);
+    // Under the same filters the current markers stay until the new list is complete, so a
+    // reload never empties the map. New filters clear it and fill it page by page.
+    const query = JSON.stringify(params);
+    const inBackground = query === shownQuery.current;
+    shownQuery.current = query;
+
+    if (!inBackground) setItems([]);
     setLoadingMedia(true);
     setListError(null);
 
-    const params = filterParams(filters);
-
+    const loaded: MediaItem[] = [];
     let offset = 0;
 
     function fetchPage() {
       api
-        .get<MediaItem[]>("/media", { ...params, offset: String(offset) })
+        .get<MediaItem[]>("/media", {
+          ...params,
+          has_location: "true",
+          limit: String(PAGE_SIZE),
+          offset: String(offset),
+        })
         .then((page) => {
           if (cancelled) return;
-          setItems((prev) => [...prev, ...page]);
+          loaded.push(...page);
+          if (!inBackground) setItems([...loaded]);
           if (page.length === PAGE_SIZE) {
             offset += PAGE_SIZE;
             fetchPage();
           } else {
+            if (inBackground) setItems(loaded);
             setLoadingMedia(false);
           }
         })
@@ -392,13 +418,13 @@ export function MapPage() {
     fetchPage();
 
     return () => { cancelled = true; };
-  }, [filters, mediaReload]);
+  }, [filters, mediaReload, revisit]);
 
   useEffect(() => {
     api.get<Trip[]>("/trips").then(setTrips).catch(() => {});
     // The filter panel then just lists no albums.
     api.listAlbums().then(setAlbums).catch((e) => console.error("Failed to load albums:", e));
-  }, []);
+  }, [revisit]);
 
   // An album menu change only alters the map when the filters select that album.
   function handleAlbumChange(albumId: string) {
@@ -468,14 +494,15 @@ export function MapPage() {
   }
 
   useEffect(() => {
-    if (clusterPeers.length <= 1) return;
+    // Hidden behind another tab, the arrow keys are not ours.
+    if (!active || clusterPeers.length <= 1) return;
     function onKey(e: KeyboardEvent) {
       if (e.key === "ArrowLeft") navigatePeer(-1);
       if (e.key === "ArrowRight") navigatePeer(1);
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [clusterPeers, clusterIndex]);
+  }, [active, clusterPeers, clusterIndex]);
 
   return (
     <div className="relative h-full w-full">
@@ -499,7 +526,7 @@ export function MapPage() {
         </div>
       )}
 
-      <MediaMap items={items} onSelect={(item, peers) => handleSelect(item, peers)} />
+      <MediaMap items={items} visible={active} onSelect={(item, peers) => handleSelect(item, peers)} />
 
       {selected && (
         <div className="absolute right-4 top-4 z-[800] w-72 rounded-lg border bg-background p-3 shadow-lg">

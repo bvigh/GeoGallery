@@ -39,6 +39,10 @@ func TestValidateMediaFilters(t *testing.T) {
 		{"owner all is not a value", "owner=all", "invalid owner: want mine or shared"},
 		{"owner is case-sensitive", "owner=Mine", "invalid owner: want mine or shared"},
 		{"owner user id", "owner=" + testOwnerID, "invalid owner: want mine or shared"},
+		{"has_location true", "has_location=true", ""},
+		{"empty has_location is ignored", "has_location=", ""},
+		{"has_location false is not a value", "has_location=false", "invalid has_location: want true"},
+		{"has_location 1 is not a value", "has_location=1", "invalid has_location: want true"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -116,11 +120,15 @@ func TestBuildMediaFilter(t *testing.T) {
 			[]string{readable, "m.owner_id <> $1"},
 			[]any{testOwnerID}},
 		{"empty owner means all", "owner=", []string{readable}, []any{testOwnerID}},
+		{"has_location", "has_location=true",
+			[]string{readable, "m.location IS NOT NULL"},
+			[]any{testOwnerID}},
+		{"empty has_location is ignored", "has_location=", []string{readable}, []any{testOwnerID}},
 		{"owner narrows the collections with AND", "owner=shared&album_id=" + albumA,
 			[]string{readable, inAlbums("$2"), "m.owner_id <> $1"},
 			[]any{testOwnerID, []string{albumA}}},
 		{"all filters number their args in a fixed order",
-			"owner=mine&album_id=" + albumA + "&trip_id=" + tripA + "&media_type=photo&to_date=2024-03-31&from_date=2024-03-01",
+			"has_location=true&owner=mine&album_id=" + albumA + "&trip_id=" + tripA + "&media_type=photo&to_date=2024-03-31&from_date=2024-03-01",
 			[]string{
 				readable,
 				"m.taken_at >= $2::date",
@@ -128,6 +136,7 @@ func TestBuildMediaFilter(t *testing.T) {
 				"m.media_type = ANY($4)",
 				"((m.owner_id = $1 AND m.trip_id = ANY($5)) OR " + inAlbums("$6") + ")",
 				"m.owner_id = $1",
+				"m.location IS NOT NULL",
 			},
 			[]any{testOwnerID, "2024-03-01", "2024-03-31", []string{"photo"}, []string{tripA}, []string{albumA}}},
 	}

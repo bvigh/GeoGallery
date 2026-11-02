@@ -35,7 +35,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `frontend/src/api/client.ts` | Typed fetch wrapper — all backend calls go here; a 401 redirects to login |
 | `frontend/src/types/index.ts` | Canonical TypeScript types shared across the app |
 | `frontend/src/components/auth/` | `AuthGate`, `LoginScreen`, `AuthContext` |
-| `frontend/src/components/map/` | Leaflet map components |
+| `frontend/src/components/map/` | Leaflet map components. `MediaMap` drives a `leaflet.markercluster` group directly (no `<Marker>` per item): an items change diffs by id and adds/removes only what changed, in bulk |
 | `frontend/src/components/viewer/` | `Panorama360.tsx`, `Video360.tsx` — 360° media viewers |
 | `frontend/src/components/albums/` | `AlbumMenu` (the viewer's per-item album checkboxes + "New album…"), `AlbumPickerDialog` (Trips "Add to album…", the Upload page's album choice) |
 | `frontend/src/components/SearchInput.tsx` | Filter field for long lists (clear button; Enter does nothing, so it never submits a form) |
@@ -96,7 +96,7 @@ Auth column:
 | `GET` | `/api/auth/callback` | public | OIDC callback. Creates the session or redirects to `/?auth_error=not_invited\|invite_invalid\|disabled` |
 | `POST` | `/api/auth/logout` | public | Delete session, clear cookie, `{"redirect_url": end_session URL with id_token_hint, or "/"}` |
 | `GET` | `/api/auth/me` | user | `{id, email, display_name, role}` |
-| `GET` | `/api/media` | user | List the media the caller can read: their own plus items in albums they are a member of (max 500, `offset`, ordered by `taken_at DESC NULLS LAST, id`). Filters: `from_date`, `to_date`, `media_type[]`, `trip_id[]` (incl. `unassigned`; matches only the caller's own media), `album_id[]` (only albums the caller is a member of; a foreign ID matches nothing), `owner=mine\|shared` (default: everything readable). Ticked trips and albums are ORed together, then ANDed with the rest. Rows carry `owner_id` and `owner_name` (display name, else email); `trip_id` is `null` on rows the caller does not own. 400 on a malformed date, `trip_id`, `album_id` or `owner` |
+| `GET` | `/api/media` | user | List the media the caller can read: their own plus items in albums they are a member of (`limit` 1–5000, default 500; `offset`; ordered by `taken_at DESC NULLS LAST, id`). Gzipped when the client accepts it (the only compressed route). Filters: `from_date`, `to_date`, `media_type[]`, `trip_id[]` (incl. `unassigned`; matches only the caller's own media), `album_id[]` (only albums the caller is a member of; a foreign ID matches nothing), `owner=mine\|shared` (default: everything readable), `has_location=true` (located items only; the map sends it). Ticked trips and albums are ORed together, then ANDed with the rest. Rows carry `owner_id` and `owner_name` (display name, else email); `trip_id` is `null` on rows the caller does not own. 400 on a malformed date, `trip_id`, `album_id`, `owner`, `has_location` or `limit` |
 | `POST` | `/api/media/upload` | user | Multipart upload (field: `files[]`, `file_mtime[]` ms-since-epoch); body limit 4 GiB; returns `{uploaded, skipped, failed}` filename lists (`skipped` = per-owner duplicates). Optional query param `?album_id=<uuid>`: a malformed ID or a non-member gets 404 **before** the body is read; new files **and** duplicates are added to the album after the matcher and trip detection, and the response gains `album_added` (rows newly added; present only with `album_id`) |
 | `GET` | `/api/media/{id}/url` | user | Get presigned URL for a readable media item (own or shared through an album); 404 otherwise |
 | `PATCH` | `/api/media/{id}/location` | user | Manual location `{lat, lng}`: sets `gps_source='manual'`; if `taken_at` is known, also upserts a `manual` GPS track point and re-runs the matcher; 404 if not owned (shared media included) |
@@ -165,6 +165,7 @@ There is no HTTP ingest route. Folder scans are `server scan --user <id>` only.
 - Never persist an API token client-side. The plaintext lives only in SettingsPage component state and is cleared when the dialog closes.
 - Types shared across pages/components live in `frontend/src/types/index.ts`.
 - Shared media: the UI decides "is mine" by comparing `MediaItem.owner_id` with the `AuthContext` user. A shared item shows "Shared by {owner_name}" and hides delete, edit location and edit view. `AlbumMenu` gives an own item add/remove checkboxes and "New album…", and a shared item only a read-only list of the albums it came through (no re-sharing). This is cosmetic too: the backend returns 404 for writes on shared media.
+- The Map tab stays mounted while another tab is open (`App` hides it; `MapPage` gets `active`), so its markers and viewport survive tab switches. Shown again, it reloads trips, albums and the media list in the background and swaps the list in when its last page arrives; changing the filters clears the map and fills it page by page (5000 per request).
 - Map and Game filters: `FilterState` (`albumIds`, `owner: "all" | "mine" | "shared"` beside dates, trips and media types) becomes query params only through `filterParams` in `src/lib/filters.ts`. FilterPanel's "Collections" (trips + albums) count as one active filter, and the backend ORs them.
 - `AlbumMenu` and `AlbumPickerDialog` order albums with `byRecentUse` once per load (`AlbumMenu` puts the item's albums first), so rows never move under the pointer. The picker never preselects the most recent album: on the Upload page that would silently share the uploads. The Albums page and the filter panel keep the server order (newest album first).
 - Long lists (filter panel collections, `AlbumMenu`, `AlbumPickerDialog`, the members dialog's user list) get a `SearchInput` once they reach `SEARCH_MIN_ITEMS` and filter with `matchesSearch`. Ticked or chosen items stay listed while searching, so they can always be unticked.
@@ -266,7 +267,7 @@ Changing `KEYCLOAK_PORT` or `FRONTEND_PORT` requires matching `redirectUris` / `
 ## Unimplemented Work (in priority order)
 
 1. **360° media rendering improvements** — currently renders via Pannellum/Photo Sphere Viewer. The view-settings and keyframe editors exist in the backend; the frontend 360° viewer components exist but the editor UI is not wired up end-to-end.
-2. **Pagination** — `GET /api/media` currently hard-limited to 500 rows. Add `?page=`/`?limit=` with cursor-based pagination. More pressing now that shared albums add to the volume. If the `OR EXISTS` in `readableMediaCond` makes the list slow, split it into `UNION ALL` (own ∪ shared).
+2. **Pagination** — `GET /api/media` pages with `limit` (≤ 5000) and `offset`, and every page re-runs the whole filtered sort. Move to cursor-based pagination. More pressing now that shared albums add to the volume. If the `OR EXISTS` in `readableMediaCond` makes the list slow, split it into `UNION ALL` (own ∪ shared).
 3. **Map clustering** — add `react-leaflet-cluster` or Supercluster when library grows large.
 4. **Filename-based timestamp guessing** — parse common filename patterns (e.g. `20230729_210400.jpg`) as `taken_at` fallback after file mtime.
 5. **XMP 360° detection** — parse `XMP-GPano:ProjectionType = equirectangular` for reliable 360° detection without depending on filename or aspect ratio.
@@ -286,6 +287,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `internal/auth/middleware_test.go` — cookie and Bearer cases, `RequireSession`, `RequireAdmin`
 - `internal/auth/tokens_test.go`, `invite_test.go`, `oidc_test.go`, `returnto_test.go`
 - `cmd/server/main_test.go` — route wiring (token → 403 on session-only routes, album routes included), `scan` user checks and exit behaviour, `users` table
+- `cmd/server/compress_integration_test.go` — `GET /api/media` is gzipped through the real router, other routes are not (needs `TEST_DATABASE_URL`)
 - `internal/handlers/admin_test.go` — admin handlers
 - `internal/handlers/gps_matcher_test.go`, `gps_matcher_handler_test.go` — GPS matcher logic and handler
 - `internal/handlers/gps_tracks_test.go` — GPS track import endpoint
@@ -319,7 +321,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `src/App.test.tsx`, `src/api/client.test.ts` (401 redirect; `me()` does not redirect)
 - `src/components/auth/AuthGate.test.tsx`, `LoginScreen.test.tsx`
 - `src/pages/MapPage.test.tsx`, `TripsPage.test.tsx`, `AlbumsPage.test.tsx`, `GamePage.test.tsx`, `UploadPage.test.tsx`, `SettingsPage.test.tsx`, `AdminPage.test.tsx`
-- `src/components/map/FilterPanel.test.tsx`, `MediaMap.test.tsx`
+- `src/components/map/FilterPanel.test.tsx`, `MediaMap.test.tsx` (real Leaflet + markercluster in jsdom; spies on the group's bulk calls, including a removal during a chunked add)
 - `src/components/MediaGalleryOverlay.test.tsx`, `src/components/albums/AlbumMenu.test.tsx`, `AlbumPickerDialog.test.tsx`
 - `src/lib/filters.test.ts`, `errors.test.ts`, `search.test.ts`, `albums.test.ts`, `trips.test.ts`, `uploadBatches.test.ts`
 - Vitest + React Testing Library. Run with `npm run test`.
