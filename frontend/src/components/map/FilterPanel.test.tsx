@@ -278,4 +278,68 @@ describe("FilterPanel", () => {
       expect(screen.getByRole("button", { name: /reset/i })).toBeInTheDocument();
     });
   });
+
+  describe("collection search", () => {
+    const manyTrips: Trip[] = Array.from({ length: 6 }, (_, i) => ({
+      ...sampleTrips[0],
+      id: `m${i}`,
+      name: `Trip 202${i}-05-01`,
+      start_date: `202${i}-05-01`,
+    }));
+
+    function renderMany(overrides: Partial<FilterState> = {}) {
+      return renderPanel(overrides, 0, vi.fn(), [...manyTrips, sampleTrips[1]], sampleAlbums);
+    }
+
+    const labels = () =>
+      screen
+        .getAllByRole("checkbox")
+        .map((c) => c.closest("label")?.textContent?.trim())
+        .filter((l) => !["photo", "video", "photo_360", "video_360"].includes(l ?? ""));
+
+    it("has no search field for a short list", async () => {
+      renderPanel();
+      await openPanel();
+      expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+    });
+
+    it("filters trips and albums together, by name, date and album owner", async () => {
+      renderMany();
+      await openPanel();
+      const search = screen.getByRole("searchbox", { name: "Search collections" });
+
+      await userEvent.type(search, "tokyo");
+      expect(labels()).toEqual(["Tokyo Winter"]);
+      expect(screen.queryByRole("group", { name: "Albums" })).not.toBeInTheDocument();
+
+      await userEvent.clear(search);
+      await userEvent.type(search, "bob");
+      expect(labels()).toEqual(["Road trip by Bob"]);
+      expect(screen.queryByRole("group", { name: "Trips" })).not.toBeInTheDocument();
+
+      await userEvent.clear(search);
+      await userEvent.type(search, "2024-12");
+      expect(labels()).toEqual(["Tokyo Winter"]);
+
+      await userEvent.clear(search);
+      await userEvent.type(search, "zzz");
+      expect(screen.getByText("No matching trips or albums")).toBeInTheDocument();
+    });
+
+    it("keeps ticked collections listed while searching", async () => {
+      renderMany({ tripIds: ["m1", "unassigned"], albumIds: ["a1"] });
+      await openPanel();
+      await userEvent.type(screen.getByRole("searchbox", { name: "Search collections" }), "tokyo");
+      expect(labels()).toEqual(["Unassigned", "Trip 2021-05-01", "Tokyo Winter", "Family"]);
+    });
+
+    it("forgets the search when the panel closes", async () => {
+      renderMany();
+      await openPanel();
+      await userEvent.type(screen.getByRole("searchbox", { name: "Search collections" }), "tokyo");
+      await openPanel();
+      await openPanel();
+      expect(screen.getByRole("searchbox", { name: "Search collections" })).toHaveValue("");
+    });
+  });
 });

@@ -1,8 +1,9 @@
-import { useEffect, useId, useState, useRef } from "react";
-import { Upload } from "lucide-react";
+import { useState, useRef } from "react";
+import { Upload, X } from "lucide-react";
 import { api, ApiError } from "@/api/client";
 import { MAX_FILE_BYTES, planUploadBatches } from "@/lib/uploadBatches";
 import type { Album, GpsImportResult } from "@/types";
+import { AlbumPickerDialog } from "@/components/albums/AlbumPickerDialog";
 
 const GiB = 1024 ** 3;
 
@@ -65,21 +66,9 @@ export function UploadPage() {
   const [importing, setImporting] = useState(false);
   const [gpsResult, setGpsResult] = useState<GpsImportResult | null>(null);
   const [gpsError, setGpsError] = useState<string | null>(null);
-  const [albums, setAlbums] = useState<Album[]>([]);
-  const [albumsFailed, setAlbumsFailed] = useState(false);
-  // "" uploads into no album.
-  const [albumId, setAlbumId] = useState("");
-  const albumSelectId = useId();
-
-  useEffect(() => {
-    api
-      .listAlbums()
-      .then(setAlbums)
-      .catch((e) => {
-        console.error(e);
-        setAlbumsFailed(true);
-      });
-  }, []);
+  // null uploads into no album.
+  const [album, setAlbum] = useState<Album | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   const handleGpsImport = async (file: File | undefined) => {
     if (!file) return;
@@ -97,7 +86,7 @@ export function UploadPage() {
   };
 
   // Reloads the album list and says whether the album is still in it (null: unknown).
-  // An album that is gone drops out of the select, which goes back to None.
+  // An album that is gone is dropped from the choice, which goes back to None.
   const albumStillListed = async (id: string): Promise<boolean | null> => {
     let list: Album[];
     try {
@@ -106,9 +95,8 @@ export function UploadPage() {
       console.error("Failed to reload albums:", e);
       return null;
     }
-    setAlbums(list);
     const listed = list.some((a) => a.id === id);
-    if (!listed) setAlbumId((cur) => (cur === id ? "" : cur));
+    if (!listed) setAlbum((cur) => (cur?.id === id ? null : cur));
     return listed;
   };
 
@@ -117,7 +105,6 @@ export function UploadPage() {
     setUploading(true);
     setError(null);
     setResult(null);
-    const album = albums.find((a) => a.id === albumId);
     let albumAdded = 0;
 
     // The album list may be stale: the album was deleted, or the caller removed or left.
@@ -175,7 +162,7 @@ export function UploadPage() {
       uploaded,
       skipped,
       failed: failedNames,
-      album: album && { name: album.name, added: albumAdded },
+      album: album ? { name: album.name, added: albumAdded } : undefined,
     });
     setError(errors.length > 0 ? [...new Set(errors)].join("; ") : null);
     setProgress(null);
@@ -209,25 +196,47 @@ export function UploadPage() {
         </div>
 
         <div className="mt-4 flex items-center gap-2 text-sm">
-          <label htmlFor={albumSelectId} className="font-medium">
-            Add to album
-          </label>
-          <select
-            id={albumSelectId}
-            value={albumId}
-            onChange={(e) => setAlbumId(e.target.value)}
+          <span className="font-medium">Add to album</span>
+          <button
+            type="button"
+            onClick={() => setPickerOpen(true)}
             disabled={uploading}
-            className="min-w-0 flex-1 rounded-md border bg-background px-2 py-1 disabled:opacity-50"
+            aria-label={`Add to album: ${album ? album.name : "None"}`}
+            className="min-w-0 flex-1 truncate rounded-md border bg-background px-2 py-1 text-left hover:bg-muted disabled:opacity-50"
           >
-            <option value="">None</option>
-            {albums.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.is_owner ? a.name : `${a.name} (by ${a.owner_name ?? "another user"})`}
-              </option>
-            ))}
-          </select>
+            {album ? (
+              <>
+                {album.name}
+                {!album.is_owner && (
+                  <span className="text-muted-foreground"> (by {album.owner_name ?? "another user"})</span>
+                )}
+              </>
+            ) : (
+              <span className="text-muted-foreground">None</span>
+            )}
+          </button>
+          {album && (
+            <button
+              type="button"
+              onClick={() => setAlbum(null)}
+              disabled={uploading}
+              aria-label="Upload into no album"
+              title="Upload into no album"
+              className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
-        {albumsFailed && <p className="mt-1 text-sm text-red-500">Could not load albums</p>}
+        <AlbumPickerDialog
+          open={pickerOpen}
+          onOpenChange={setPickerOpen}
+          title="Add uploads to an album"
+          description="New files and files already in your library are both added to the album."
+          initialAlbumId={album?.id}
+          confirmLabel="Choose"
+          onPick={setAlbum}
+        />
 
         {files && files.length > 0 && (
           <div className="mt-4">

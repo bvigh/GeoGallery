@@ -41,14 +41,18 @@ test("alice shares an upload with bob through an album, then removes him", async
 
     await alice.getByRole("button", { name: `Members of ${albumName}` }).click();
     const aliceMembers = alice.getByRole("dialog");
-    await aliceMembers.getByLabel("User to add").selectOption({ label: "Bob Test" });
-    await aliceMembers.getByRole("button", { name: "Add", exact: true }).click();
+    await aliceMembers.getByRole("button", { name: "Add Bob Test", exact: true }).click();
     await expect(aliceMembers.getByRole("list", { name: "Members" })).toContainText("Bob Test");
     await alice.keyboard.press("Escape");
     await expect(aliceMembers).toHaveCount(0);
 
     await alice.getByRole("button", { name: "Upload", exact: true }).click();
-    await alice.getByLabel("Add to album").selectOption({ label: albumName });
+    await alice.getByRole("button", { name: "Add to album: None" }).click();
+    const picker = alice.getByRole("dialog");
+    await picker.getByRole("radio", { name: albumName, exact: true }).check();
+    await picker.getByRole("button", { name: "Choose" }).click();
+    await expect(picker).toHaveCount(0);
+    await expect(alice.getByRole("button", { name: `Add to album: ${albumName}` })).toBeVisible();
     await alice.locator('input[type="file"][accept^="image/"]').setInputFiles(FIXTURE);
     await alice.getByRole("main").getByRole("button", { name: "Upload", exact: true }).click();
     await expect(alice.getByText("Uploaded 0 files, skipped 1, failed 0")).toBeVisible();

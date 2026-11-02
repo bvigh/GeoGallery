@@ -231,4 +231,55 @@ describe("AlbumMenu", () => {
       window.removeEventListener("keydown", onWindowKey);
     }
   });
+
+  describe("with many albums", () => {
+    const many = Array.from({ length: 8 }, (_, i) => makeAlbum({ id: `a${i + 10}`, name: `Album ${i}` }));
+
+    beforeEach(() => {
+      mockApi.listAlbums.mockResolvedValue([...many, family, iceland]);
+    });
+
+    const names = (dialog: HTMLElement) =>
+      within(within(dialog).getByRole("group", { name: "Your albums" }))
+        .getAllByRole("checkbox")
+        .map((c) => c.closest("label")?.textContent);
+
+    it("lists the albums the item is in first", async () => {
+      render(<AlbumMenu item={item} isOwn />);
+      const dialog = await openMenu();
+      await within(dialog).findByRole("checkbox", { name: /^Iceland/ });
+      expect(names(dialog)[0]).toBe("Icelandby Bob");
+      // Ticking does not reorder the list under the pointer.
+      await userEvent.click(within(dialog).getByRole("checkbox", { name: "Album 5" }));
+      expect(names(dialog)[6]).toBe("Album 5");
+    });
+
+    it("searches by album name and owner, keeping ticked albums listed", async () => {
+      render(<AlbumMenu item={item} isOwn />);
+      const dialog = await openMenu();
+      const search = await within(dialog).findByRole("searchbox", { name: "Search albums" });
+
+      await userEvent.type(search, "fam");
+      expect(names(dialog)).toEqual(["Icelandby Bob", "Family"]);
+      await userEvent.clear(search);
+      await userEvent.type(search, "album 3");
+      expect(names(dialog)).toEqual(["Icelandby Bob", "Album 3"]);
+
+      await userEvent.click(within(dialog).getByRole("checkbox", { name: /^Iceland/ }));
+      await waitFor(() => expect(mockApi.removeFromAlbum).toHaveBeenCalled());
+      expect(names(dialog)).toEqual(["Album 3"]);
+
+      await userEvent.clear(search);
+      await userEvent.type(search, "nothing like it");
+      expect(within(dialog).getByText("No matching albums.")).toBeInTheDocument();
+    });
+
+    it("names a new album after the search", async () => {
+      render(<AlbumMenu item={item} isOwn />);
+      const dialog = await openMenu();
+      await userEvent.type(await within(dialog).findByRole("searchbox", { name: "Search albums" }), " Summer ");
+      await userEvent.click(within(dialog).getByRole("button", { name: "New album…" }));
+      expect(within(dialog).getByRole("textbox", { name: "New album name" })).toHaveValue("Summer");
+    });
+  });
 });

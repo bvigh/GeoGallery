@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { api } from "@/api/client";
 import type { Album } from "@/types";
+import { matchesSearch, SEARCH_MIN_ITEMS } from "@/lib/search";
+import { SearchInput } from "@/components/SearchInput";
 import {
   Dialog,
   DialogContent,
@@ -23,6 +25,8 @@ interface Props {
   description: string;
   // Prefills the name of a new album, e.g. the trip being added.
   defaultName?: string;
+  // Preselects this album when it is still listed, e.g. the one chosen last time.
+  initialAlbumId?: string;
   confirmLabel?: string;
   // Called with the chosen album, existing or just created; the dialog then closes.
   // Adding to it is the caller's job, so one picker serves every kind of selection.
@@ -35,6 +39,7 @@ export function AlbumPickerDialog({
   title,
   description,
   defaultName = "",
+  initialAlbumId,
   confirmLabel = "Add",
   onPick,
 }: Props) {
@@ -44,6 +49,7 @@ export function AlbumPickerDialog({
   // An album id or NEW_ALBUM; null until the list loads or the user picks.
   const [choice, setChoice] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
+  const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Bumped on every open and close so late responses for an old opening are dropped.
@@ -56,6 +62,7 @@ export function AlbumPickerDialog({
     setStatus("loading");
     setChoice(null);
     setNewName(defaultName.slice(0, MAX_NAME_LENGTH));
+    setQuery("");
     setCreating(false);
     setError(null);
     api
@@ -66,7 +73,8 @@ export function AlbumPickerDialog({
         setStatus("ready");
         // Adding the same trip again is idempotent, so offer the album it went into
         // last time instead of a duplicate with the same name.
-        const match = list.find((a) => a.name === defaultName.trim());
+        const match =
+          list.find((a) => a.id === initialAlbumId) ?? list.find((a) => a.name === defaultName.trim());
         setChoice((prev) => prev ?? (match ? match.id : NEW_ALBUM));
       })
       .catch((e) => {
@@ -75,7 +83,7 @@ export function AlbumPickerDialog({
         setStatus("failed");
         setChoice((prev) => prev ?? NEW_ALBUM);
       });
-  }, [open, defaultName]);
+  }, [open, defaultName, initialAlbumId]);
 
   const pick = (album: Album) => {
     onPick(album);
@@ -109,6 +117,9 @@ export function AlbumPickerDialog({
     }
   };
 
+  // The chosen album stays listed while searching, so the choice is never hidden.
+  const visibleAlbums = albums.filter((a) => a.id === choice || matchesSearch(query, a.name, a.owner_name));
+
   const canSubmit =
     !creating && (choice === NEW_ALBUM ? newName.trim() !== "" : albums.some((a) => a.id === choice));
 
@@ -128,25 +139,31 @@ export function AlbumPickerDialog({
               <p className="text-red-500">Could not load albums</p>
             ) : (
               albums.length > 0 && (
-                <div className="max-h-64 space-y-1 overflow-y-auto">
-                  {albums.map((album) => (
-                    <label key={album.id} className="flex cursor-pointer items-center gap-2">
-                      <input
-                        type="radio"
-                        name={radioName}
-                        value={album.id}
-                        checked={choice === album.id}
-                        onChange={() => setChoice(album.id)}
-                      />
-                      <span className="min-w-0 break-words">{album.name}</span>
-                      {!album.is_owner && (
-                        <span className="shrink-0 text-xs text-muted-foreground">
-                          by {album.owner_name ?? "another user"}
-                        </span>
-                      )}
-                    </label>
-                  ))}
-                </div>
+                <>
+                  {albums.length >= SEARCH_MIN_ITEMS && (
+                    <SearchInput value={query} onChange={setQuery} label="Search albums" />
+                  )}
+                  {visibleAlbums.length === 0 && <p className="text-muted-foreground">No matching albums</p>}
+                  <div className="max-h-64 space-y-1 overflow-y-auto">
+                    {visibleAlbums.map((album) => (
+                      <label key={album.id} className="flex cursor-pointer items-center gap-2">
+                        <input
+                          type="radio"
+                          name={radioName}
+                          value={album.id}
+                          checked={choice === album.id}
+                          onChange={() => setChoice(album.id)}
+                        />
+                        <span className="min-w-0 break-words">{album.name}</span>
+                        {!album.is_owner && (
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            by {album.owner_name ?? "another user"}
+                          </span>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                </>
               )
             )}
             <label className="flex cursor-pointer items-center gap-2">

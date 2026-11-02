@@ -9,7 +9,7 @@ vi.mock("@/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/client")>();
   return {
     ApiError: actual.ApiError,
-    api: { upload: vi.fn(), importGpsTracks: vi.fn(), listAlbums: vi.fn() },
+    api: { upload: vi.fn(), importGpsTracks: vi.fn(), listAlbums: vi.fn(), createAlbum: vi.fn() },
   };
 });
 
@@ -17,6 +17,7 @@ const mockApi = api as unknown as {
   upload: ReturnType<typeof vi.fn>;
   importGpsTracks: ReturnType<typeof vi.fn>;
   listAlbums: ReturnType<typeof vi.fn>;
+  createAlbum: ReturnType<typeof vi.fn>;
 };
 
 function mediaInput(container: HTMLElement): HTMLInputElement {
@@ -51,9 +52,20 @@ function bigVideos(...names: string[]): File[] {
   });
 }
 
+function albumButton() {
+  return screen.getByRole("button", { name: /^Add to album:/ });
+}
+
+async function openPicker() {
+  await userEvent.click(albumButton());
+  return screen.findByRole("dialog");
+}
+
 async function chooseAlbum(name: string) {
-  await screen.findByRole("option", { name });
-  await userEvent.selectOptions(screen.getByRole("combobox", { name: "Add to album" }), name);
+  const dialog = await openPicker();
+  await userEvent.click(await within(dialog).findByRole("radio", { name: new RegExp(`^${name}`) }));
+  await userEvent.click(within(dialog).getByRole("button", { name: "Choose" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 }
 
 describe("UploadPage", () => {
@@ -82,8 +94,9 @@ describe("UploadPage", () => {
   it("uploads into no album by default", async () => {
     mockApi.upload.mockResolvedValue({ uploaded: ["a.mp4"], album_added: 0 });
     const { container } = render(<UploadPage />);
-    await screen.findByRole("option", { name: "Family" });
-    expect(screen.getByRole("combobox", { name: "Add to album" })).toHaveValue("");
+    expect(albumButton()).toHaveAccessibleName("Add to album: None");
+    // The albums load only when the picker opens.
+    expect(mockApi.listAlbums).not.toHaveBeenCalled();
     await userEvent.upload(mediaInput(container), bigVideos("a.mp4", "b.mp4", "c.mp4"));
     await userEvent.click(screen.getByRole("button", { name: "Upload" }));
 
@@ -96,16 +109,45 @@ describe("UploadPage", () => {
     expect(screen.queryByText(/^Added .* to "/)).not.toBeInTheDocument();
   });
 
-  it("offers the caller's albums, naming the owner of shared ones", async () => {
+  it("offers the caller's albums and a new one, naming the owner of shared ones", async () => {
     render(<UploadPage />);
-    const select = screen.getByRole("combobox", { name: "Add to album" });
+    const dialog = await openPicker();
 
-    expect(await screen.findByRole("option", { name: "Family" })).toBeInTheDocument();
-    expect(Array.from((select as HTMLSelectElement).options).map((o) => [o.value, o.text])).toEqual([
-      ["", "None"],
-      ["a1", "Family"],
-      ["a2", "Iceland 2025 (by Bob)"],
+    await within(dialog).findByRole("radio", { name: "Family" });
+    expect(within(dialog).getAllByRole("radio").map((r) => r.closest("label")?.textContent)).toEqual([
+      "Family",
+      "Iceland 2025by Bob",
+      "New album",
     ]);
+  });
+
+  it("shows the chosen album, naming the owner of a shared one, and preselects it next time", async () => {
+    render(<UploadPage />);
+    await chooseAlbum("Iceland 2025");
+    expect(albumButton()).toHaveAccessibleName("Add to album: Iceland 2025");
+    expect(albumButton()).toHaveTextContent("Iceland 2025 (by Bob)");
+
+    const dialog = await openPicker();
+    expect(await within(dialog).findByRole("radio", { name: /^Iceland 2025/ })).toBeChecked();
+  });
+
+  it("uploads into an album created in the picker", async () => {
+    const trip = makeAlbum({ id: "a3", name: "Road trip" });
+    mockApi.createAlbum.mockResolvedValue(trip);
+    mockApi.listAlbums.mockResolvedValueOnce([family, iceland]).mockResolvedValue([family, iceland, trip]);
+    mockApi.upload.mockResolvedValue({ uploaded: ["a.jpg"], skipped: [], failed: [], album_added: 1 });
+    const { container } = render(<UploadPage />);
+    const dialog = await openPicker();
+    await within(dialog).findByRole("radio", { name: "Family" });
+    await userEvent.type(within(dialog).getByRole("textbox", { name: "New album name" }), "Road trip");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Choose" }));
+
+    expect(mockApi.createAlbum).toHaveBeenCalledWith("Road trip");
+    await waitFor(() => expect(albumButton()).toHaveAccessibleName("Add to album: Road trip"));
+    await userEvent.upload(mediaInput(container), new File(["a"], "a.jpg", { type: "image/jpeg" }));
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    expect(await screen.findByText('Added 1 file to "Road trip"')).toBeInTheDocument();
+    expect(mockApi.upload.mock.calls[0][1]).toBe("a3");
   });
 
   it("sends the chosen album with every batch and totals what the album gained", async () => {
@@ -114,7 +156,7 @@ describe("UploadPage", () => {
       .mockResolvedValueOnce({ uploaded: [], skipped: ["b.mp4"], failed: [], album_added: 1 })
       .mockResolvedValueOnce({ uploaded: [], skipped: ["c.mp4"], failed: [], album_added: 0 });
     const { container } = render(<UploadPage />);
-    await chooseAlbum("Iceland 2025 (by Bob)");
+    await chooseAlbum("Iceland 2025");
     await userEvent.upload(mediaInput(container), bigVideos("a.mp4", "b.mp4", "c.mp4"));
     await userEvent.click(screen.getByRole("button", { name: "Upload" }));
 
@@ -124,10 +166,11 @@ describe("UploadPage", () => {
     expect(screen.getByText('Added 2 files to "Iceland 2025"')).toBeInTheDocument();
   });
 
-  it("goes back to no album when None is chosen again", async () => {
+  it("goes back to no album when the choice is cleared", async () => {
     const { container } = render(<UploadPage />);
     await chooseAlbum("Family");
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Add to album" }), "None");
+    await userEvent.click(screen.getByRole("button", { name: "Upload into no album" }));
+    expect(albumButton()).toHaveAccessibleName("Add to album: None");
     await userEvent.upload(mediaInput(container), new File(["a"], "a.jpg", { type: "image/jpeg" }));
     await userEvent.click(screen.getByRole("button", { name: "Upload" }));
 
@@ -176,10 +219,8 @@ describe("UploadPage", () => {
     ).toBeInTheDocument();
     expect(mockApi.upload).not.toHaveBeenCalled();
     // The album is gone from the choice, and the files stay selected for another try.
-    const select = screen.getByRole("combobox", { name: "Add to album" });
-    expect(select).toHaveValue("");
-    expect(select).toBeEnabled();
-    expect(within(select).queryByRole("option", { name: "Family" })).not.toBeInTheDocument();
+    expect(albumButton()).toHaveAccessibleName("Add to album: None");
+    expect(albumButton()).toBeEnabled();
     expect(screen.getByText("2 files selected")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Upload" })).toBeEnabled();
   });
@@ -200,7 +241,7 @@ describe("UploadPage", () => {
 
   it("explains a network failure as a vanished album, and stops, when the album is gone", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    // Mount and the check before sending still list it; the check after the failure does not.
+    // The picker and the check before sending still list it; the check after the failure does not.
     mockApi.listAlbums
       .mockResolvedValueOnce([family, iceland])
       .mockResolvedValueOnce([family, iceland])
@@ -216,7 +257,7 @@ describe("UploadPage", () => {
     ).toBeInTheDocument();
     expect(mockApi.upload).toHaveBeenCalledTimes(1);
     expect(screen.getByText("3 files failed")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Add to album" })).toHaveValue("");
+    expect(albumButton()).toHaveAccessibleName("Add to album: None");
   });
 
   it("keeps sending batches after a failure while the album is still there", async () => {
@@ -240,8 +281,11 @@ describe("UploadPage", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const { container } = render(<UploadPage />);
 
-    expect(await screen.findByText("Could not load albums")).toBeInTheDocument();
-    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["None"]);
+    const dialog = await openPicker();
+    expect(await within(dialog).findByText("Could not load albums")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(albumButton()).toHaveAccessibleName("Add to album: None");
     await userEvent.upload(mediaInput(container), new File(["a"], "a.jpg", { type: "image/jpeg" }));
     await userEvent.click(screen.getByRole("button", { name: "Upload" }));
     expect(mockApi.upload.mock.calls[0][1]).toBeUndefined();
@@ -255,9 +299,10 @@ describe("UploadPage", () => {
     await userEvent.upload(mediaInput(container), new File(["a"], "a.jpg", { type: "image/jpeg" }));
     await userEvent.click(screen.getByRole("button", { name: "Upload" }));
 
-    expect(screen.getByRole("combobox", { name: "Add to album" })).toBeDisabled();
+    expect(albumButton()).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Upload into no album" })).toBeDisabled();
     resolve({ uploaded: ["a.jpg"] });
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "Add to album" })).toBeEnabled());
+    await waitFor(() => expect(albumButton()).toBeEnabled());
   });
 
   it("lists duplicates the server skipped", async () => {

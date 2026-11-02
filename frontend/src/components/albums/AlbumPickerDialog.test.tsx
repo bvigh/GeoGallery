@@ -227,4 +227,48 @@ describe("AlbumPickerDialog", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(mockApi.listAlbums).not.toHaveBeenCalled();
   });
+
+  describe("with many albums", () => {
+    const many = Array.from({ length: 8 }, (_, i) => makeAlbum({ id: `a${i + 10}`, name: `Album ${i}` }));
+
+    beforeEach(() => {
+      mockApi.listAlbums.mockResolvedValue([...many, family, shared]);
+    });
+
+    const names = (dialog: HTMLElement) =>
+      within(dialog)
+        .getAllByRole("radio")
+        .map((r) => r.closest("label")?.textContent);
+
+    it("searches by album name and owner", async () => {
+      renderPicker();
+      const dialog = await loadedDialog();
+      const search = within(dialog).getByRole("searchbox", { name: "Search albums" });
+
+      await userEvent.type(search, "bob");
+      expect(names(dialog)).toEqual(["Road tripby Bob", "New album"]);
+      await userEvent.clear(search);
+      await userEvent.type(search, "xyz");
+      expect(within(dialog).getByText("No matching albums")).toBeInTheDocument();
+      expect(names(dialog)).toEqual(["New album"]);
+    });
+
+    it("keeps the chosen album listed, and Enter in the search does not submit", async () => {
+      const { props } = renderPicker({ initialAlbumId: "a1" });
+      const dialog = await loadedDialog();
+      expect(within(dialog).getByRole("radio", { name: "Family" })).toBeChecked();
+
+      await userEvent.type(within(dialog).getByRole("searchbox", { name: "Search albums" }), "album 2{Enter}");
+      expect(names(dialog)).toEqual(["Album 2", "Family", "New album"]);
+      expect(props.onPick).not.toHaveBeenCalled();
+      expect(mockApi.createAlbum).not.toHaveBeenCalled();
+    });
+  });
+
+  it("prefers the initial album over a name match", async () => {
+    mockApi.listAlbums.mockResolvedValue([family, makeAlbum({ id: "a3", name: "Iceland 2024" })]);
+    renderPicker({ initialAlbumId: "a1" });
+    const dialog = await loadedDialog();
+    expect(within(dialog).getByRole("radio", { name: "Family" })).toBeChecked();
+  });
 });

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { AlbumIcon } from "lucide-react";
 import { api } from "@/api/client";
 import type { Album, MediaItem } from "@/types";
+import { matchesSearch, SEARCH_MIN_ITEMS } from "@/lib/search";
+import { SearchInput } from "@/components/SearchInput";
 import {
   Dialog,
   DialogContent,
@@ -36,6 +38,7 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
   const [status, setStatus] = useState<"loading" | "ready" | "failed">("loading");
   const [pending, setPending] = useState<string[]>([]);
   const [newName, setNewName] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Bumped on close and item change so late responses for an old load are dropped.
@@ -51,13 +54,17 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
     setStatus("loading");
     setError(null);
     setNewName(null);
+    setQuery("");
     try {
       const [all, inAlbums] = await Promise.all([
         isOwn ? api.listAlbums() : Promise.resolve([]),
         api.mediaAlbums(item.id),
       ]);
       if (gen !== generation.current) return;
-      setAlbums(all);
+      // The albums the item is in come first. Sorted once per load, so ticking
+      // does not move rows under the pointer.
+      const inIds = new Set(inAlbums.map((a) => a.id));
+      setAlbums([...all].sort((a, b) => Number(inIds.has(b.id)) - Number(inIds.has(a.id))));
       setContaining(inAlbums);
       setStatus("ready");
     } catch (e) {
@@ -112,6 +119,10 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
     }
   }
 
+  const isIn = (album: AlbumRef) => containing.some((a) => a.id === album.id);
+  // Ticked albums stay listed while searching, so they can always be unticked.
+  const visibleAlbums = albums.filter((a) => isIn(a) || matchesSearch(query, a.name, a.owner_name));
+
   const trigger =
     variant === "overlay" ? (
       <button
@@ -153,16 +164,21 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
             <p className="text-sm text-red-500">Could not load albums</p>
           ) : isOwn ? (
             <div className="space-y-3 text-sm">
+              {albums.length >= SEARCH_MIN_ITEMS && (
+                <SearchInput value={query} onChange={setQuery} label="Search albums" />
+              )}
               {albums.length === 0 ? (
                 <p className="text-muted-foreground">No albums yet.</p>
+              ) : visibleAlbums.length === 0 ? (
+                <p className="text-muted-foreground">No matching albums.</p>
               ) : (
                 <div role="group" aria-label="Your albums" className="max-h-64 space-y-1 overflow-y-auto">
-                  {albums.map((album) => (
+                  {visibleAlbums.map((album) => (
                     <label key={album.id} className="flex items-center gap-2 cursor-pointer">
                       <input
                         type="checkbox"
                         className="rounded"
-                        checked={containing.some((a) => a.id === album.id)}
+                        checked={isIn(album)}
                         disabled={pending.includes(album.id)}
                         onChange={(e) => toggle(album, e.target.checked)}
                       />
@@ -181,7 +197,7 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
                 <button
                   type="button"
                   className="text-primary hover:underline"
-                  onClick={() => setNewName("")}
+                  onClick={() => setNewName(query.trim().slice(0, 200))}
                 >
                   New album…
                 </button>
