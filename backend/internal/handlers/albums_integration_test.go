@@ -67,6 +67,7 @@ func decodeAlbums(t *testing.T, rec *httptest.ResponseRecorder) []albumItem {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &albums), rec.Body.String())
 	for i := range albums {
 		albums[i].CreatedAt = time.Time{} // compared separately where it matters
+		albums[i].LastAddedAt = nil
 	}
 	return albums
 }
@@ -153,8 +154,8 @@ func TestAlbums_CreateAndList(t *testing.T) {
 
 	rec := do(t, f.api, f.userB, http.MethodPost, "/api/albums", `{"name":"  Iceland 2025 \n"}`)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	assert.Equal(t, []string{"created_at", "end_date", "id", "is_owner", "media_count", "member_count",
-		"name", "owner_id", "owner_name", "start_date"}, jsonKeys(t, rec.Body.Bytes()))
+	assert.Equal(t, []string{"created_at", "end_date", "id", "is_owner", "last_added_at", "media_count",
+		"member_count", "name", "owner_id", "owner_name", "start_date"}, jsonKeys(t, rec.Body.Bytes()))
 	var created albumItem
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
 	assert.WithinDuration(t, time.Now(), created.CreatedAt, time.Minute)
@@ -217,6 +218,65 @@ func TestAlbums_CreateAndList(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code)
 		assert.JSONEq(t, `[]`, rec.Body.String(), "a user in no album gets [], not null")
 	})
+}
+
+func TestAlbums_LastAddedAt(t *testing.T) {
+	f := newAlbumsFixture(t)
+	insertAlbumMedia(t, f.pool, f.family, f.mediaB)
+	setAddedAt := func(t *testing.T, album, media, at string) {
+		t.Helper()
+		tag, err := f.pool.Exec(context.Background(),
+			`UPDATE album_media SET added_at = $3 WHERE album_id = $1 AND media_id = $2`, album, media, at)
+		require.NoError(t, err)
+		require.EqualValues(t, 1, tag.RowsAffected())
+	}
+	setAddedAt(t, f.family, f.mediaA, "2025-01-01T00:00:00Z")
+	setAddedAt(t, f.family, f.mediaAUnlocated, "2025-03-01T00:00:00Z")
+	setAddedAt(t, f.family, f.mediaB, "2025-06-01T00:00:00Z")
+	setAddedAt(t, f.private, f.mediaA, "2025-02-01T00:00:00Z")
+
+	// lastAdded maps each of the user's albums to its last_added_at in UTC, "" for null.
+	lastAdded := func(t *testing.T, user string) map[string]string {
+		t.Helper()
+		rec := do(t, f.api, user, http.MethodGet, "/api/albums", "")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var albums []albumItem
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &albums), rec.Body.String())
+		out := map[string]string{}
+		for _, a := range albums {
+			out[a.ID] = ""
+			if a.LastAddedAt != nil {
+				out[a.ID] = a.LastAddedAt.UTC().Format(time.RFC3339)
+			}
+		}
+		return out
+	}
+
+	rec := do(t, f.api, f.userB, http.MethodPost, "/api/albums", `{"name":"Empty"}`)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var empty albumItem
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &empty))
+	assert.Nil(t, empty.LastAddedAt, "a new album has no contributions")
+
+	assert.Equal(t, map[string]string{f.family: "2025-03-01T00:00:00Z", f.private: "2025-02-01T00:00:00Z"},
+		lastAdded(t, f.userA), "the caller's latest contribution; B's later one does not count")
+	assert.Equal(t, map[string]string{f.family: "2025-06-01T00:00:00Z", empty.ID: ""}, lastAdded(t, f.userB))
+
+	familyPath := "/api/albums/" + f.family + "/media"
+	rec = do(t, f.api, f.userA, http.MethodPost, familyPath+"/remove", mediaIDsBody(t, f.mediaAUnlocated))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "2025-01-01T00:00:00Z", lastAdded(t, f.userA)[f.family], "removal takes the timestamp with it")
+
+	rec = do(t, f.api, f.userA, http.MethodPost, familyPath+"/remove", mediaIDsBody(t, f.mediaA))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "", lastAdded(t, f.userA)[f.family], "null once none of the caller's items is left")
+	assert.Equal(t, "2025-06-01T00:00:00Z", lastAdded(t, f.userB)[f.family], "other members keep theirs")
+
+	rec = do(t, f.api, f.userA, http.MethodPost, familyPath, mediaIDsBody(t, f.mediaA))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := time.Parse(time.RFC3339, lastAdded(t, f.userA)[f.family])
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now(), got, time.Minute, "adding sets it to now")
 }
 
 func TestAlbums_Rename(t *testing.T) {

@@ -65,6 +65,7 @@ const owned: Album = {
   start_date: "2025-06-01T10:00:00Z",
   end_date: "2025-06-14T18:00:00Z",
   created_at: "2025-05-01T00:00:00Z",
+  last_added_at: null,
 };
 
 const shared: Album = {
@@ -78,6 +79,7 @@ const shared: Album = {
   start_date: null,
   end_date: null,
   created_at: "2025-05-02T00:00:00Z",
+  last_added_at: null,
 };
 
 const ownedMembers: AlbumMember[] = [
@@ -347,21 +349,24 @@ describe("AlbumsPage", () => {
       ]);
       expect(mockApi.listAlbumMembers).toHaveBeenCalledWith(owned.id);
 
-      const select = await within(dialog).findByRole("combobox", { name: "User to add" });
-      const options = within(select).getAllByRole("option").map((o) => o.textContent);
+      const users = await within(dialog).findByRole("list", { name: "Users to add" });
       // Existing members (Me, Bob) are left out; a missing display name falls back to the email.
-      expect(options).toEqual(["Choose a user…", "carol@example.test", "Dave"]);
+      expect(within(users).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+        "carol@example.testAdd",
+        "DaveAdd",
+      ]);
+      // A short list needs no search field.
+      expect(within(dialog).queryByRole("searchbox")).not.toBeInTheDocument();
 
       mockApi.listAlbumMembers.mockResolvedValue([
         ...ownedMembers,
         { user_id: "u-carol", display_name: null, email: "carol@example.test", is_owner: false, added_at: "2025-05-05T00:00:00Z" },
       ]);
-      await userEvent.selectOptions(select, "u-carol");
-      await userEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+      await userEvent.click(within(users).getByRole("button", { name: "Add carol@example.test" }));
 
       expect(mockApi.addAlbumMember).toHaveBeenCalledWith(owned.id, "u-carol");
       await waitFor(() =>
-        expect(within(select).getAllByRole("option").map((o) => o.textContent)).toEqual(["Choose a user…", "Dave"])
+        expect(within(users).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["DaveAdd"])
       );
       expect(within(list).getByText("carol@example.test")).toBeInTheDocument();
       // Counts on the card are refreshed.
@@ -373,7 +378,37 @@ describe("AlbumsPage", () => {
       renderPage();
       const dialog = await openMembers(owned);
       expect(await within(dialog).findByText("Everyone in the user list is already a member.")).toBeInTheDocument();
-      expect(within(dialog).queryByRole("combobox")).not.toBeInTheDocument();
+      expect(within(dialog).queryByRole("list", { name: "Users to add" })).not.toBeInTheDocument();
+    });
+
+    it("searches a long user list by name or email", async () => {
+      mockApi.listUsers.mockResolvedValue([
+        ...directory,
+        ...Array.from({ length: 8 }, (_, i) => ({ id: `u-${i}`, display_name: `User ${i}`, email: `user${i}@example.test` })),
+        { id: "u-balazs", display_name: "Balázs", email: "b@example.test" },
+      ]);
+      renderPage();
+      const dialog = await openMembers(owned);
+      const search = await within(dialog).findByRole("searchbox", { name: "Search users" });
+      const names = () =>
+        within(dialog)
+          .queryAllByRole("button", { name: /^Add / })
+          .map((b) => b.getAttribute("aria-label"));
+
+      // Accents are ignored, and the email is searched too.
+      await userEvent.type(search, "balazs");
+      expect(names()).toEqual(["Add Balázs"]);
+      await userEvent.clear(search);
+      await userEvent.type(search, "carol@");
+      expect(names()).toEqual(["Add carol@example.test"]);
+      // Enter does not add anyone.
+      await userEvent.type(search, "{Enter}");
+      expect(mockApi.addAlbumMember).not.toHaveBeenCalled();
+
+      await userEvent.type(search, "nobody");
+      expect(within(dialog).getByText("No matching users.")).toBeInTheDocument();
+      await userEvent.click(within(dialog).getByRole("button", { name: "Clear search" }));
+      expect(names()).toHaveLength(11);
     });
 
     it("shows why adding a member failed", async () => {
@@ -381,8 +416,7 @@ describe("AlbumsPage", () => {
       mockApi.addAlbumMember.mockRejectedValue(new ApiError("POST /albums/a1/members failed: 404", 404));
       renderPage();
       const dialog = await openMembers(owned);
-      await userEvent.selectOptions(await within(dialog).findByRole("combobox", { name: "User to add" }), "u-dave");
-      await userEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+      await userEvent.click(await within(dialog).findByRole("button", { name: "Add Dave" }));
 
       expect(
         await within(dialog).findByText(
@@ -409,8 +443,8 @@ describe("AlbumsPage", () => {
       const list = within(dialog).getByRole("list", { name: "Members" });
       await waitFor(() => expect(within(list).queryByText("Bob")).not.toBeInTheDocument());
       // Bob can be added again.
-      const select = within(dialog).getByRole("combobox", { name: "User to add" });
-      expect(within(select).getByRole("option", { name: "Bob" })).toBeInTheDocument();
+      const users = within(dialog).getByRole("list", { name: "Users to add" });
+      expect(within(users).getByRole("button", { name: "Add Bob" })).toBeInTheDocument();
       expect(mockApi.listAlbums).toHaveBeenCalledTimes(2);
     });
 
@@ -422,7 +456,7 @@ describe("AlbumsPage", () => {
       expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["BobOwner", "Me (you)"]);
       expect(within(dialog).getByRole("button", { name: "Leave album" })).toBeInTheDocument();
       expect(within(dialog).queryByRole("button", { name: /^Remove/ })).not.toBeInTheDocument();
-      expect(within(dialog).queryByRole("combobox")).not.toBeInTheDocument();
+      expect(within(dialog).queryByRole("list", { name: "Users to add" })).not.toBeInTheDocument();
       expect(mockApi.listUsers).not.toHaveBeenCalled();
     });
 

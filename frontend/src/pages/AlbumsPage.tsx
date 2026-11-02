@@ -2,9 +2,11 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { Plus } from "lucide-react";
 import { api } from "@/api/client";
 import { describeError } from "@/lib/errors";
+import { matchesSearch, SEARCH_MIN_ITEMS } from "@/lib/search";
 import type { Album, AlbumMember, DirectoryUser, MediaItem } from "@/types";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { MediaGalleryOverlay } from "@/components/MediaGalleryOverlay";
+import { SearchInput } from "@/components/SearchInput";
 import {
   Dialog,
   DialogContent,
@@ -149,7 +151,7 @@ function MembersPanel({
   const [members, setMembers] = useState<AlbumMember[] | null>(null);
   // The user directory; only the album owner adds members, so only they load it.
   const [directory, setDirectory] = useState<DirectoryUser[] | null>(null);
-  const [picked, setPicked] = useState("");
+  const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // False once the dialog closed. The panel is keyed by album, so this also covers
@@ -193,15 +195,14 @@ function MembersPanel({
 
   const candidates =
     directory && members ? directory.filter((u) => !members.some((m) => m.user_id === u.id)) : [];
+  const visibleCandidates = candidates.filter((u) => matchesSearch(query, u.display_name, u.email));
 
-  const addMember = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!picked || busy) return;
+  const addMember = async (u: DirectoryUser) => {
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      await api.addAlbumMember(album.id, picked);
-      setPicked("");
+      await api.addAlbumMember(album.id, u.id);
       await loadMembers();
       onChanged();
     } catch (err) {
@@ -298,28 +299,44 @@ function MembersPanel({
         candidates.length === 0 ? (
           <p className="text-sm text-muted-foreground">Everyone in the user list is already a member.</p>
         ) : (
-          <form onSubmit={addMember} className="flex gap-2 text-sm">
-            <select
-              aria-label="User to add"
-              value={picked}
-              onChange={(e) => setPicked(e.target.value)}
-              className="min-w-0 flex-1 rounded-md border px-2 py-1"
-            >
-              <option value="">Choose a user…</option>
-              {candidates.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {userLabel(u, u.id)}
-                </option>
-              ))}
-            </select>
-            <button
-              type="submit"
-              disabled={!picked || busy}
-              className="rounded-md bg-primary px-3 py-1 font-medium text-primary-foreground disabled:opacity-50"
-            >
-              Add
-            </button>
-          </form>
+          <div className="space-y-2 text-sm">
+            <p className="font-medium">Add members</p>
+            {candidates.length >= SEARCH_MIN_ITEMS && (
+              <SearchInput
+                value={query}
+                onChange={setQuery}
+                label="Search users"
+                placeholder="Search by name or email…"
+              />
+            )}
+            {visibleCandidates.length === 0 ? (
+              <p className="text-muted-foreground">No matching users.</p>
+            ) : (
+              <ul aria-label="Users to add" className="max-h-48 space-y-1 overflow-y-auto">
+                {visibleCandidates.map((u) => {
+                  const name = userLabel(u, u.id);
+                  return (
+                    <li key={u.id} className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 break-words">
+                        {name}
+                        {u.display_name && u.email && (
+                          <span className="ml-2 text-xs text-muted-foreground">{u.email}</span>
+                        )}
+                      </span>
+                      <button
+                        onClick={() => addMember(u)}
+                        disabled={busy}
+                        aria-label={`Add ${name}`}
+                        className="shrink-0 rounded-md border px-2 py-1 text-xs font-medium hover:bg-muted disabled:opacity-50"
+                      >
+                        Add
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
         )
       )}
 

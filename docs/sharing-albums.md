@@ -244,7 +244,7 @@ Direct per-user shares, viewer-only roles, live trip→album links, album invite
 Where the code on `feat/albums-sharing` differs from or adds to the plan above. `CLAUDE.md` documents the current behaviour.
 
 **Albums API**
-- `GET /api/albums` rows also carry `created_at`, newest first. `GET /api/albums/{id}/members` rows carry `added_at`, owner first. `PATCH /api/albums/{id}` answers 204 with no body.
+- `GET /api/albums` rows also carry `created_at`, newest first, and `last_added_at`: the caller's latest contribution to the album (`null` without one), from which the album pickers put recently used albums first. `GET /api/albums/{id}/members` rows carry `added_at`, owner first. `PATCH /api/albums/{id}` answers 204 with no body.
 - A malformed UUID in a request body (`user_id`, `media_ids`, `trip_id`) → **400**. Only path UUIDs → 404. Body checks run before the membership check, so a bad body is 400 even for a non-member.
 - Removing a user who is not a member → 404. `GET /api/media/{id}/albums` with a malformed ID → `[]`, like keyframes.
 - Album names are trimmed, and NUL is rejected. The album media body is capped at 1 MiB.
