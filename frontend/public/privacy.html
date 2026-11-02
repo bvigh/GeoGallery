@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Privacy Policy · GeoGallery</title>
+    <style>
+      :root { color-scheme: light dark; --fg: #1f2328; --muted: #59636e; --bg: #fff; --line: #d1d9e0; --link: #0b62d6; }
+      @media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --muted: #9198a1; --bg: #0d1117; --line: #3d444d; --link: #4493f8; } }
+      body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+      main { max-width: 46rem; margin: 0 auto; padding: 2rem 1rem 4rem; }
+      h1 { font-size: 1.75rem; margin: 0 0 0.25rem; }
+      h2 { font-size: 1.2rem; margin: 2rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+      h3 { font-size: 1rem; margin: 1.25rem 0 0.25rem; }
+      a { color: var(--link); }
+      .muted { color: var(--muted); }
+      table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+      th, td { text-align: left; vertical-align: top; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); }
+      .table-wrap { overflow-x: auto; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p><a href="/">← GeoGallery</a></p>
+      <h1>Privacy Policy</h1>
+      <p class="muted">Last updated: 2 November 2026</p>
+
+      <p>
+        GeoGallery is a private, invite-only photo and video gallery with a map and a location-guessing game. It is
+        run by a private individual for friends and family, not as a business. It shows no advertising, contains no
+        analytics or tracking, and does not sell, rent or use your data for marketing. Your data is used only to run
+        the service for you.
+      </p>
+      <p>
+        Because GeoGallery stores your photos, videos and their locations, this policy explains exactly what is
+        stored, who can see it, which service providers are involved, and how to get it deleted.
+      </p>
+
+      <h2>1. Who is responsible</h2>
+      <p>
+        The controller within the meaning of the EU General Data Protection Regulation (GDPR) is:<br />
+        Balázs Vigh<br />
+        Kaimska 21B/3<br />
+        30-865, Kraków, Poland<br />
+        Email: <a href="mailto:balazs@vigh.eu">balazs@vigh.eu</a>
+      </p>
+      <p>No data protection officer has been appointed, as none is required.</p>
+
+      <h2>2. What data is processed, and why</h2>
+
+      <h3>2.1 Your account</h3>
+      <p>
+        You sign in through an identity provider (see section 4). When you sign in, for example with your Google
+        account, GeoGallery receives and stores:
+      </p>
+      <ul>
+        <li>a technical identifier of your account at the identity provider (no password; GeoGallery never sees one),</li>
+        <li>your email address and display name,</li>
+        <li>your role (user or administrator), the time of your last sign-in, and whether your account is disabled.</li>
+      </ul>
+      <p>
+        GeoGallery does not request access to your Google contacts, Google Photos, Drive, calendar or any other Google
+        data. It uses your email address and name only to identify you, to show your name to people you share albums
+        with, and to let album owners find you when adding members.
+      </p>
+      <p>
+        Accounts are created only through an invitation. Invitations are stored with their role, creator, expiry and
+        the account that used them.
+      </p>
+      <p class="muted">Legal basis: Art. 6(1)(b) GDPR (providing the service you signed up for).</p>
+
+      <h3>2.2 Sign-in sessions and API tokens</h3>
+      <p>
+        After you sign in, your browser keeps a single session cookie. It is technically necessary to keep you signed
+        in, is not used for tracking, and expires after 30 days at the latest or when you sign out. The server stores
+        only a cryptographic hash of it, together with its expiry and a sign-in token from the identity provider that
+        is used only to sign you out there as well.
+      </p>
+      <p>
+        If you create personal API tokens in Settings, the server stores their name, a hash (never the token itself),
+        a short hint of its beginning, their expiry and when they were last used.
+      </p>
+      <p>GeoGallery sets no other cookies and stores nothing else in your browser.</p>
+      <p class="muted">
+        Legal basis: Art. 6(1)(b) GDPR; for the cookie, § 25(2) no. 2 TDDDG (strictly necessary, no consent required).
+      </p>
+
+      <h3>2.3 Your photos and videos</h3>
+      <p>When you upload media, GeoGallery stores:</p>
+      <ul>
+        <li>the file itself, unchanged, including any metadata embedded in it (EXIF);</li>
+        <li>
+          metadata read from the file: the date and time it was taken, the camera's GPS position if present, the image
+          dimensions, the media type (photo, video, 360°) and the original file name;
+        </li>
+        <li>the file's last-modified time sent by your browser, used when the file has no capture date;</li>
+        <li>a fingerprint of the file, used only to skip duplicate uploads;</li>
+        <li>settings you make, such as a manually set location, 360° view direction or video keyframes.</li>
+      </ul>
+      <p>
+        Photos and videos can contain information about other people, such as their faces. Please only upload media
+        you are entitled to share. GeoGallery does not perform face recognition or any other image analysis.
+      </p>
+      <p class="muted">Legal basis: Art. 6(1)(b) GDPR.</p>
+
+      <h3>2.4 Location data</h3>
+      <p>
+        Location is central to GeoGallery: it places your media on a map and uses them in the guessing game. Location
+        comes from three sources:
+      </p>
+      <ul>
+        <li>GPS coordinates embedded in your photos and videos by your camera or phone;</li>
+        <li>locations you set by hand;</li>
+        <li>
+          GPS tracks you choose to import yourself (for example an export of your location history), which may contain
+          detailed movement data with timestamps, altitude, accuracy and activity type.
+        </li>
+      </ul>
+      <p>
+        GeoGallery uses imported tracks only to estimate where your own photos without GPS were taken, by matching
+        their capture time against your track. Your tracks are never shown to other users, never matched against
+        other users' media, and never combined with anyone else's data. GeoGallery also groups your media into trips
+        by date; trips are visible only to you.
+      </p>
+      <p>
+        GeoGallery does not access your device's location. It only processes locations contained in files you
+        upload or data you import.
+      </p>
+      <p class="muted">Legal basis: Art. 6(1)(b) GDPR.</p>
+
+      <h3>2.5 Albums and sharing</h3>
+      <p>
+        By default, everything you upload is visible only to you. If you put an item into an album, every member of
+        that album can view it, <strong>including its location, capture time, original file name and the metadata
+        embedded in the file</strong>. Album members see each other's names and email addresses. When you leave an
+        album or are removed from it, the items you contributed are removed from it as well.
+      </p>
+      <p>
+        The administrator sees the list of users (name, email, role, status), but does not browse users' media
+        through the application.
+      </p>
+
+      <h3>2.6 The guessing game</h3>
+      <p>Your guesses are scored immediately and are not stored.</p>
+
+      <h3>2.7 Server logs</h3>
+      <p>
+        When you use GeoGallery, the web server records technical access logs: your IP address, the time, the
+        requested path, the response status and your browser's user agent. Sign-in requests are not logged. These
+        logs are used only to keep the service running and secure, and are deleted after 14 days at the latest.
+      </p>
+      <p class="muted">
+        Legal basis: Art. 6(1)(f) GDPR (legitimate interest in operating a secure and working service).
+      </p>
+
+      <h2>3. Who can see your data</h2>
+      <ul>
+        <li>You.</li>
+        <li>Members of albums into which you put items (only those items, see 2.5).</li>
+        <li>
+          The operator, who has technical access to the server, database and file storage and accesses them only to
+          run, maintain and repair the service, or when you ask for it.
+        </li>
+        <li>The service providers listed in section 4, only as far as necessary to provide their service.</li>
+      </ul>
+      <p>
+        Your data is not sold, rented, shared for marketing purposes or used to train AI models. It is disclosed to
+        authorities only where the law requires it.
+      </p>
+
+      <h2>4. Service providers</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Provider</th><th>Purpose</th><th>Data</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Hetzner Online GmbH, Industriestr. 25, 91710 Gunzenhausen, Germany</td>
+              <td>Server, database and file storage (data centres in Germany)</td>
+              <td>All data described in section 2</td>
+            </tr>
+            <tr>
+              <td>Logto Cloud, operated by Silverhand Inc.</td>
+              <td>Sign-in (identity provider)</td>
+              <td>Your account at the sign-in provider, email address, name, sign-in events, IP address</td>
+            </tr>
+            <tr>
+              <td>Google Ireland Limited, Gordon House, Barrow Street, Dublin 4, Ireland</td>
+              <td>“Sign in with Google”, only if you choose it</td>
+              <td>Google shares your name, email address and profile identifier with the sign-in provider</td>
+            </tr>
+            <tr>
+              <td>OpenStreetMap Foundation, St John's Innovation Centre, Cowley Road, Cambridge, CB4 0WS, United Kingdom</td>
+              <td>Map images</td>
+              <td>
+                Your browser loads map tiles directly from OpenStreetMap's servers, which receive your IP address and the
+                map area being viewed. No information about your media is sent.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Data processing agreements under Art. 28 GDPR are in place with the providers that process data on the
+        operator's behalf. If a provider processes data outside the EU/EEA, this is based on an adequacy decision of
+        the European Commission (for example for the United Kingdom, or for US companies certified under the EU-US
+        Data Privacy Framework) or on the EU standard contractual clauses.
+      </p>
+      <p>
+        Some screens offer a link to Google Maps Street View. Google receives data only if you click that link,
+        under Google's own privacy policy.
+      </p>
+      <p>
+        When you sign in with Google, Google's
+        <a href="https://policies.google.com/privacy" rel="noopener">privacy policy</a> also applies to your Google
+        account.
+      </p>
+
+      <h2>5. How long data is kept</h2>
+      <ul>
+        <li>
+          <strong>Media, metadata, locations, GPS tracks, albums:</strong> until you delete them or your account is
+          deleted. Deleting a photo or video in GeoGallery removes the file and its metadata, and removes it from every
+          album.
+        </li>
+        <li><strong>Sessions:</strong> until you sign out, at the latest 30 days.</li>
+        <li><strong>API tokens:</strong> until they expire or you revoke them (at most 365 days).</li>
+        <li><strong>Server logs:</strong> at most 14 days.</li>
+        <li><strong>Your account:</strong> until you ask for it to be deleted.</li>
+        <li>
+          <strong>Backups:</strong> the database is backed up regularly; deleted data disappears from backups after
+          at most 30 days.
+        </li>
+      </ul>
+      <p>
+        To delete your whole account and all your data, email the address in section 1. Your account, media and
+        everything connected to them will be deleted within 30 days.
+      </p>
+
+      <h2>6. Your rights</h2>
+      <p>Under the GDPR you have the right to:</p>
+      <ul>
+        <li>access the personal data stored about you (Art. 15),</li>
+        <li>have incorrect data corrected (Art. 16),</li>
+        <li>have your data deleted (Art. 17),</li>
+        <li>restrict processing (Art. 18),</li>
+        <li>receive your data in a portable format (Art. 20), including your original files,</li>
+        <li>object to processing based on legitimate interest (Art. 21).</li>
+      </ul>
+      <p>
+        To exercise them, email the address in section 1. You also have the right to lodge a complaint with a data
+        protection supervisory authority, in particular the one where you live.
+      </p>
+
+      <h2>7. Security</h2>
+      <p>
+        All connections are encrypted (HTTPS). Files are kept in private storage and are only delivered through
+        links that expire after 15 minutes. Session cookies and API tokens are stored only as hashes. Access to the
+        server is restricted to the operator.
+      </p>
+
+      <h2>8. Children</h2>
+      <p>GeoGallery is not intended for children under 16 without the consent of a parent or guardian.</p>
+
+      <h2>9. Changes</h2>
+      <p>
+        This policy is updated when the service changes. The date at the top shows the current version. Significant
+        changes will be announced to users in advance.
+      </p>
+
+      <p class="muted"><a href="/terms.html">Terms of Service</a></p>
+    </main>
+  </body>
+</html>

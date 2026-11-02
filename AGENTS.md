@@ -46,6 +46,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `frontend/src/lib/search.ts` | `matchesSearch` (case- and accent-insensitive, every word must match a field) and `SEARCH_MIN_ITEMS` |
 | `frontend/src/lib/trips.ts` | `groupTripsByYear`: the filter panel's year groups (newest first, undated last, server order inside) |
 | `frontend/src/pages/` | One file per tab: MapPage, TripsPage ("Add to album…" per trip), AlbumsPage (album cards, members dialog with a searchable user list and leave, gallery), GamePage, UploadPage (optional "Add to album" through `AlbumPickerDialog`), SettingsPage (API tokens), AdminPage (users, invites) |
+| `frontend/public/privacy.html`, `terms.html` | Static privacy policy and terms of service (public, no login; linked from `LoginScreen`, required for Google sign-in). Update them when the data the app stores, its providers or retention change |
 | `frontend/e2e/` | Playwright suite: `playwright.config.ts`, `support.ts` (`E2E_BACKEND_ENV`), `auth.setup.ts`, `*.e2e.ts`; `sharing.e2e.ts` runs in its own `sharing` project after all others |
 | `scripts/e2e-reset-db.sh` | Drops and recreates `geogallery_e2e` via `docker compose exec db` |
 | `ingest/` | Drop media here, then run `server scan --user <id>` |
