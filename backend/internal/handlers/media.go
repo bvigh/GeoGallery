@@ -70,7 +70,9 @@ type mediaItem struct {
 	GpsSource    *string    `json:"gps_source"`
 	TakenAt      *time.Time `json:"taken_at"`
 	StorageKey   string     `json:"storage_key"`
-	TripID       *string    `json:"trip_id"`
+	TripID       *string    `json:"trip_id"` // always null on media the caller does not own: trips are personal
+	OwnerID      string     `json:"owner_id"`
+	OwnerName    *string    `json:"owner_name"` // display_name, else email; null when the owner has neither
 	InitialYaw   *float64   `json:"initial_yaw"`
 	InitialPitch *float64   `json:"initial_pitch"`
 	InitialFov   *float64   `json:"initial_fov"`
@@ -83,69 +85,23 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromDate := q.Get("from_date")
-	toDate := q.Get("to_date")
-	tripIDs := q["trip_id"]
-	mediaTypes := q["media_type"]
 	offset, _ := strconv.Atoi(q.Get("offset"))
 
-	conds := []string{readableMediaCond("", 1)}
-	args := []any{auth.MustUser(r.Context()).ID}
-	n := 2
-
-	if fromDate != "" {
-		conds = append(conds, fmt.Sprintf("taken_at >= $%d::date", n))
-		args = append(args, fromDate)
-		n++
-	}
-	if toDate != "" {
-		conds = append(conds, fmt.Sprintf("taken_at < ($%d::date + INTERVAL '1 day')", n))
-		args = append(args, toDate)
-		n++
-	}
-	if len(mediaTypes) > 0 {
-		conds = append(conds, fmt.Sprintf("media_type = ANY($%d)", n))
-		args = append(args, mediaTypes)
-		n++
-	}
-	if len(tripIDs) > 0 {
-		var hasUnassigned bool
-		var uuids []string
-		for _, id := range tripIDs {
-			if id == "unassigned" {
-				hasUnassigned = true
-			} else {
-				uuids = append(uuids, id)
-			}
-		}
-		switch {
-		case hasUnassigned && len(uuids) > 0:
-			conds = append(conds, fmt.Sprintf("(trip_id = ANY($%d) OR trip_id IS NULL)", n))
-			args = append(args, uuids)
-			n++
-		case hasUnassigned:
-			conds = append(conds, "trip_id IS NULL")
-		default:
-			conds = append(conds, fmt.Sprintf("trip_id = ANY($%d)", n))
-			args = append(args, uuids)
-			n++
-		}
-	}
-
-	where := "WHERE " + strings.Join(conds, " AND ")
-
+	conds, args := buildMediaFilter(q, auth.MustUser(r.Context()).ID)
 	args = append(args, offset)
 	sql := fmt.Sprintf(`
-		SELECT id, filename, media_type,
-		       ST_Y(location::geometry) AS lat, ST_X(location::geometry) AS lng,
-		       gps_confidence, gps_source,
-		       taken_at, storage_key, trip_id,
-		       initial_yaw, initial_pitch, initial_fov
-		FROM media
-		%s
-		ORDER BY taken_at DESC NULLS LAST
+		SELECT m.id, m.filename, m.media_type,
+		       ST_Y(m.location::geometry) AS lat, ST_X(m.location::geometry) AS lng,
+		       m.gps_confidence, m.gps_source,
+		       m.taken_at, m.storage_key,
+		       CASE WHEN m.owner_id = $1 THEN m.trip_id END AS trip_id,
+		       m.owner_id, COALESCE(u.display_name, u.email) AS owner_name,
+		       m.initial_yaw, m.initial_pitch, m.initial_fov
+		FROM media m JOIN users u ON u.id = m.owner_id
+		WHERE %s
+		ORDER BY m.taken_at DESC NULLS LAST, m.id -- id breaks taken_at ties, so OFFSET pages never overlap
 		LIMIT 500 OFFSET $%d
-	`, where, n)
+	`, strings.Join(conds, " AND "), len(args))
 
 	rows, err := h.db.Query(r.Context(), sql, args...)
 	if err != nil {
@@ -161,6 +117,7 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 		var lat, lng *float64
 		if err := rows.Scan(&m.ID, &m.Filename, &m.MediaType, &lat, &lng,
 			&m.Confidence, &m.GpsSource, &m.TakenAt, &m.StorageKey, &m.TripID,
+			&m.OwnerID, &m.OwnerName,
 			&m.InitialYaw, &m.InitialPitch, &m.InitialFov); err != nil {
 			slog.Error("media: list row scan failed", "err", err)
 			continue
@@ -168,6 +125,12 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 		m.Lat = lat
 		m.Lng = lng
 		items = append(items, m)
+	}
+	if err := rows.Err(); err != nil {
+		// Errors raised while the query runs (such as a failed cast) surface here, not from Query.
+		slog.Error("media: list rows failed", "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -181,6 +144,11 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	// ContentLength is -1 for chunked bodies; nginx/Caddy limits apply before this point.
 	slog.Info("upload: request received", "owner", ownerID, "content_length", r.ContentLength, "limit", maxUploadBodyBytes)
+
+	albumID, ok := h.uploadAlbum(w, r, ownerID)
+	if !ok {
+		return
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodyBytes)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -209,6 +177,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	mtimes := r.MultipartForm.Value["file_mtime"]
 
 	var uploaded, skipped, failed []string
+	var mediaIDs []string // uploaded and duplicate files alike, for the album
 	for i, fh := range files {
 		fileStart := time.Now()
 		f, err := fh.Open()
@@ -226,14 +195,15 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		registered, err := h.registrar.registerMedia(r.Context(), ownerID, f, fh.Size, fh.Filename, fallbackMtime)
+		mediaID, inserted, err := h.registrar.registerMedia(r.Context(), ownerID, f, fh.Size, fh.Filename, fallbackMtime)
 		f.Close()
 		if err != nil {
 			slog.Error("upload: register media failed", "file", fh.Filename, "size", fh.Size, "err", err)
 			failed = append(failed, fh.Filename)
 			continue
 		}
-		if registered {
+		mediaIDs = append(mediaIDs, mediaID)
+		if inserted {
 			uploaded = append(uploaded, fh.Filename)
 			slog.Info("upload: file stored", "file", fh.Filename, "size", fh.Size, "elapsed", time.Since(fileStart))
 		} else {
@@ -255,10 +225,57 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var albumAdded int64
+	if albumID != "" && len(mediaIDs) > 0 {
+		// Duplicates go in too, so re-uploading a folder into an album fills it.
+		tag, err := h.db.Exec(r.Context(), `
+			INSERT INTO album_media (album_id, media_id, owner_id)
+			SELECT $1, unnest($2::uuid[]), $3
+			ON CONFLICT DO NOTHING`, albumID, mediaIDs, ownerID)
+		if err != nil {
+			slog.Error("upload: add to album failed", "album_id", albumID, "media", len(mediaIDs), "err", err)
+			http.Error(w, `{"error":"add to album failed"}`, http.StatusInternalServerError)
+			return
+		}
+		albumAdded = tag.RowsAffected()
+	}
+
 	slog.Info("upload: done", "owner", ownerID, "uploaded", len(uploaded), "duplicates", len(skipped),
-		"failed", len(failed), "elapsed", time.Since(start))
+		"failed", len(failed), "album_id", albumID, "album_added", albumAdded, "elapsed", time.Since(start))
+	resp := map[string]any{"uploaded": uploaded, "skipped": skipped, "failed": failed}
+	if albumID != "" {
+		resp["album_added"] = albumAdded
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"uploaded": uploaded, "skipped": skipped, "failed": failed})
+	json.NewEncoder(w).Encode(resp)
+}
+
+// uploadAlbum returns the canonical ?album_id, or "" when the param is absent. It is a query
+// param, not a form field, so membership is settled before the (up to 4 GiB) body is read: a
+// malformed ID or an album the caller is not a member of gets 404 with the body unread.
+func (h *MediaHandler) uploadAlbum(w http.ResponseWriter, r *http.Request, ownerID string) (string, bool) {
+	q := r.URL.Query()
+	if !q.Has("album_id") {
+		return "", true
+	}
+	albumID, ok := auth.CanonicalUUID(q.Get("album_id"))
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return "", false
+	}
+	var member bool
+	if err := h.db.QueryRow(r.Context(),
+		`SELECT EXISTS (SELECT 1 FROM album_members WHERE album_id = $1 AND user_id = $2)`,
+		albumID, ownerID).Scan(&member); err != nil {
+		slog.Error("upload: album membership lookup failed", "album_id", albumID, "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return "", false
+	}
+	if !member {
+		http.Error(w, "not found", http.StatusNotFound)
+		return "", false
+	}
+	return albumID, true
 }
 
 type viewSettingsRequest struct {
@@ -307,7 +324,7 @@ func (h *MediaHandler) GetKeyframes(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(),
 		`SELECT k.time_seconds, k.yaw, k.pitch, k.fov
 		 FROM video_keyframes k JOIN media m ON m.id = k.media_id
-		 WHERE k.media_id=$1 AND `+readableMediaCond("m.", 2)+`
+		 WHERE k.media_id=$1 AND `+readableMediaCond("m", 2)+`
 		 ORDER BY k.time_seconds ASC`,
 		id, auth.MustUser(r.Context()).ID,
 	)
@@ -395,7 +412,7 @@ func (h *MediaHandler) GetURL(w http.ResponseWriter, r *http.Request) {
 
 	var storageKey string
 	err := h.db.QueryRow(r.Context(),
-		`SELECT storage_key FROM media WHERE id=$1 AND `+readableMediaCond("", 2), id, auth.MustUser(r.Context()).ID,
+		`SELECT m.storage_key FROM media m WHERE m.id=$1 AND `+readableMediaCond("m", 2), id, auth.MustUser(r.Context()).ID,
 	).Scan(&storageKey)
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)

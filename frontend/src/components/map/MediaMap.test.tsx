@@ -43,6 +43,8 @@ function makeItem(overrides: Partial<MediaItem> = {}): MediaItem {
     taken_at: null,
     storage_key: "key",
     trip_id: null,
+    owner_id: "u1",
+    owner_name: "Alice",
     ...overrides,
   };
 }

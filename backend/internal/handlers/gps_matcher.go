@@ -20,6 +20,11 @@ type matcherDB interface {
 // RunGPSMatcher assigns interpolated GPS positions to ownerID's media rows using bracketing
 // points from ownerID's GPS tracks only. When reprocess is true, rows with
 // gps_source='interpolated' are included so improved track data can produce better estimates.
+//
+// GPS stays per owner: this query and bracketingPoints must keep their literal owner_id filters
+// and must never use readableMediaCond. Media shared with ownerID through an album are not
+// ownerID's rows, so ownerID's matcher may neither write their location nor read it as a
+// track point, and another member's tracks never place ownerID's media.
 func RunGPSMatcher(ctx context.Context, db matcherDB, ownerID string, maxWindow time.Duration, reprocess bool) error {
 	var query string
 	if reprocess {

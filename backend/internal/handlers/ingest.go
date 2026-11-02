@@ -79,14 +79,14 @@ func RunIngestScan(ctx context.Context, deps IngestDeps, dir, ownerID string) (S
 			return nil
 		}
 		mtime := info.ModTime()
-		registered, err := deps.registrar.registerMedia(ctx, ownerID, f, info.Size(), d.Name(), &mtime)
+		_, inserted, err := deps.registrar.registerMedia(ctx, ownerID, f, info.Size(), d.Name(), &mtime)
 		f.Close()
 		if err != nil {
 			slog.Error("ingest: register media failed", "path", path, "err", err)
 			res.Failed++
 			return nil
 		}
-		if registered {
+		if inserted {
 			res.Ingested++
 		} else {
 			res.Skipped++

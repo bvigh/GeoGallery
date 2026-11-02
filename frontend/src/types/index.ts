@@ -8,7 +8,9 @@ export interface MediaItem {
   gps_source: "exif" | "interpolated" | "manual" | "none" | null;
   taken_at: string | null;
   storage_key: string;
-  trip_id: string | null;
+  trip_id: string | null; // always null for media the caller does not own
+  owner_id: string;
+  owner_name: string | null;
   url?: string;
   initial_yaw?: number;
   initial_pitch?: number;
@@ -33,11 +35,42 @@ export interface Trip {
   user_edited: boolean;
 }
 
+export interface Album {
+  id: string;
+  name: string;
+  owner_id: string;
+  owner_name: string | null;
+  is_owner: boolean;
+  member_count: number;
+  media_count: number;
+  start_date: string | null;
+  end_date: string | null;
+  created_at: string;
+}
+
+export interface AlbumMember {
+  user_id: string;
+  display_name: string | null;
+  email: string | null;
+  is_owner: boolean;
+  added_at: string;
+}
+
+// An entry of the user directory (GET /api/users): active, claimed users.
+export interface DirectoryUser {
+  id: string;
+  display_name: string | null;
+  email: string | null;
+}
+
 export interface FilterState {
   fromDate: string;
   toDate: string;
+  // Trips and albums together are one "Collections" filter, combined with OR.
   tripIds: string[];
+  albumIds: string[];
   mediaTypes: MediaItem["media_type"][];
+  owner: "all" | "mine" | "shared";
 }
 
 export interface GameRound {

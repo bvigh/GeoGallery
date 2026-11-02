@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,15 +17,18 @@ import (
 	"time"
 
 	"codeberg.org/bvigh/geogallery/internal/ingest"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type registrarDB interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 type registrarStorage interface {
 	Upload(ctx context.Context, key string, body io.Reader, size int64, contentType string) error
+	Delete(ctx context.Context, key string) error
 }
 
 type MediaRegistrar struct {
@@ -51,8 +55,10 @@ func (tc *tailCapture) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// registerMedia stores one media file for ownerID. Returns (true, nil) if newly inserted,
-// (false, nil) if deduplicated by (owner_id, file_hash), or (false, err) on failure.
+// registerMedia stores one media file for ownerID and returns its media ID. inserted is false when
+// the file is a duplicate by (owner_id, file_hash): mediaID is then the existing row's ID, so the
+// caller can still add it to an album. The hash is only known once the file has streamed to S3, so
+// the object uploaded for a duplicate, or for an INSERT the database rejected, is deleted again.
 func (r *MediaRegistrar) registerMedia(
 	ctx context.Context,
 	ownerID string,
@@ -60,13 +66,13 @@ func (r *MediaRegistrar) registerMedia(
 	size int64,
 	filename string,
 	fallbackMtime *time.Time,
-) (bool, error) {
+) (mediaID string, inserted bool, err error) {
 	const headSize = 1024 * 1024 // 1MB — safe margin for EXIF
 	head := make([]byte, headSize)
 	n, err := io.ReadFull(body, head)
 	if err != nil && err != io.ErrUnexpectedEOF {
 		// io.ErrUnexpectedEOF means the file is smaller than headSize, which is fine
-		return false, err
+		return "", false, err
 	}
 	head = head[:n]
 
@@ -83,7 +89,7 @@ func (r *MediaRegistrar) registerMedia(
 		rest := io.MultiReader(bytes.NewReader(head), body)
 		tmpFile, probe, err = ingest.ProbeVideo(rest)
 		if err != nil {
-			return false, err
+			return "", false, err
 		}
 		mediaType = ingest.DetectMediaTypeFromProbe(exifData, filename, ext, probe)
 	} else {
@@ -100,7 +106,7 @@ func (r *MediaRegistrar) registerMedia(
 			os.Remove(tmpFile.Name())
 			if terr != nil {
 				slog.Error("register: transcode failed", "filename", filename, "err", terr)
-				return false, terr
+				return "", false, terr
 			}
 			tmpFile = transcoded
 			// Update size from the transcoded file so the S3 upload length is correct.
@@ -113,7 +119,7 @@ func (r *MediaRegistrar) registerMedia(
 			os.Remove(tmpFile.Name())
 		}()
 		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-			return false, err
+			return "", false, err
 		}
 		uploadBody = tmpFile
 	} else {
@@ -124,7 +130,7 @@ func (r *MediaRegistrar) registerMedia(
 	key := newStorageKey(ownerID, ext)
 	if err := r.storage.Upload(ctx, key, uploadBody, size, contentTypeFor(ext)); err != nil {
 		slog.Error("register: S3 upload failed", "key", key, "err", err)
-		return false, err
+		return "", false, err
 	}
 
 	const chunk = 64 * 1024
@@ -143,31 +149,62 @@ func (r *MediaRegistrar) registerMedia(
 		takenAt = fallbackMtime
 	}
 
-	tag, err := r.db.Exec(ctx, `
+	err = r.db.QueryRow(ctx, `
 		INSERT INTO media (owner_id, filename, media_type, location, gps_confidence, gps_source, taken_at, storage_key, file_hash)
 		VALUES ($1, $2, $3,
 		        CASE WHEN $4::float8 IS NOT NULL THEN ST_SetSRID(ST_MakePoint($5, $4), 4326) END,
 		        $6, $7, $8, $9, $10)
 		ON CONFLICT (owner_id, file_hash) DO NOTHING
+		RETURNING id
 	`,
 		ownerID, filename, mediaType,
 		exifData.Lat, exifData.Lng,
 		nil, // confidence populated by background GPS matcher
 		gpsSource(exifData),
 		takenAt, key, fileHash,
-	)
-	if err != nil {
-		return false, err
-	}
-	if tag.RowsAffected() == 1 {
-		if exifData.Lat != nil && takenAt != nil {
-			if err := insertExifGPSTrack(ctx, r.db, ownerID, *exifData.Lat, *exifData.Lng, *takenAt); err != nil {
-				slog.Warn("register: exif GPS track insert failed", "err", err)
-			}
+	).Scan(&mediaID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// DO NOTHING returns no row for a duplicate, so nothing references the object just uploaded.
+		// The ID comes from the row that already exists.
+		r.deleteObject(ctx, key)
+		if err := r.db.QueryRow(ctx,
+			`SELECT id FROM media WHERE owner_id = $1 AND file_hash = $2`, ownerID, fileHash,
+		).Scan(&mediaID); err != nil {
+			return "", false, fmt.Errorf("look up duplicate: %w", err)
 		}
-		return true, nil
+		return mediaID, false, nil
 	}
-	return false, nil
+	if err != nil {
+		if insertRejected(err) {
+			r.deleteObject(ctx, key)
+		} else {
+			slog.Warn("register: media insert failed, keeping the object in case the row was stored", "key", key, "err", err)
+		}
+		return "", false, err
+	}
+	if exifData.Lat != nil && takenAt != nil {
+		if err := insertExifGPSTrack(ctx, r.db, ownerID, *exifData.Lat, *exifData.Lng, *takenAt); err != nil {
+			slog.Warn("register: exif GPS track insert failed", "err", err)
+		}
+	}
+	return mediaID, true, nil
+}
+
+// deleteObject removes an uploaded object that no media row references. A failure only leaves an
+// orphan in the private bucket, so it is logged and does not fail the file.
+func (r *MediaRegistrar) deleteObject(ctx context.Context, key string) {
+	if err := r.storage.Delete(ctx, key); err != nil {
+		slog.Error("register: delete unreferenced object failed", "key", key, "err", err)
+	}
+}
+
+// insertRejected reports whether err from the media INSERT means no row was stored: the server
+// rejected the statement, or it was never sent. Other errors, such as a dropped connection or a
+// cancelled context, can arrive after the commit, and deleting the object then would leave the row
+// pointing at nothing.
+func insertRejected(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) || pgconn.SafeToRetry(err)
 }
 
 // newStorageKey returns an opaque object key. The filename and upload time never enter it:

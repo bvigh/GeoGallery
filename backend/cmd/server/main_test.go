@@ -77,13 +77,17 @@ func newTestRouter(t *testing.T) http.Handler {
 		game:       handlers.NewGameHandler(nil, nil),
 		gpsTracks:  handlers.NewGPSTrackHandler(nil, time.Hour),
 		gpsMatcher: handlers.NewGPSMatcherHandler(nil, time.Hour),
+		albums:     handlers.NewAlbumHandler(nil),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
 	}
 	return newRouter(cop, auth.New(store, nil, cfg), h)
 }
 
 func TestRouter_AuthWiring(t *testing.T) {
-	const mediaID = "00000000-0000-0000-0000-000000000000"
+	const (
+		mediaID = "00000000-0000-0000-0000-000000000000"
+		badID   = "not-a-uuid"
+	)
 	tests := []struct {
 		name       string
 		method     string
@@ -107,6 +111,24 @@ func TestRouter_AuthWiring(t *testing.T) {
 		{"token revoke token", http.MethodDelete, "/api/tokens/" + mediaID, true, "", nil, http.StatusForbidden},
 		{"admin token on admin route", http.MethodGet, "/api/admin/users", true, "", nil, http.StatusForbidden},
 		{"admin token creates invite", http.MethodPost, "/api/admin/invites", true, "", nil, http.StatusForbidden},
+		{"token delete album", http.MethodDelete, "/api/albums/" + mediaID, true, "", nil, http.StatusForbidden},
+		{"token add album member", http.MethodPost, "/api/albums/" + mediaID + "/members", true, "", nil, http.StatusForbidden},
+		{"token remove album member", http.MethodDelete, "/api/albums/" + mediaID + "/members/" + mediaID, true, "", nil, http.StatusForbidden},
+		{"token user directory", http.MethodGet, "/api/users", true, "", nil, http.StatusForbidden},
+
+		// The album handler has no DB here: these statuses come from its input checks, which shows
+		// the request got past the auth middleware.
+		{"token creates album", http.MethodPost, "/api/albums", true, "", nil, http.StatusBadRequest},
+		{"token renames album", http.MethodPatch, "/api/albums/" + badID, true, "", nil, http.StatusNotFound},
+		{"token lists album members", http.MethodGet, "/api/albums/" + badID + "/members", true, "", nil, http.StatusNotFound},
+		{"token adds album media", http.MethodPost, "/api/albums/" + badID + "/media", true, "", nil, http.StatusNotFound},
+		{"token removes album media", http.MethodPost, "/api/albums/" + badID + "/media/remove", true, "", nil, http.StatusNotFound},
+		{"token lists media albums", http.MethodGet, "/api/media/" + badID + "/albums", true, "", nil, http.StatusOK},
+		{"session deletes album", http.MethodDelete, "/api/albums/" + badID, false, userSession, nil, http.StatusNotFound},
+		{"session adds album member", http.MethodPost, "/api/albums/" + badID + "/members", false, userSession, nil, http.StatusNotFound},
+		{"session removes album member", http.MethodDelete, "/api/albums/" + badID + "/members/" + badID, false, userSession, nil, http.StatusNotFound},
+		{"anonymous albums", http.MethodGet, "/api/albums", false, "", nil, http.StatusUnauthorized},
+		{"anonymous user directory", http.MethodGet, "/api/users", false, "", nil, http.StatusUnauthorized},
 
 		{"session lists tokens", http.MethodGet, "/api/tokens", false, userSession, nil, http.StatusOK},
 		{"non-admin session admin route", http.MethodGet, "/api/admin/users", false, userSession, nil, http.StatusForbidden},

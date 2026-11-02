@@ -1,12 +1,15 @@
-import { useEffect, useRef, useState } from "react";
-import { ExternalLink, MapPin, Trash2 } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ExternalLink, FolderMinus, MapPin, Trash2 } from "lucide-react";
 import { MapContainer, TileLayer, Marker, useMap, useMapEvents } from "react-leaflet";
 import L from "leaflet";
-import type { MediaItem, Trip } from "../types";
-import { api } from "../api/client";
-import { EditLocationModal } from "./EditLocationModal";
-import Panorama360 from "./viewer/Panorama360";
-import Video360 from "./viewer/Video360";
+import type { MediaItem } from "@/types";
+import { api, ApiError } from "@/api/client";
+import { describeError } from "@/lib/errors";
+import { useCurrentUser } from "@/components/auth/AuthContext";
+import { AlbumMenu } from "@/components/albums/AlbumMenu";
+import { EditLocationModal } from "@/components/EditLocationModal";
+import Panorama360 from "@/components/viewer/Panorama360";
+import Video360 from "@/components/viewer/Video360";
 import "leaflet/dist/leaflet.css";
 
 // ── Leaflet helper components ────────────────────────────────────────────────
@@ -30,7 +33,7 @@ function MapResizer({
   return null;
 }
 
-function TripMapController({
+function GalleryMapController({
   items,
   currentItem,
 }: {
@@ -71,7 +74,7 @@ function markerIcon(item: MediaItem) {
 
 // ── Map overlay sub-component ────────────────────────────────────────────────
 
-interface TripMapOverlayProps {
+interface GalleryMapOverlayProps {
   itemsWithGps: MediaItem[];
   currentItem: MediaItem;
   minimized: boolean;
@@ -85,7 +88,7 @@ interface TripMapOverlayProps {
   onMarkerClick: (item: MediaItem) => void;
 }
 
-function TripMapOverlay({
+function GalleryMapOverlay({
   itemsWithGps,
   currentItem,
   minimized,
@@ -97,7 +100,7 @@ function TripMapOverlay({
   onHoverChange,
   onDragChange,
   onMarkerClick,
-}: TripMapOverlayProps) {
+}: GalleryMapOverlayProps) {
   if (minimized) {
     return (
       <button
@@ -144,7 +147,7 @@ function TripMapOverlay({
               if (!dragging && mapMouseLeft.current) onHoverChange(false);
             }}
           />
-          <TripMapController items={itemsWithGps} currentItem={currentItem} />
+          <GalleryMapController items={itemsWithGps} currentItem={currentItem} />
           {itemsWithGps.map((m) => (
             <Marker
               key={m.id}
@@ -161,12 +164,14 @@ function TripMapOverlay({
 
 // ── Data helpers ─────────────────────────────────────────────────────────────
 
-async function fetchAllTripMedia(tripId: string): Promise<MediaItem[]> {
+type MediaParams = Record<string, string | string[]>;
+
+async function fetchAllMedia(params: MediaParams): Promise<MediaItem[]> {
   const all: MediaItem[] = [];
   let offset = 0;
   while (true) {
     const page = await api.get<MediaItem[]>("/media", {
-      trip_id: tripId,
+      ...params,
       offset: String(offset),
     });
     all.push(...(page ?? []));
@@ -188,17 +193,40 @@ function sortByTakenAt(items: MediaItem[]): MediaItem[] {
 // ── Main component ────────────────────────────────────────────────────────────
 
 interface Props {
-  trip: Trip;
+  title: string;
+  subtitle?: string;
+  // Query params for GET /api/media, e.g. { trip_id } or { album_id }.
+  params: MediaParams;
   onClose: () => void;
   onMediaDeleted?: () => void;
+  // Album galleries: whether the caller may take this item out of the album,
+  // and how. The overlay drops the item from its list once the promise resolves.
+  canRemoveFromAlbum?: (item: MediaItem) => boolean;
+  onRemoveFromAlbum?: (item: MediaItem) => Promise<void>;
 }
 
-export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
+export function MediaGalleryOverlay({
+  title,
+  subtitle,
+  params,
+  onClose,
+  onMediaDeleted,
+  canRemoveFromAlbum,
+  onRemoveFromAlbum,
+}: Props) {
+  const user = useCurrentUser();
   const [items, setItems] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentUrl, setCurrentUrl] = useState<string | null>(null);
   const [urlLoading, setUrlLoading] = useState(false);
+  const [urlError, setUrlError] = useState<string | null>(null);
+  // Why the last delete or remove failed. The page behind the overlay cannot show it.
+  const [actionError, setActionError] = useState<string | null>(null);
+  // Items with a delete or remove request in flight.
+  const [busyIds, setBusyIds] = useState<string[]>([]);
+  // Set once an item was dropped, so only emptying the list by hand closes the gallery.
+  const dropped = useRef(false);
   const [editingLocation, setEditingLocation] = useState(false);
   const [mapMinimized, setMapMinimized] = useState(false);
   const [mapHovered, setMapHovered] = useState(false);
@@ -206,23 +234,38 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
   const mapMouseLeft = useRef(false);
   const urlCache = useRef<Map<string, string>>(new Map());
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Callers pass params inline; refetch only when their content changes.
+  const paramsKey = JSON.stringify(params);
+  const paramsRef = useRef(params);
+  paramsRef.current = params;
 
-  // Fetch all media for this trip, sorted chronologically
+  // Fetch all matching media, sorted chronologically
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
-    fetchAllTripMedia(trip.id)
+    dropped.current = false;
+    fetchAllMedia(paramsRef.current)
       .then((data) => {
+        if (cancelled) return;
         setItems(sortByTakenAt(data));
         setCurrentIndex(0);
       })
       .catch(console.error)
-      .finally(() => setLoading(false));
-  }, [trip.id]);
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [paramsKey]);
 
   // Lazy-load URL for current item, prefetch neighbors; fetch keyframes for video_360
   useEffect(() => {
-    if (items.length === 0) return;
     const item = items[currentIndex];
+    // Out of range for one commit after an item is dropped, until the index is clamped.
+    if (!item) return;
+    // A late answer for an item the user moved away from must not replace the current one.
+    let cancelled = false;
 
     async function loadUrl(i: MediaItem): Promise<string> {
       if (urlCache.current.has(i.id)) return urlCache.current.get(i.id)!;
@@ -233,11 +276,23 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
 
     setCurrentUrl(urlCache.current.get(item.id) ?? null);
     setUrlLoading(!urlCache.current.has(item.id));
+    setUrlError(null);
 
-    loadUrl(item).then((url) => {
-      setCurrentUrl(url);
-      setUrlLoading(false);
-    });
+    loadUrl(item)
+      .then((url) => {
+        if (cancelled) return;
+        setCurrentUrl(url);
+        setUrlLoading(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        console.error("Failed to load media URL:", e);
+        setUrlLoading(false);
+        // A shared item stops being readable when its album or membership goes.
+        setUrlError(
+          e instanceof ApiError && e.status === 404 ? "You no longer have access to this item" : "Could not load media"
+        );
+      });
 
     // Fetch keyframes for video_360 if not already loaded
     if (item.media_type === "video_360" && !item.keyframes) {
@@ -250,12 +305,29 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
         .catch(() => {});
     }
 
-    // Prefetch neighbors
-    if (currentIndex > 0) loadUrl(items[currentIndex - 1]);
-    if (currentIndex < items.length - 1) loadUrl(items[currentIndex + 1]);
+    // Prefetch neighbors; a failure shows once the user gets there.
+    if (currentIndex > 0) loadUrl(items[currentIndex - 1]).catch(() => {});
+    if (currentIndex < items.length - 1) loadUrl(items[currentIndex + 1]).catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
   }, [currentIndex, items]);
 
+  // Dropping items can leave the index past the end; close once the last one is gone.
+  useLayoutEffect(() => {
+    if (items.length === 0) {
+      if (dropped.current && !loading) {
+        dropped.current = false;
+        onClose();
+      }
+      return;
+    }
+    if (currentIndex > items.length - 1) setCurrentIndex(items.length - 1);
+  }, [items.length, currentIndex, loading]); // eslint-disable-line react-hooks/exhaustive-deps
+
   function goTo(index: number) {
+    setActionError(null);
     setCurrentIndex(Math.max(0, Math.min(index, items.length - 1)));
   }
   function goPrev() { goTo(currentIndex - 1); }
@@ -298,8 +370,8 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
       )
     );
     setEditingLocation(false);
-    // Re-fetch all trip media so GPS-matched neighbours get their updated coordinates
-    fetchAllTripMedia(trip.id)
+    // Re-fetch all media so GPS-matched neighbours get their updated coordinates
+    fetchAllMedia(paramsRef.current)
       .then((data) => {
         const sorted = sortByTakenAt(data);
         setItems((prev) =>
@@ -312,31 +384,77 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
       .catch(console.error);
   }
 
+  // Runs after an await, so it filters the latest list: overlapping removals must
+  // not bring back an item another one already dropped.
+  function dropItem(id: string) {
+    dropped.current = true;
+    setItems((prev) => prev.filter((i) => i.id !== id));
+  }
+
+  async function runItemAction(item: MediaItem, action: () => Promise<void>) {
+    setActionError(null);
+    setBusyIds((prev) => [...prev, item.id]);
+    try {
+      await action();
+    } finally {
+      setBusyIds((prev) => prev.filter((id) => id !== item.id));
+    }
+  }
+
   async function handleDeleteMedia() {
     const item = items[currentIndex];
     if (!item) return;
     if (!confirm(`Delete "${item.filename}"? This cannot be undone.`)) return;
-    try {
-      await api.delete(`/media/${item.id}`);
-      const newItems = items.filter((i) => i.id !== item.id);
-      setItems(newItems);
-      setCurrentIndex((prev) => Math.min(prev, Math.max(0, newItems.length - 1)));
-      if (newItems.length === 0) onClose();
+    await runItemAction(item, async () => {
+      try {
+        await api.delete(`/media/${item.id}`);
+      } catch (e) {
+        console.error("Failed to delete media:", e);
+        // Already deleted elsewhere: it is gone either way.
+        if (!(e instanceof ApiError && e.status === 404)) {
+          setActionError(`Could not delete "${item.filename}"`);
+          return;
+        }
+      }
+      dropItem(item.id);
       onMediaDeleted?.();
-    } catch (e) {
-      console.error("Failed to delete media:", e);
-    }
+    });
+  }
+
+  async function handleRemoveFromAlbum() {
+    const item = items[currentIndex];
+    if (!item || !onRemoveFromAlbum) return;
+    await runItemAction(item, async () => {
+      try {
+        await onRemoveFromAlbum(item);
+        dropItem(item.id);
+      } catch (e) {
+        console.error("Failed to remove media from album:", e);
+        setActionError(describeError(`Could not remove "${item.filename}" from the album`, e));
+      }
+    });
+  }
+
+  // Unticking the album this gallery shows, in the item's album menu, takes the item out of it.
+  function handleAlbumChange(item: MediaItem, albumId: string, added: boolean) {
+    if (!added && paramsRef.current.album_id === albumId) dropItem(item.id);
   }
 
   const itemsWithGps = items.filter((m) => m.lat !== null && m.lng !== null);
-  const currentItem = items[currentIndex] ?? null;
+  // Clamped like the layout effect above does, so the commit before it runs keeps the
+  // item's menu and modals mounted.
+  const currentItem = items[Math.min(currentIndex, items.length - 1)] ?? null;
+  // Shared items are read-only: the backend 404s their writes, so hide the controls.
+  const isOwn = currentItem?.owner_id === user.id;
+  const canRemove = !!currentItem && !!onRemoveFromAlbum && !!canRemoveFromAlbum?.(currentItem);
+  const busy = !!currentItem && busyIds.includes(currentItem.id);
 
   function renderMedia() {
     if (!currentItem) return null;
     if (!currentUrl) {
       return (
         <div className="flex h-full items-center justify-center text-white/40 text-sm">
-          {urlLoading ? "Loading…" : "No media"}
+          {urlError ?? (urlLoading ? "Loading…" : "No media")}
         </div>
       );
     }
@@ -404,6 +522,14 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
           </a>
         )}
         {currentItem && (
+          <AlbumMenu
+            item={currentItem}
+            isOwn={isOwn}
+            variant="overlay"
+            onChange={(albumId, added) => handleAlbumChange(currentItem, albumId, added)}
+          />
+        )}
+        {currentItem && isOwn && (
           <button
             className="text-white/60 hover:text-white"
             onClick={() => setEditingLocation(true)}
@@ -413,10 +539,22 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
             <MapPin className="h-5 w-5" />
           </button>
         )}
-        {currentItem && (
+        {canRemove && (
           <button
-            className="text-white/60 hover:text-red-400"
+            className="text-white/60 hover:text-white disabled:opacity-40"
+            onClick={handleRemoveFromAlbum}
+            disabled={busy}
+            aria-label="Remove from album"
+            title="Remove from album"
+          >
+            <FolderMinus className="h-5 w-5" />
+          </button>
+        )}
+        {currentItem && isOwn && (
+          <button
+            className="text-white/60 hover:text-red-400 disabled:opacity-40"
             onClick={handleDeleteMedia}
+            disabled={busy}
             aria-label="Delete media"
             title="Delete media"
           >
@@ -432,12 +570,25 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
         </button>
       </div>
 
-      {/* Trip name */}
-      <div className="absolute left-4 top-4 z-10 text-white text-sm font-medium bg-black/50 px-3 py-1 rounded-full pointer-events-none">
-        {trip.name}
+      {/* Title, and who shared the current item */}
+      <div className="absolute left-4 top-4 z-10 flex flex-col items-start gap-1 pointer-events-none">
+        <div className="text-white text-sm font-medium bg-black/50 px-3 py-1 rounded-full">
+          {title}
+          {subtitle && <span className="ml-2 font-normal text-white/60">{subtitle}</span>}
+        </div>
+        {currentItem && !isOwn && (
+          <div className="text-white/80 text-xs bg-black/50 px-3 py-1 rounded-full">
+            Shared by {currentItem.owner_name ?? "another user"}
+          </div>
+        )}
+        {actionError && (
+          <div role="alert" className="max-w-sm text-white text-xs bg-red-600/80 px-3 py-1 rounded-lg">
+            {actionError}
+          </div>
+        )}
       </div>
 
-      {editingLocation && currentItem && (
+      {editingLocation && currentItem && isOwn && (
         <EditLocationModal
           item={currentItem}
           onClose={() => setEditingLocation(false)}
@@ -454,7 +605,7 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
         )}
         {!loading && items.length === 0 && (
           <div className="flex h-full items-center justify-center text-white/40">
-            No media in this trip
+            No media here
           </div>
         )}
         {!loading && items.length > 0 && (
@@ -498,7 +649,7 @@ export function TripGalleryOverlay({ trip, onClose, onMediaDeleted }: Props) {
 
             {/* Map overlay */}
             {itemsWithGps.length > 0 && currentItem && (
-              <TripMapOverlay
+              <GalleryMapOverlay
                 itemsWithGps={itemsWithGps}
                 currentItem={currentItem}
                 minimized={mapMinimized}

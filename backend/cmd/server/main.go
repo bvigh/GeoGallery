@@ -260,6 +260,7 @@ type routeHandlers struct {
 	game       *handlers.GameHandler
 	gpsTracks  *handlers.GPSTrackHandler
 	gpsMatcher *handlers.GPSMatcherHandler
+	albums     *handlers.AlbumHandler
 	admin      *handlers.AdminHandler
 }
 
@@ -302,6 +303,7 @@ func serve() {
 		game:       handlers.NewGameHandler(pool, s3Client),
 		gpsTracks:  handlers.NewGPSTrackHandler(pool, matchWindow),
 		gpsMatcher: handlers.NewGPSMatcherHandler(pool, matchWindow),
+		albums:     handlers.NewAlbumHandler(pool),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
 	}
 
@@ -348,10 +350,24 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 			r.Post("/gps-tracks/import", h.gpsTracks.Import)
 			r.Post("/gps-matcher/run", h.gpsMatcher.Run)
 
+			r.Get("/albums", h.albums.List)
+			r.Post("/albums", h.albums.Create)
+			r.Patch("/albums/{id}", h.albums.Update)
+			r.Get("/albums/{id}/members", h.albums.ListMembers)
+			r.Post("/albums/{id}/media", h.albums.AddMedia)
+			r.Post("/albums/{id}/media/remove", h.albums.RemoveMedia)
+			r.Get("/media/{id}/albums", h.albums.MediaAlbums)
+
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireSession)
 				r.Delete("/media/{id}", h.media.Delete) // irreversible (S3 object removed): never via token
 				r.Delete("/trips/{id}", h.trips.Delete)
+				// These change who can read whose media, and the directory lists everyone's email:
+				// never via token.
+				r.Delete("/albums/{id}", h.albums.Delete)
+				r.Post("/albums/{id}/members", h.albums.AddMember)
+				r.Delete("/albums/{id}/members/{user_id}", h.albums.RemoveMember)
+				r.Get("/users", h.albums.ListUsers)
 				r.Get("/tokens", authH.ListTokens)
 				r.Post("/tokens", authH.CreateToken)
 				r.Delete("/tokens/{id}", authH.RevokeToken)

@@ -1,11 +1,17 @@
 import type {
   AdminUser,
+  Album,
+  AlbumMember,
   ApiToken,
   CreatedApiToken,
   CurrentUser,
+  DirectoryUser,
   GpsImportResult,
   OrientationKeyframe,
 } from "@/types";
+
+// What to add to or remove from an album: explicit media, or a trip's current media.
+export type AlbumMediaSelection = { mediaIds: string[] } | { tripId: string };
 
 const BASE = "/api";
 
@@ -77,6 +83,17 @@ async function del(path: string): Promise<void> {
   if (!res.ok) throw new ApiError(`DELETE ${path} failed: ${res.status}`, res.status);
 }
 
+// For routes that answer 204 or a body the caller does not need.
+async function send(method: string, path: string, body: unknown): Promise<void> {
+  const res = await request(path, jsonInit(method, body));
+  if (!res.ok) throw new ApiError(`${method} ${path} failed: ${res.status}`, res.status);
+}
+
+// Go encodes a nil slice as null; list helpers always resolve to an array.
+async function getList<T>(path: string): Promise<T[]> {
+  return (await get<T[] | null>(path)) ?? [];
+}
+
 async function getMediaUrl(id: string): Promise<string> {
   const data = await get<{ url: string }>(`/media/${id}/url`);
   return data.url;
@@ -115,12 +132,16 @@ async function logout(): Promise<void> {
   window.location.assign(data.redirect_url);
 }
 
-async function upload(form: FormData): Promise<{
+// album_id is a query param, not a form field, so the backend checks membership
+// before it reads the (up to 4 GiB) body.
+async function upload(form: FormData, albumId?: string): Promise<{
   uploaded: string[] | null;
   skipped?: string[] | null;
   failed?: string[] | null;
+  album_added?: number;
 }> {
-  const res = await request("/media/upload", { method: "POST", body: form });
+  const path = albumId ? `/media/upload?album_id=${encodeURIComponent(albumId)}` : "/media/upload";
+  const res = await request(path, { method: "POST", body: form });
   if (!res.ok) throw new ApiError(`POST /media/upload failed: ${res.status}`, res.status);
   return res.json();
 }
@@ -161,6 +182,56 @@ async function adminCreateInvite(role: "user" | "admin"): Promise<string> {
   return data.url;
 }
 
+function listAlbums(): Promise<Album[]> {
+  return getList<Album>("/albums");
+}
+
+function createAlbum(name: string): Promise<Album> {
+  return post<Album>("/albums", { name });
+}
+
+function renameAlbum(id: string, name: string): Promise<void> {
+  return send("PATCH", `/albums/${id}`, { name });
+}
+
+function deleteAlbum(id: string): Promise<void> {
+  return del(`/albums/${id}`);
+}
+
+function listAlbumMembers(id: string): Promise<AlbumMember[]> {
+  return getList<AlbumMember>(`/albums/${id}/members`);
+}
+
+function addAlbumMember(id: string, userId: string): Promise<void> {
+  return send("POST", `/albums/${id}/members`, { user_id: userId });
+}
+
+// Removing yourself is leaving the album.
+function removeAlbumMember(id: string, userId: string): Promise<void> {
+  return del(`/albums/${id}/members/${userId}`);
+}
+
+function albumMediaBody(selection: AlbumMediaSelection) {
+  return "tripId" in selection ? { trip_id: selection.tripId } : { media_ids: selection.mediaIds };
+}
+
+function addToAlbum(id: string, selection: AlbumMediaSelection): Promise<{ added: number }> {
+  return post<{ added: number }>(`/albums/${id}/media`, albumMediaBody(selection));
+}
+
+function removeFromAlbum(id: string, selection: AlbumMediaSelection): Promise<{ removed: number }> {
+  return post<{ removed: number }>(`/albums/${id}/media/remove`, albumMediaBody(selection));
+}
+
+// Albums the caller belongs to that contain this item.
+function mediaAlbums(mediaId: string): Promise<Pick<Album, "id" | "name">[]> {
+  return getList<Pick<Album, "id" | "name">>(`/media/${mediaId}/albums`);
+}
+
+function listUsers(): Promise<DirectoryUser[]> {
+  return getList<DirectoryUser>("/users");
+}
+
 export const api = {
   get,
   post,
@@ -181,4 +252,15 @@ export const api = {
   adminListUsers,
   adminSetDisabled,
   adminCreateInvite,
+  listAlbums,
+  createAlbum,
+  renameAlbum,
+  deleteAlbum,
+  listAlbumMembers,
+  addAlbumMember,
+  removeAlbumMember,
+  addToAlbum,
+  removeFromAlbum,
+  mediaAlbums,
+  listUsers,
 };
