@@ -333,7 +333,9 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 			r.Use(authH.RequireUser)
 			r.Get("/auth/me", authH.Me)
 
-			r.Get("/media", h.media.List)
+			// The map loads the whole library from here (megabytes of JSON). Compression stays on
+			// this read-only route: responses that carry secrets (POST /api/tokens) are left alone.
+			r.With(middleware.Compress(5, "application/json")).Get("/media", h.media.List)
 			r.Post("/media/upload", h.media.Upload)
 			r.Get("/media/{id}/url", h.media.GetURL)
 			r.Patch("/media/{id}/location", h.media.UpdateLocation)
