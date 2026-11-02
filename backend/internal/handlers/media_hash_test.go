@@ -15,12 +15,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var updateHashVectors = flag.Bool("update-hash-vectors", false, "rewrite testdata/media_hash_vectors.json")
+var updateHashVectors = flag.Bool("update-hash-vectors", false, "rewrite frontend/src/lib/mediaHash.vectors.json")
 
-const hashVectorsPath = "testdata/media_hash_vectors.json"
+// hashVectorsPath lives in the frontend, which imports it: the frontend Docker image is built from
+// frontend/ alone, while go build never compiles this test.
+const hashVectorsPath = "../../../frontend/src/lib/mediaHash.vectors.json"
 
-// hashVectors is testdata/media_hash_vectors.json. frontend/src/lib/mediaHash.test.ts checks the
-// same file, so the browser and the server agree on every case of mediaHash.
+// hashVectors is mediaHash.vectors.json. frontend/src/lib/mediaHash.test.ts checks the same
+// file, so the browser and the server agree on every case of mediaHash.
 type hashVectors struct {
 	Content string       `json:"content"`
 	Vectors []hashVector `json:"vectors"`

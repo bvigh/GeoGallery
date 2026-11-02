@@ -250,7 +250,7 @@ const (
 //     (nothing for a file up to 1 MB, fewer bytes for one up to 1 MB + 64 KB).
 //
 // frontend/src/lib/mediaHash.ts computes the same hash in the browser so the Upload page can skip
-// files the library already has; both check testdata/media_hash_vectors.json.
+// files the library already has; both check frontend/src/lib/mediaHash.vectors.json.
 func mediaHash(body io.ReaderAt, size int64, head []byte, probeVideo bool) (string, error) {
 	if probeVideo || size <= 2*mediaHashChunk {
 		return partialHash(head), nil
