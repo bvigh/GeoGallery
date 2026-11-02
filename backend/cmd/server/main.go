@@ -337,6 +337,7 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 			// this read-only route: responses that carry secrets (POST /api/tokens) are left alone.
 			r.With(middleware.Compress(5, "application/json")).Get("/media", h.media.List)
 			r.Post("/media/upload", h.media.Upload)
+			r.Post("/media/known-hashes", h.media.KnownHashes)
 			r.Get("/media/{id}/url", h.media.GetURL)
 			r.Patch("/media/{id}/location", h.media.UpdateLocation)
 			r.Patch("/media/{id}/view-settings", h.media.UpdateViewSettings)

@@ -77,6 +77,7 @@ func newOwnershipRouter(pool *pgxpool.Pool, store *fakeObjectStore) http.Handler
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/media", media.List)
 		r.Post("/media/upload", media.Upload)
+		r.Post("/media/known-hashes", media.KnownHashes)
 		r.Get("/media/{id}/url", media.GetURL)
 		r.Patch("/media/{id}/location", media.UpdateLocation)
 		r.Patch("/media/{id}/view-settings", media.UpdateViewSettings)
@@ -520,4 +521,27 @@ func TestOwnership_OwnerCanMutateOwnResources(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, do(t, f.router, f.userA, http.MethodDelete, "/api/trips/"+f.tripA, "").Code)
 	require.Equal(t, http.StatusNoContent, do(t, f.router, f.userA, http.MethodDelete, "/api/media/"+f.mediaA, "").Code)
 	assert.Equal(t, []string{"media/" + f.userA + "/a1.jpg"}, f.store.deleted)
+}
+
+func TestOwnership_KnownHashesOnlyFindOwnMedia(t *testing.T) {
+	f := newOwnershipFixture(t)
+	content := vectorContent(2 * mediaHeadSize) // large enough that the tail is hashed too
+	hash := hashOf(t, content, false)
+	unknown := strings.Repeat("0", 64)
+
+	require.Equal(t, http.StatusOK, uploadAs(t, f.router, f.userA, "big.jpg", content).Code)
+	idA := mediaIDByName(t, f.pool, f.userA, "big.jpg")
+	// Shared with B through an album: readable, but still not in B's library.
+	album := insertAlbum(t, f.pool, f.userA, "Family")
+	insertAlbumMember(t, f.pool, album, f.userB)
+	insertAlbumMedia(t, f.pool, album, idA)
+
+	body := `{"hashes":["` + hash + `","` + unknown + `"]}`
+	rec := do(t, f.router, f.userA, http.MethodPost, "/api/media/known-hashes", body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `{"known":{"`+hash+`":"`+idA+`"}}`, rec.Body.String(), "the hash the upload stored")
+
+	rec = do(t, f.router, f.userB, http.MethodPost, "/api/media/known-hashes", body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `{"known":{}}`, rec.Body.String(), "dedup is per owner: shared media do not count")
 }

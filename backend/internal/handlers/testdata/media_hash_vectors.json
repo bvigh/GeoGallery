@@ -1,0 +1,80 @@
+{
+  "content": "byte i of the file is i % 251",
+  "vectors": [
+    {
+      "filename": "tiny.jpg",
+      "size": 1,
+      "hash": "a536aa3cede6ea3c1f3e0357c3c60e0f216a8c89b853df13b29daa8f85065dfb"
+    },
+    {
+      "filename": "small.jpg",
+      "size": 1000,
+      "hash": "a596f696db9299c940c4dbdc5184bd859baa40d980cbd1472f0610998da0971d"
+    },
+    {
+      "filename": "edge.jpg",
+      "size": 131072,
+      "hash": "316145b76fc25a90874a7d8d32948df2bbac7fb27295ff6e8ada20d663622ed2"
+    },
+    {
+      "filename": "edge-plus-one.jpg",
+      "size": 131073,
+      "hash": "f9c3c5ebfe4be44b58e5b1a5e19158d17088396f3b6876fa1737b3c8372ab98f"
+    },
+    {
+      "filename": "mid.heic",
+      "size": 512000,
+      "hash": "db36d36b0e924e0d8e93963487ee7d184f12b553e361d5145e6c0d5e80e1704e"
+    },
+    {
+      "filename": "head.jpg",
+      "size": 1048576,
+      "hash": "43acd5dbf8929526b8fb60567b0d4930edee5dd5b2db9a51b2972d53574b49a2"
+    },
+    {
+      "filename": "head-plus-one.jpg",
+      "size": 1048577,
+      "hash": "eee42e808dc4e07c8accd61b2884dbf0474b7c6fd582fbd17b7dc2f773849a8e"
+    },
+    {
+      "filename": "partial-tail.png",
+      "size": 1058816,
+      "hash": "2f5e27891e65890b063371b56cf6297a302024b8b3d7206693206eb11923e893"
+    },
+    {
+      "filename": "full-tail.jpg",
+      "size": 1114112,
+      "hash": "83362c7e15bb56adabcd66f89e8fd47d48f8c20179638f9b80ebde0556cd2612"
+    },
+    {
+      "filename": "large.jpg",
+      "size": 3145728,
+      "hash": "c27677ff9f43b72b25914933145112ba710b32d2fd82a9dc7ab718cb794b6a42"
+    },
+    {
+      "filename": "tiny.mp4",
+      "size": 1000,
+      "hash": "a596f696db9299c940c4dbdc5184bd859baa40d980cbd1472f0610998da0971d"
+    },
+    {
+      "filename": "mid.MOV",
+      "size": 512000,
+      "hash": "357484e68b387fa5331f67d2aaef500966770297695b2cbad3ec6584d0013cf3"
+    },
+    {
+      "filename": "head.mkv",
+      "size": 1048576,
+      "hash": "eae92c465497fc12989bcb7e2a6cbadd48a6c43086fa80c1eb9b0543698c27d9"
+    },
+    {
+      "filename": "large.mp4",
+      "size": 3145728,
+      "hash": "eae92c465497fc12989bcb7e2a6cbadd48a6c43086fa80c1eb9b0543698c27d9"
+    },
+    {
+      "filename": "large.3gp",
+      "size": 3145735,
+      "hash": "eae92c465497fc12989bcb7e2a6cbadd48a6c43086fa80c1eb9b0543698c27d9"
+    }
+  ]
+}

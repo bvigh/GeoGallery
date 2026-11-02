@@ -36,58 +36,54 @@ type MediaRegistrar struct {
 	storage registrarStorage
 }
 
-// tailCapture wraps a reader and keeps the last 64KB of bytes seen,
-// used to compute the tail chunk of partialHashStream after streaming.
-type tailCapture struct {
-	r    io.Reader
-	tail []byte
-}
-
-func (tc *tailCapture) Read(p []byte) (int, error) {
-	n, err := tc.r.Read(p)
-	if n > 0 {
-		const keep = 64 * 1024
-		tc.tail = append(tc.tail, p[:n]...)
-		if len(tc.tail) > keep {
-			tc.tail = tc.tail[len(tc.tail)-keep:]
-		}
-	}
-	return n, err
-}
-
 // registerMedia stores one media file for ownerID and returns its media ID. inserted is false when
 // the file is a duplicate by (owner_id, file_hash): mediaID is then the existing row's ID, so the
-// caller can still add it to an album. The hash is only known once the file has streamed to S3, so
-// the object uploaded for a duplicate, or for an INSERT the database rejected, is deleted again.
+// caller can still add it to an album. The hash only needs the head and the tail of the file, so a
+// duplicate is found before the file is probed, transcoded or uploaded. Two concurrent calls with
+// the same file can both miss that lookup: the INSERT's ON CONFLICT settles it, and the object
+// uploaded for the losing call, or for an INSERT the database rejected, is deleted again.
 func (r *MediaRegistrar) registerMedia(
 	ctx context.Context,
 	ownerID string,
-	body io.Reader,
+	body io.ReaderAt,
 	size int64,
 	filename string,
 	fallbackMtime *time.Time,
 ) (mediaID string, inserted bool, err error) {
-	const headSize = 1024 * 1024 // 1MB — safe margin for EXIF
-	head := make([]byte, headSize)
-	n, err := io.ReadFull(body, head)
-	if err != nil && err != io.ErrUnexpectedEOF {
-		// io.ErrUnexpectedEOF means the file is smaller than headSize, which is fine
-		return "", false, err
+	if size <= 0 {
+		return "", false, errors.New("empty file")
 	}
-	head = head[:n]
+	head := make([]byte, min(size, mediaHeadSize))
+	if _, err := io.ReadFull(io.NewSectionReader(body, 0, size), head); err != nil {
+		return "", false, fmt.Errorf("read head: %w", err)
+	}
 
 	ext := strings.ToLower(filepath.Ext(filename))
 	exifData := ingest.ExtractExif(bytes.NewReader(head))
+	// Insta360 and similar cameras write moov at end of file, so EXIF dimension extraction from
+	// the head alone fails, and the video is probed with ffprobe instead.
+	probeVideo := ingest.IsVideoExt(ext) && exifData.WidthPx == nil
+
+	fileHash, err := mediaHash(body, size, head, probeVideo)
+	if err != nil {
+		return "", false, fmt.Errorf("hash: %w", err)
+	}
+	err = r.db.QueryRow(ctx,
+		`SELECT id FROM media WHERE owner_id = $1 AND file_hash = $2`, ownerID, fileHash,
+	).Scan(&mediaID)
+	if err == nil {
+		return mediaID, false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", false, fmt.Errorf("look up duplicate: %w", err)
+	}
 
 	var mediaType string
 	var tmpFile *os.File
 	var probe ingest.VideoProbeResult
-	if ingest.IsVideoExt(ext) && exifData.WidthPx == nil {
-		// Insta360 and similar cameras write moov at end of file, so EXIF
-		// dimension extraction from the head alone fails. Buffer the full
-		// video to a temp file so ffprobe can read the container metadata.
-		rest := io.MultiReader(bytes.NewReader(head), body)
-		tmpFile, probe, err = ingest.ProbeVideo(rest)
+	if probeVideo {
+		// Buffer the full video to a temp file so ffprobe can read the container metadata.
+		tmpFile, probe, err = ingest.ProbeVideo(io.NewSectionReader(body, 0, size))
 		if err != nil {
 			return "", false, err
 		}
@@ -97,7 +93,6 @@ func (r *MediaRegistrar) registerMedia(
 	}
 
 	var uploadBody io.Reader
-	var tc *tailCapture
 	if tmpFile != nil {
 		if probe.NeedsTranscode() {
 			slog.Info("register: transcoding to H.264", "filename", filename, "codec", probe.CodecName)
@@ -123,22 +118,13 @@ func (r *MediaRegistrar) registerMedia(
 		}
 		uploadBody = tmpFile
 	} else {
-		tc = &tailCapture{r: body}
-		uploadBody = io.MultiReader(bytes.NewReader(head), tc)
+		uploadBody = io.NewSectionReader(body, 0, size)
 	}
 
 	key := newStorageKey(ownerID, ext)
 	if err := r.storage.Upload(ctx, key, uploadBody, size, contentTypeFor(ext)); err != nil {
 		slog.Error("register: S3 upload failed", "key", key, "err", err)
 		return "", false, err
-	}
-
-	const chunk = 64 * 1024
-	var fileHash string
-	if tc != nil && size > 2*chunk {
-		fileHash = partialHashStream(size, head[:chunk], tc.tail)
-	} else {
-		fileHash = partialHash(head)
 	}
 
 	takenAt := exifData.TakenAt
@@ -164,8 +150,8 @@ func (r *MediaRegistrar) registerMedia(
 		takenAt, key, fileHash,
 	).Scan(&mediaID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// DO NOTHING returns no row for a duplicate, so nothing references the object just uploaded.
-		// The ID comes from the row that already exists.
+		// A concurrent call stored the same file after the lookup above. DO NOTHING returns no row,
+		// so nothing references the object just uploaded. The ID comes from the row that won.
 		r.deleteObject(ctx, key)
 		if err := r.db.QueryRow(ctx,
 			`SELECT id FROM media WHERE owner_id = $1 AND file_hash = $2`, ownerID, fileHash,
@@ -246,6 +232,40 @@ func contentTypeFor(ext string) string {
 	}
 }
 
+const (
+	mediaHeadSize  = 1024 * 1024 // read for EXIF; also bounds what mediaHash reads of a video
+	mediaHashChunk = 64 * 1024
+)
+
+// mediaHash returns the dedup key stored in media.file_hash, from the file's first
+// min(size, mediaHeadSize) bytes (head) and, when needed, its tail read from body.
+//
+// The definition is frozen: every existing row was hashed this way, so a change would make
+// re-uploads of the whole library count as new files. It is not quite "the size plus the first
+// and last 64 KB", because it reproduces what the original streaming code hashed:
+//   - up to 128 KB: the size and the whole file;
+//   - a probed video (probeVideo): partialHash of the head alone, so for a video over 1 MB the
+//     hashed "size" is 1 MB and the end of the file is never read;
+//   - any other file: the size, the first 64 KB and the last 64 KB of what follows the head
+//     (nothing for a file up to 1 MB, fewer bytes for one up to 1 MB + 64 KB).
+//
+// frontend/src/lib/mediaHash.ts computes the same hash in the browser so the Upload page can skip
+// files the library already has; both check testdata/media_hash_vectors.json.
+func mediaHash(body io.ReaderAt, size int64, head []byte, probeVideo bool) (string, error) {
+	if probeVideo || size <= 2*mediaHashChunk {
+		return partialHash(head), nil
+	}
+	tailStart := max(size-mediaHashChunk, int64(len(head)))
+	tail := make([]byte, size-tailStart)
+	if len(tail) > 0 {
+		// ReaderAt may report io.EOF along with a full read that ends at the end of the file.
+		if n, err := body.ReadAt(tail, tailStart); n < len(tail) {
+			return "", err
+		}
+	}
+	return partialHashStream(size, head[:mediaHashChunk], tail), nil
+}
+
 // partialHash hashes the first and last 64 KB plus the file size.
 // This is fast for large files while still being collision-resistant for deduplication.
 func partialHash(data []byte) string {
@@ -263,8 +283,8 @@ func partialHash(data []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// partialHashStream produces the same hash as partialHash for files larger than 128KB,
-// using the pre-captured first and last 64KB chunks instead of a full []byte.
+// partialHashStream hashes the size, firstChunk and lastChunk. It equals partialHash for a file
+// larger than 128KB when the chunks are its first and last 64KB.
 func partialHashStream(size int64, firstChunk, lastChunk []byte) string {
 	h := sha256.New()
 	var sizeBuf [8]byte

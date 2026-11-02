@@ -3,18 +3,34 @@ import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { api, ApiError } from "@/api/client";
 import { UploadPage } from "@/pages/UploadPage";
+import { canHashFiles } from "@/lib/mediaHash";
 import type { Album } from "@/types";
 
 vi.mock("@/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/client")>();
   return {
     ApiError: actual.ApiError,
-    api: { upload: vi.fn(), importGpsTracks: vi.fn(), listAlbums: vi.fn(), createAlbum: vi.fn() },
+    api: {
+      upload: vi.fn(),
+      knownHashes: vi.fn(),
+      addToAlbum: vi.fn(),
+      importGpsTracks: vi.fn(),
+      listAlbums: vi.fn(),
+      createAlbum: vi.fn(),
+    },
   };
 });
 
+// mediaHash.test.ts checks the real hash; here every file's hash is "hash-<name>".
+vi.mock("@/lib/mediaHash", () => ({
+  canHashFiles: vi.fn(() => true),
+  mediaHash: vi.fn(async (file: File) => `hash-${file.name}`),
+}));
+
 const mockApi = api as unknown as {
   upload: ReturnType<typeof vi.fn>;
+  knownHashes: ReturnType<typeof vi.fn>;
+  addToAlbum: ReturnType<typeof vi.fn>;
   importGpsTracks: ReturnType<typeof vi.fn>;
   listAlbums: ReturnType<typeof vi.fn>;
   createAlbum: ReturnType<typeof vi.fn>;
@@ -73,6 +89,9 @@ describe("UploadPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockApi.upload.mockResolvedValue({ uploaded: ["a.jpg", "b.mp4"] });
+    mockApi.knownHashes.mockResolvedValue({});
+    mockApi.addToAlbum.mockResolvedValue({ added: 0 });
+    vi.mocked(canHashFiles).mockReturnValue(true);
     mockApi.importGpsTracks.mockResolvedValue({ inserted: 5, skipped: 2, errors: [{ row: 3, reason: "bad lat" }] });
     mockApi.listAlbums.mockResolvedValue([family, iceland]);
   });
@@ -304,6 +323,108 @@ describe("UploadPage", () => {
     expect(screen.getByRole("button", { name: "Upload into no album" })).toBeDisabled();
     resolve({ uploaded: ["a.jpg"] });
     await waitFor(() => expect(albumButton()).toBeEnabled());
+  });
+
+  describe("files already in the library", () => {
+    function photos(...names: string[]): File[] {
+      return names.map((name) => new File([name], name, { type: "image/jpeg" }));
+    }
+
+    async function uploadPhotos(container: HTMLElement, ...names: string[]) {
+      await userEvent.upload(mediaInput(container), photos(...names));
+      await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    }
+
+    function sentNames(): string[] {
+      return mockApi.upload.mock.calls.flatMap((call) => ((call[0] as FormData).getAll("files") as File[]).map((f) => f.name));
+    }
+
+    it("are not sent, and count as skipped", async () => {
+      mockApi.knownHashes.mockResolvedValue({ "hash-a.jpg": "m-a" });
+      mockApi.upload.mockResolvedValue({ uploaded: ["b.jpg"], skipped: [], failed: [] });
+      const { container } = render(<UploadPage />);
+      await uploadPhotos(container, "a.jpg", "b.jpg");
+
+      expect(await screen.findByText("Uploaded 1 file, skipped 1, failed 0")).toBeInTheDocument();
+      expect(mockApi.knownHashes).toHaveBeenCalledWith(["hash-a.jpg", "hash-b.jpg"]);
+      expect(sentNames()).toEqual(["b.jpg"]);
+      expect(screen.getByText("1 file skipped (already in your library)")).toBeInTheDocument();
+      expect(mockApi.addToAlbum).not.toHaveBeenCalled();
+    });
+
+    it("send no request at all when every file is known", async () => {
+      mockApi.knownHashes.mockResolvedValue({ "hash-a.jpg": "m-a", "hash-b.jpg": "m-b" });
+      const { container } = render(<UploadPage />);
+      await uploadPhotos(container, "a.jpg", "b.jpg");
+
+      expect(await screen.findByText("Uploaded 0 files, skipped 2, failed 0")).toBeInTheDocument();
+      expect(mockApi.upload).not.toHaveBeenCalled();
+    });
+
+    it("go into the chosen album, and the totals add up", async () => {
+      mockApi.knownHashes.mockResolvedValue({ "hash-a.jpg": "m-a", "hash-a-copy.jpg": "m-a" });
+      mockApi.addToAlbum.mockResolvedValue({ added: 1 });
+      mockApi.upload.mockResolvedValue({ uploaded: ["b.jpg"], skipped: [], failed: [], album_added: 1 });
+      const { container } = render(<UploadPage />);
+      await chooseAlbum("Family");
+      await uploadPhotos(container, "a.jpg", "a-copy.jpg", "b.jpg");
+
+      expect(await screen.findByText("Uploaded 1 file, skipped 2, failed 0")).toBeInTheDocument();
+      expect(mockApi.addToAlbum).toHaveBeenCalledExactlyOnceWith("a1", { mediaIds: ["m-a"] });
+      expect(sentNames()).toEqual(["b.jpg"]);
+      expect(mockApi.upload.mock.calls[0][1]).toBe("a1");
+      expect(screen.getByText('Added 2 files to "Family"')).toBeInTheDocument();
+    });
+
+    it("stop everything when the album is gone", async () => {
+      mockApi.knownHashes.mockResolvedValue({ "hash-a.jpg": "m-a" });
+      mockApi.addToAlbum.mockRejectedValue(new ApiError("POST /albums/a1/media failed: 404", 404));
+      const { container } = render(<UploadPage />);
+      await chooseAlbum("Family");
+      await uploadPhotos(container, "a.jpg", "b.jpg");
+
+      expect(
+        await screen.findByText('Could not upload into "Family": the album no longer exists, or you are no longer a member')
+      ).toBeInTheDocument();
+      expect(mockApi.upload).not.toHaveBeenCalled();
+      expect(screen.getByText("2 files failed")).toBeInTheDocument();
+    });
+
+    it("fail alone when adding them to a listed album fails", async () => {
+      mockApi.knownHashes.mockResolvedValue({ "hash-a.jpg": "m-a" });
+      mockApi.addToAlbum.mockRejectedValue(new ApiError("POST /albums/a1/media failed: 500", 500));
+      mockApi.upload.mockResolvedValue({ uploaded: ["b.jpg"], skipped: [], failed: [], album_added: 1 });
+      const { container } = render(<UploadPage />);
+      await chooseAlbum("Family");
+      await uploadPhotos(container, "a.jpg", "b.jpg");
+
+      expect(await screen.findByText("Uploaded 1 file, skipped 0, failed 1")).toBeInTheDocument();
+      expect(sentNames()).toEqual(["b.jpg"]);
+      expect(screen.getByText("POST /albums/a1/media failed: 500")).toBeInTheDocument();
+    });
+
+    it("are sent anyway when the check fails", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      mockApi.knownHashes.mockRejectedValue(new ApiError("POST /media/known-hashes failed: 404", 404));
+      mockApi.upload.mockResolvedValue({ uploaded: ["b.jpg"], skipped: ["a.jpg"], failed: [] });
+      const { container } = render(<UploadPage />);
+      await uploadPhotos(container, "a.jpg", "b.jpg");
+
+      expect(await screen.findByText("Uploaded 1 file, skipped 1, failed 0")).toBeInTheDocument();
+      expect(sentNames()).toEqual(["a.jpg", "b.jpg"]);
+      expect(screen.queryByText(/known-hashes/)).not.toBeInTheDocument();
+    });
+
+    it("are sent anyway without Web Crypto", async () => {
+      vi.mocked(canHashFiles).mockReturnValue(false);
+      mockApi.upload.mockResolvedValue({ uploaded: ["b.jpg"], skipped: ["a.jpg"], failed: [] });
+      const { container } = render(<UploadPage />);
+      await uploadPhotos(container, "a.jpg", "b.jpg");
+
+      expect(await screen.findByText("Uploaded 1 file, skipped 1, failed 0")).toBeInTheDocument();
+      expect(mockApi.knownHashes).not.toHaveBeenCalled();
+      expect(sentNames()).toEqual(["a.jpg", "b.jpg"]);
+    });
   });
 
   it("lists duplicates the server skipped", async () => {

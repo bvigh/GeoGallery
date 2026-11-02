@@ -19,7 +19,7 @@ test("alice shares an upload with bob through an album, then removes him", async
   let albumId: string | null = null;
   try {
     // Setup: gps.jpg is already in alice's library (the upload spec puts it there too), so the
-    // album upload below takes the per-owner dedup path.
+    // Upload page below finds it by its hash, never sends it, and adds it to the album itself.
     const seeded = await alice.request.post("/api/media/upload", {
       multipart: { files: { name: "gps.jpg", mimeType: "image/jpeg", buffer: readFileSync(FIXTURE) } },
     });
@@ -54,9 +54,14 @@ test("alice shares an upload with bob through an album, then removes him", async
     await expect(picker).toHaveCount(0);
     await expect(alice.getByRole("button", { name: `Add to album: ${albumName}` })).toBeVisible();
     await alice.locator('input[type="file"][accept^="image/"]').setInputFiles(FIXTURE);
+    const uploadRequests: string[] = [];
+    alice.on("request", (r) => {
+      if (new URL(r.url()).pathname === "/api/media/upload") uploadRequests.push(r.url());
+    });
     await alice.getByRole("main").getByRole("button", { name: "Upload", exact: true }).click();
     await expect(alice.getByText("Uploaded 0 files, skipped 1, failed 0")).toBeVisible();
     await expect(alice.getByText(`Added 1 file to "${albumName}"`)).toBeVisible();
+    expect(uploadRequests, "a file already in the library is never sent").toEqual([]);
 
     await alice.getByRole("button", { name: "Albums", exact: true }).click();
     await expect(aliceCard).toContainText("2 members · 1 item");

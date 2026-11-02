@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -264,6 +265,63 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// maxKnownHashes caps one known-hashes request, as maxListLimit caps a media page.
+const maxKnownHashes = 5000
+
+var fileHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// KnownHashes reports which of the given file hashes (see mediaHash) the caller's own library
+// already holds, as {"known": {hash: media ID}}, so the Upload page sends only new files and can
+// still add the rest to an album. Dedup is per owner, so shared media never count.
+func (h *MediaHandler) KnownHashes(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Hashes []string `json:"hashes"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if len(req.Hashes) == 0 || len(req.Hashes) > maxKnownHashes {
+		http.Error(w, fmt.Sprintf("hashes: want 1-%d", maxKnownHashes), http.StatusBadRequest)
+		return
+	}
+	for _, hash := range req.Hashes {
+		if !fileHashPattern.MatchString(hash) {
+			http.Error(w, "hashes: want 64 lower-case hex characters each", http.StatusBadRequest)
+			return
+		}
+	}
+
+	rows, err := h.db.Query(r.Context(),
+		`SELECT file_hash, id FROM media WHERE owner_id = $1 AND file_hash = ANY($2)`,
+		auth.MustUser(r.Context()).ID, req.Hashes)
+	if err != nil {
+		slog.Error("media: known hashes query failed", "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	known := map[string]string{}
+	for rows.Next() {
+		var hash, id string
+		if err := rows.Scan(&hash, &id); err != nil {
+			slog.Error("media: known hashes row scan failed", "err", err)
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		known[hash] = id
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("media: known hashes rows failed", "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"known": known})
 }
 
 // uploadAlbum returns the canonical ?album_id, or "" when the param is absent. It is a query

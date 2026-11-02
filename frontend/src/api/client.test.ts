@@ -117,6 +117,15 @@ describe("api client", () => {
     await expect(api.upload(new FormData(), "a1")).rejects.toMatchObject({ status: 404 });
   });
 
+  it("knownHashes() posts the hashes and returns the known map", async () => {
+    fetchMock.mockResolvedValue(response(200, { known: { h1: "m1" } }));
+    await expect(api.knownHashes(["h1", "h2"])).resolves.toEqual({ h1: "m1" });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/media/known-hashes");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ hashes: ["h1", "h2"] });
+  });
+
   describe("albums", () => {
     const sampleAlbum = { id: "a1", name: "Iceland", owner_id: "u1", is_owner: true };
     const noBody = () => ({ status: 204, ok: true, json: async () => { throw new Error("no body"); } });

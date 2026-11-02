@@ -252,7 +252,7 @@ Where the code on `feat/albums-sharing` differs from or adds to the plan above. 
 **Media and upload**
 - Upload: a malformed `album_id` → 404, the same as a non-member. `album_added` is present only when `album_id` was given.
 - The album insert on upload runs **after** `RunGPSMatcher` and `RunTripDetect`. If either fails, the request returns 500 before anything is added to the album, and the files stay in the uploader's library.
-- `registerMedia` can only hash after the S3 upload. It therefore deletes the object it just uploaded when the INSERT dedups, or when the INSERT certainly stored nothing (best-effort, logged), so `registrarStorage` gained `Delete`. When a failed INSERT may already have committed, it keeps the object and logs a Warn.
+- `registerMedia` hashes the file and looks up `(owner_id, file_hash)` before uploading, so a duplicate never reaches S3 (and the Upload page skips known files before sending them, through `POST /api/media/known-hashes`). It still deletes the object it just uploaded when a concurrent upload of the same file wins the INSERT, or when the INSERT certainly stored nothing (best-effort, logged), so `registrarStorage` has `Delete`. When a failed INSERT may already have committed, it keeps the object and logs a Warn.
 - `GET /api/media` orders by `taken_at DESC NULLS LAST, id`, so OFFSET pages never overlap. A `rows.Err()` returns 500 instead of a silent `[]`.
 - `buildMediaFilter` binds `trip_id` and `album_id` in canonical form, because `auth.CanonicalUUID` accepts any separator but Postgres only a dash.
 - The "GPS and trips stay per owner" comment is in `trip_detect.go` as well as `gps_matcher.go`.

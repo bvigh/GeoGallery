@@ -451,3 +451,75 @@ func TestList_EmptyResult_ReturnsEmptyArray(t *testing.T) {
 	body := w.Body.String()
 	assert.Contains(t, body, "[]") // must be array, not null
 }
+
+// --- KnownHashes tests ---
+
+func knownHashesRequest(body string) *http.Request {
+	return withTestUser(httptest.NewRequest(http.MethodPost, "/api/media/known-hashes", strings.NewReader(body)))
+}
+
+func TestKnownHashes_InvalidBody_Returns400(t *testing.T) {
+	valid := strings.Repeat("a", 64)
+	tooMany := `{"hashes":[` + strings.TrimSuffix(strings.Repeat(`"`+valid+`",`, maxKnownHashes+1), ",") + `]}`
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"not JSON", `nope`},
+		{"no hashes", `{}`},
+		{"empty list", `{"hashes":[]}`},
+		{"too many", tooMany},
+		{"too short", `{"hashes":["abc"]}`},
+		{"upper case", `{"hashes":["` + strings.Repeat("A", 64) + `"]}`},
+		{"not hex", `{"hashes":["` + strings.Repeat("g", 64) + `"]}`},
+		{"one bad among good", `{"hashes":["` + valid + `","x"]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &MediaHandler{db: &mockDB{}} // panics if queried
+			w := httptest.NewRecorder()
+			h.KnownHashes(w, knownHashesRequest(tt.body))
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+		})
+	}
+}
+
+func TestKnownHashes_ReturnsOwnMatches(t *testing.T) {
+	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	var gotSQL string
+	var gotArgs []any
+	db := &mockDB{queryFn: func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+		gotSQL, gotArgs = sql, args
+		return &mockRows{rows: [][]any{{a, "media-a"}}}, nil
+	}}
+	h := &MediaHandler{db: db}
+
+	w := httptest.NewRecorder()
+	h.KnownHashes(w, knownHashesRequest(`{"hashes":["`+a+`","`+b+`"]}`))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{"known":{"`+a+`":"media-a"}}`, w.Body.String())
+	assert.Contains(t, gotSQL, "owner_id = $1 AND file_hash = ANY($2)")
+	assert.Equal(t, []any{testOwnerID, []string{a, b}}, gotArgs)
+}
+
+func TestKnownHashes_DBErrors_Return500(t *testing.T) {
+	valid := `{"hashes":["` + strings.Repeat("a", 64) + `"]}`
+	tests := []struct {
+		name    string
+		queryFn func(context.Context, string, ...any) (pgx.Rows, error)
+	}{
+		{"query fails", func(context.Context, string, ...any) (pgx.Rows, error) { return nil, errors.New("db down") }},
+		{"rows fail", func(context.Context, string, ...any) (pgx.Rows, error) {
+			return &mockRows{err: errors.New("rows broke")}, nil
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &MediaHandler{db: &mockDB{queryFn: tt.queryFn}}
+			w := httptest.NewRecorder()
+			h.KnownHashes(w, knownHashesRequest(valid))
+			assert.Equal(t, http.StatusInternalServerError, w.Code)
+		})
+	}
+}

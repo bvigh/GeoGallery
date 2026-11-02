@@ -45,13 +45,16 @@ func (m *mockUploadStorage) PresignGet(_ context.Context, _ string) (string, err
 	panic("not expected")
 }
 
-// mockRegistrarDB implements registrarDB and records each call. The media INSERT returns the ID
-// "new-<filename>", or no row for a filename in duplicates; the duplicate lookup then returns
-// "existing-<file hash>".
+// mockRegistrarDB implements registrarDB and records each call. A lookup by (owner, hash) returns
+// "existing-<file hash>" for a hash in known or one whose INSERT conflicted, else no row. The media
+// INSERT returns the ID "new-<filename>", or no row for a filename in raced.
 type mockRegistrarDB struct {
-	duplicates map[string]bool // filenames whose INSERT hits ON CONFLICT DO NOTHING
+	known      map[string]bool // file hashes already in the library
+	raced      map[string]bool // filenames a concurrent call stores between the lookup and the INSERT
 	insertErr  error           // returned by the media INSERT
-	lookupErr  error           // returned by the duplicate lookup
+	lookupErrs []error         // the i-th duplicate lookup returns lookupErrs[i] when it is set
+	lookups    int
+	conflicts  map[string]bool // file hashes whose INSERT hit ON CONFLICT DO NOTHING
 	sqls       []string
 	args       [][]any
 }
@@ -70,17 +73,45 @@ func (m *mockRegistrarDB) QueryRow(_ context.Context, sql string, args ...any) p
 		if m.insertErr != nil {
 			return &mockRow{scanFn: func(...any) error { return m.insertErr }}
 		}
-		if m.duplicates[args[1].(string)] {
+		if m.raced[args[1].(string)] {
+			if m.conflicts == nil {
+				m.conflicts = map[string]bool{}
+			}
+			m.conflicts[args[9].(string)] = true
 			return noRowsRow{}
 		}
 		return scanStringRow("new-" + args[1].(string))
 	case strings.Contains(sql, "SELECT id FROM media"):
-		if m.lookupErr != nil {
-			return &mockRow{scanFn: func(...any) error { return m.lookupErr }}
+		i := m.lookups
+		m.lookups++
+		if i < len(m.lookupErrs) && m.lookupErrs[i] != nil {
+			return &mockRow{scanFn: func(...any) error { return m.lookupErrs[i] }}
 		}
-		return scanStringRow("existing-" + args[1].(string))
+		hash := args[1].(string)
+		if m.known[hash] || m.conflicts[hash] {
+			return scanStringRow("existing-" + hash)
+		}
+		return noRowsRow{}
 	}
 	panic("unexpected QueryRow: " + sql)
+}
+
+// hashesOf returns the file hashes of small files with these contents, as mockRegistrarDB.known.
+func hashesOf(contents ...string) map[string]bool {
+	known := map[string]bool{}
+	for _, c := range contents {
+		known[partialHash([]byte(c))] = true
+	}
+	return known
+}
+
+// knownUploads returns the file hashes of the files uploadFiles builds for these names.
+func knownUploads(filenames ...string) map[string]bool {
+	contents := make([]string, len(filenames))
+	for i, name := range filenames {
+		contents[i] = "fake-content-of-" + name
+	}
+	return hashesOf(contents...)
 }
 
 // scanStringRow is a pgx.Row holding one string column.
@@ -153,9 +184,11 @@ func TestUpload_PropagatesOwner(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, testOwnerID, matcherOwner)
 	assert.Equal(t, testOwnerID, tripOwner)
-	require.Len(t, db.sqls, 1)
-	assert.Contains(t, db.sqls[0], "ON CONFLICT (owner_id, file_hash) DO NOTHING")
-	assert.Equal(t, testOwnerID, db.args[0][0], "owner_id is the first INSERT arg")
+	require.Len(t, db.sqls, 2)
+	assert.Contains(t, db.sqls[0], "SELECT id FROM media WHERE owner_id = $1")
+	assert.Equal(t, testOwnerID, db.args[0][0], "owner_id is the first lookup arg")
+	assert.Contains(t, db.sqls[1], "ON CONFLICT (owner_id, file_hash) DO NOTHING")
+	assert.Equal(t, testOwnerID, db.args[1][0], "owner_id is the first INSERT arg")
 }
 
 func TestUpload_OpaqueStorageKey(t *testing.T) {
@@ -180,9 +213,9 @@ func TestUpload_OpaqueStorageKey(t *testing.T) {
 	}
 	assert.NotEqual(t, store.keys[0], store.keys[1])
 
-	require.Len(t, db.args, 2)
-	assert.Equal(t, name, db.args[0][1], "original filename is still stored in media.filename")
-	assert.Equal(t, key, db.args[0][8], "storage_key arg matches the uploaded key")
+	require.Len(t, db.args, 4, "a lookup and an INSERT per file")
+	assert.Equal(t, name, db.args[1][1], "original filename is still stored in media.filename")
+	assert.Equal(t, key, db.args[1][8], "storage_key arg matches the uploaded key")
 }
 
 func TestNewStorageKey(t *testing.T) {
@@ -235,7 +268,7 @@ func TestUpload_SkipsTripDetectWhenNothingUploaded(t *testing.T) {
 	tripDetectCalled := false
 
 	h := &MediaHandler{
-		registrar:  &MediaRegistrar{db: &mockRegistrarDB{duplicates: map[string]bool{"photo.jpg": true}}, storage: &mockUploadStorage{}},
+		registrar:  &MediaRegistrar{db: &mockRegistrarDB{known: knownUploads("photo.jpg")}, storage: &mockUploadStorage{}},
 		runMatcher: noopMatcher,
 		runTripDetect: func(_ context.Context, _ tripDetectDB, _ string, _ int) error {
 			tripDetectCalled = true
@@ -358,7 +391,9 @@ func TestRegisterMedia_ReturnsMediaID(t *testing.T) {
 	hash := partialHash([]byte(content))
 	dbDown := errors.New("db down")
 	rejected := &pgconn.PgError{Code: "23514", Message: "violates check constraint"}
-	duplicate := map[string]bool{"photo.jpg": true}
+	known := map[string]bool{hash: true}
+	raced := map[string]bool{"photo.jpg": true}
+	const lookup, insert = "lookup", "insert"
 	tests := []struct {
 		name         string
 		db           *mockRegistrarDB
@@ -366,19 +401,28 @@ func TestRegisterMedia_ReturnsMediaID(t *testing.T) {
 		wantID       string
 		wantInserted bool
 		wantErr      error
-		wantLookup   bool
+		wantSQL      []string
+		wantUploaded bool
 		wantDeleted  bool // the uploaded object is deleted again
 	}{
-		{"new file returns the inserted ID", &mockRegistrarDB{}, nil, "new-photo.jpg", true, nil, false, false},
-		{"duplicate returns the existing ID", &mockRegistrarDB{duplicates: duplicate}, nil,
-			"existing-" + hash, false, nil, true, true},
-		{"duplicate still counts when deleting its object fails", &mockRegistrarDB{duplicates: duplicate}, errors.New("s3 down"),
-			"existing-" + hash, false, nil, true, true},
-		{"insert rejected by the server", &mockRegistrarDB{insertErr: rejected}, nil, "", false, rejected, false, true},
-		{"insert never sent", &mockRegistrarDB{insertErr: notSentError{}}, nil, "", false, notSentError{}, false, true},
-		{"insert outcome unknown keeps the object", &mockRegistrarDB{insertErr: dbDown}, nil, "", false, dbDown, false, false},
-		{"duplicate lookup fails", &mockRegistrarDB{duplicates: duplicate, lookupErr: pgx.ErrNoRows}, nil,
-			"", false, pgx.ErrNoRows, true, true},
+		{"new file returns the inserted ID", &mockRegistrarDB{}, nil,
+			"new-photo.jpg", true, nil, []string{lookup, insert}, true, false},
+		{"duplicate returns the existing ID without uploading", &mockRegistrarDB{known: known}, nil,
+			"existing-" + hash, false, nil, []string{lookup}, false, false},
+		{"duplicate lookup fails before uploading", &mockRegistrarDB{lookupErrs: []error{dbDown}}, nil,
+			"", false, dbDown, []string{lookup}, false, false},
+		{"concurrent duplicate returns the winner's ID", &mockRegistrarDB{raced: raced}, nil,
+			"existing-" + hash, false, nil, []string{lookup, insert, lookup}, true, true},
+		{"concurrent duplicate still counts when deleting its object fails", &mockRegistrarDB{raced: raced}, errors.New("s3 down"),
+			"existing-" + hash, false, nil, []string{lookup, insert, lookup}, true, true},
+		{"insert rejected by the server", &mockRegistrarDB{insertErr: rejected}, nil,
+			"", false, rejected, []string{lookup, insert}, true, true},
+		{"insert never sent", &mockRegistrarDB{insertErr: notSentError{}}, nil,
+			"", false, notSentError{}, []string{lookup, insert}, true, true},
+		{"insert outcome unknown keeps the object", &mockRegistrarDB{insertErr: dbDown}, nil,
+			"", false, dbDown, []string{lookup, insert}, true, false},
+		{"lookup after a concurrent duplicate fails", &mockRegistrarDB{raced: raced, lookupErrs: []error{nil, pgx.ErrNoRows}}, nil,
+			"", false, pgx.ErrNoRows, []string{lookup, insert, lookup}, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -395,25 +439,29 @@ func TestRegisterMedia_ReturnsMediaID(t *testing.T) {
 			}
 			assert.Equal(t, tt.wantID, id)
 			assert.Equal(t, tt.wantInserted, inserted)
-			require.Len(t, store.keys, 1)
+			if tt.wantUploaded {
+				require.Len(t, store.keys, 1)
+			} else {
+				assert.Empty(t, store.keys, "nothing is uploaded")
+			}
 			if tt.wantDeleted {
 				assert.Equal(t, store.keys, store.deleted, "exactly the object this call uploaded is deleted")
 			} else {
 				assert.Empty(t, store.deleted)
 			}
 
-			require.NotEmpty(t, tt.db.sqls)
-			assert.Contains(t, tt.db.sqls[0], "ON CONFLICT (owner_id, file_hash) DO NOTHING")
-			assert.Contains(t, tt.db.sqls[0], "RETURNING id")
-			assert.Equal(t, testOwnerID, tt.db.args[0][0])
-			assert.Equal(t, hash, tt.db.args[0][9], "file_hash is the tenth INSERT arg")
-			if !tt.wantLookup {
-				assert.Len(t, tt.db.sqls, 1, "no lookup after the INSERT")
-				return
+			require.Len(t, tt.db.sqls, len(tt.wantSQL))
+			for i, kind := range tt.wantSQL {
+				if kind == lookup {
+					assert.Contains(t, tt.db.sqls[i], "SELECT id FROM media WHERE owner_id = $1 AND file_hash = $2")
+					assert.Equal(t, []any{testOwnerID, hash}, tt.db.args[i], "the lookup is scoped to the owner")
+					continue
+				}
+				assert.Contains(t, tt.db.sqls[i], "ON CONFLICT (owner_id, file_hash) DO NOTHING")
+				assert.Contains(t, tt.db.sqls[i], "RETURNING id")
+				assert.Equal(t, testOwnerID, tt.db.args[i][0])
+				assert.Equal(t, hash, tt.db.args[i][9], "file_hash is the tenth INSERT arg")
 			}
-			require.Len(t, tt.db.sqls, 2)
-			assert.Contains(t, tt.db.sqls[1], "SELECT id FROM media WHERE owner_id = $1 AND file_hash = $2")
-			assert.Equal(t, []any{testOwnerID, hash}, tt.db.args[1], "the lookup is scoped to the owner")
 		})
 	}
 }
@@ -528,10 +576,10 @@ func TestUpload_AlbumIDRejectedBeforeBodyIsRead(t *testing.T) {
 
 func TestUpload_AlbumIDAddsUploadedAndDuplicates(t *testing.T) {
 	db := &uploadAlbumDB{member: true, added: 2}
-	reg := &mockRegistrarDB{duplicates: map[string]bool{"dup.jpg": true}}
+	reg := &mockRegistrarDB{known: knownUploads("dup.jpg")}
 	h := &MediaHandler{
 		db:            db,
-		registrar:     &MediaRegistrar{db: reg, storage: &failOnceStorage{failAt: 2}},
+		registrar:     &MediaRegistrar{db: reg, storage: &failOnceStorage{failAt: 1}}, // dup.jpg is never uploaded
 		runMatcher:    noopMatcher,
 		runTripDetect: noopTripDetect,
 	}
@@ -558,7 +606,7 @@ func TestUpload_AlbumIDOutcomes(t *testing.T) {
 	tests := []struct {
 		name        string
 		storage     registrarStorage
-		duplicates  map[string]bool
+		known       map[string]bool
 		insertErr   error
 		matcherErr  error
 		wantStatus  int
@@ -567,7 +615,7 @@ func TestUpload_AlbumIDOutcomes(t *testing.T) {
 	}{
 		{"every file fails", &failOnceStorage{failAt: 0}, nil, nil, nil, http.StatusOK,
 			`{"uploaded":null,"skipped":null,"failed":["a.jpg"],"album_added":0}`, 0},
-		{"only duplicates", &mockUploadStorage{}, map[string]bool{"a.jpg": true}, nil, nil, http.StatusOK,
+		{"only duplicates", &mockUploadStorage{}, knownUploads("a.jpg"), nil, nil, http.StatusOK,
 			`{"uploaded":null,"skipped":["a.jpg"],"failed":null,"album_added":1}`, 1},
 		{"album insert fails", &mockUploadStorage{}, nil, errors.New("db down"), nil, http.StatusInternalServerError, "", 1},
 		{"matcher fails before the album insert", &mockUploadStorage{}, nil, nil, errors.New("matcher down"),
@@ -578,7 +626,7 @@ func TestUpload_AlbumIDOutcomes(t *testing.T) {
 			db := &uploadAlbumDB{member: true, added: 1, insertErr: tt.insertErr}
 			h := &MediaHandler{
 				db:        db,
-				registrar: &MediaRegistrar{db: &mockRegistrarDB{duplicates: tt.duplicates}, storage: tt.storage},
+				registrar: &MediaRegistrar{db: &mockRegistrarDB{known: tt.known}, storage: tt.storage},
 				runMatcher: func(context.Context, matcherDB, string, time.Duration, bool) error {
 					return tt.matcherErr
 				},
@@ -672,22 +720,22 @@ func TestRunIngestScan_TripDetectError_ReturnsError(t *testing.T) {
 
 func TestRunIngestScan_CountsIngestedSkippedFailed(t *testing.T) {
 	tests := []struct {
-		name       string
-		duplicates map[string]bool
-		want       ScanResult
+		name  string
+		known map[string]bool
+		want  ScanResult
 	}{
 		{"new files are ingested", nil, ScanResult{Ingested: 2, Failed: 1}},
-		{"deduplicated files are skipped", map[string]bool{"a.jpg": true, "b.PNG": true}, ScanResult{Skipped: 2, Failed: 1}},
+		{"deduplicated files are skipped", hashesOf("fake-a", "fake-b"), ScanResult{Skipped: 2, Failed: 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeFile(t, dir, "a.jpg", "fake-a")
 			writeFile(t, dir, "b.PNG", "fake-b")
-			writeFile(t, dir, "empty.mp4", "") // zero bytes: registerMedia fails reading the head
+			writeFile(t, dir, "empty.mp4", "") // zero bytes: registerMedia refuses an empty file
 			writeFile(t, dir, "notes.txt", "unsupported extension, ignored")
 
-			db := &mockRegistrarDB{duplicates: tt.duplicates}
+			db := &mockRegistrarDB{known: tt.known}
 			deps := IngestDeps{
 				registrar:     &MediaRegistrar{db: db, storage: &mockUploadStorage{}},
 				runMatcher:    noopMatcher,
