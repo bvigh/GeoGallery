@@ -2,7 +2,7 @@
 // backend/internal/handlers/register.go), so the Upload page can skip files the library
 // already has instead of sending them only for the server to skip. Its definition is frozen to
 // match every existing row, quirks included: see the Go comment. Both sides check
-// backend/internal/handlers/testdata/media_hash_vectors.json.
+// mediaHash.vectors.json, which the Go test writes.
 //
 // A wrong guess costs nothing but bandwidth: the server hashes every file it receives itself.
 

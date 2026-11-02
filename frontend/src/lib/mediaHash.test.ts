@@ -2,7 +2,8 @@
 // Node's File and Web Crypto: jsdom's File cannot be sliced into an ArrayBuffer.
 import { describe, it, expect } from "vitest";
 import { canHashFiles, mediaHash } from "@/lib/mediaHash";
-import vectors from "../../../backend/internal/handlers/testdata/media_hash_vectors.json";
+// Inside frontend/: the Docker image is built from this directory alone, and tsc checks tests too.
+import vectors from "@/lib/mediaHash.vectors.json";
 
 // The file every vector hashes: byte i is i % 251 (vectorContent in media_hash_test.go).
 function vectorFile(name: string, size: number): File {
