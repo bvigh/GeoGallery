@@ -20,6 +20,7 @@ import (
 type mockRows struct {
 	rows [][]any
 	pos  int
+	err  error // returned by Err once the rows are exhausted
 }
 
 func (r *mockRows) Next() bool {
@@ -33,6 +34,13 @@ func (r *mockRows) Scan(dest ...any) error {
 		switch p := d.(type) {
 		case *string:
 			*p = row[i].(string)
+		case **string:
+			if row[i] == nil {
+				*p = nil
+			} else {
+				v := row[i].(string)
+				*p = &v
+			}
 		case *time.Time:
 			*p = row[i].(time.Time)
 		case **float64:
@@ -55,7 +63,7 @@ func (r *mockRows) Scan(dest ...any) error {
 }
 
 func (r *mockRows) Close()                                       {}
-func (r *mockRows) Err() error                                   { return nil }
+func (r *mockRows) Err() error                                   { return r.err }
 func (r *mockRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
 func (r *mockRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
 func (r *mockRows) Values() ([]any, error)                       { return nil, nil }

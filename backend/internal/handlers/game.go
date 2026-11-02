@@ -51,65 +51,18 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	fromDate := q.Get("from_date")
-	toDate := q.Get("to_date")
-	tripIDs := q["trip_id"]
-	mediaTypes := q["media_type"]
-
-	conds := []string{readableMediaCond("", 1), "location IS NOT NULL"}
-	args := []any{auth.MustUser(r.Context()).ID}
-	n := 2
-
-	if fromDate != "" {
-		conds = append(conds, fmt.Sprintf("taken_at >= $%d::date", n))
-		args = append(args, fromDate)
-		n++
-	}
-	if toDate != "" {
-		conds = append(conds, fmt.Sprintf("taken_at < ($%d::date + INTERVAL '1 day')", n))
-		args = append(args, toDate)
-		n++
-	}
-	if len(mediaTypes) > 0 {
-		conds = append(conds, fmt.Sprintf("media_type = ANY($%d)", n))
-		args = append(args, mediaTypes)
-		n++
-	}
-	if len(tripIDs) > 0 {
-		var hasUnassigned bool
-		var uuids []string
-		for _, id := range tripIDs {
-			if id == "unassigned" {
-				hasUnassigned = true
-			} else {
-				uuids = append(uuids, id)
-			}
-		}
-		switch {
-		case hasUnassigned && len(uuids) > 0:
-			conds = append(conds, fmt.Sprintf("(trip_id = ANY($%d) OR trip_id IS NULL)", n))
-			args = append(args, uuids)
-			n++
-		case hasUnassigned:
-			conds = append(conds, "trip_id IS NULL")
-		default:
-			conds = append(conds, fmt.Sprintf("trip_id = ANY($%d)", n))
-			args = append(args, uuids)
-			n++
-		}
-	}
-
-	where := "WHERE " + strings.Join(conds, " AND ")
+	conds, args := buildMediaFilter(q, auth.MustUser(r.Context()).ID)
+	conds = append(conds, "m.location IS NOT NULL")
 	sql := fmt.Sprintf(`
-		SELECT id, media_type, storage_key,
-		       ST_Y(location::geometry), ST_X(location::geometry),
-		       taken_at::text,
-		       initial_yaw, initial_pitch, initial_fov
-		FROM media
-		%s
+		SELECT m.id, m.media_type, m.storage_key,
+		       ST_Y(m.location::geometry), ST_X(m.location::geometry),
+		       m.taken_at::text,
+		       m.initial_yaw, m.initial_pitch, m.initial_fov
+		FROM media m
+		WHERE %s
 		ORDER BY RANDOM()
 		LIMIT 1
-	`, where)
+	`, strings.Join(conds, " AND "))
 
 	var m struct {
 		ID           string   `json:"id"`
@@ -159,6 +112,7 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// computeMaxDistKm reuses NewRound's conds and args, so it expects media aliased as m.
 func (h *GameHandler) computeMaxDistKm(ctx context.Context, conds []string, args []any) (float64, error) {
 	// ST_LongestLine finds the two farthest points (degree-space, fast via convex hull).
 	// Casting the resulting linestring to geography gives geodesic length in meters.
@@ -166,13 +120,13 @@ func (h *GameHandler) computeMaxDistKm(ctx context.Context, conds []string, args
 		SELECT COALESCE(
 			ST_Length(
 				ST_LongestLine(
-					ST_Collect(location::geometry),
-					ST_Collect(location::geometry)
+					ST_Collect(m.location::geometry),
+					ST_Collect(m.location::geometry)
 				)::geography
 			) / 1000.0,
 			0
 		)
-		FROM media
+		FROM media m
 		WHERE %s
 	`, strings.Join(conds, " AND "))
 	var maxDist float64
@@ -223,9 +177,9 @@ func (h *GameHandler) SubmitGuess(w http.ResponseWriter, r *http.Request) {
 		GpsConfidence float64
 	}
 	err := h.db.QueryRow(r.Context(), `
-		SELECT ST_Y(location::geometry), ST_X(location::geometry), taken_at::text,
-		       COALESCE(gps_confidence, 1.0)
-		FROM media WHERE id=$1 AND `+readableMediaCond("", 2)+`
+		SELECT ST_Y(m.location::geometry), ST_X(m.location::geometry), m.taken_at::text,
+		       COALESCE(m.gps_confidence, 1.0)
+		FROM media m WHERE m.id=$1 AND `+readableMediaCond("m", 2)+`
 	`, mediaID, auth.MustUser(r.Context()).ID).Scan(&actual.Lat, &actual.Lng, &actual.TakenAt, &actual.GpsConfidence)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "media not found", http.StatusNotFound)

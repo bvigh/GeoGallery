@@ -1,8 +1,8 @@
-import { useState, useRef } from "react";
+import { useEffect, useId, useState, useRef } from "react";
 import { Upload } from "lucide-react";
-import { api } from "@/api/client";
+import { api, ApiError } from "@/api/client";
 import { MAX_FILE_BYTES, planUploadBatches } from "@/lib/uploadBatches";
-import type { GpsImportResult } from "@/types";
+import type { Album, GpsImportResult } from "@/types";
 
 const GiB = 1024 ** 3;
 
@@ -10,10 +10,17 @@ interface UploadResult {
   uploaded: string[];
   skipped: string[];
   failed: string[];
+  // Set when the upload went into an album: how many files the album gained,
+  // new uploads and duplicates already in the library alike.
+  album?: { name: string; added: number };
 }
 
 function plural(n: number) {
   return `${n} file${n !== 1 ? "s" : ""}`;
+}
+
+function albumGoneMessage(name: string) {
+  return `Could not upload into "${name}": the album no longer exists, or you are no longer a member`;
 }
 
 // Older backends omit `skipped` and leave duplicates out of the response, so a sent file
@@ -58,6 +65,21 @@ export function UploadPage() {
   const [importing, setImporting] = useState(false);
   const [gpsResult, setGpsResult] = useState<GpsImportResult | null>(null);
   const [gpsError, setGpsError] = useState<string | null>(null);
+  const [albums, setAlbums] = useState<Album[]>([]);
+  const [albumsFailed, setAlbumsFailed] = useState(false);
+  // "" uploads into no album.
+  const [albumId, setAlbumId] = useState("");
+  const albumSelectId = useId();
+
+  useEffect(() => {
+    api
+      .listAlbums()
+      .then(setAlbums)
+      .catch((e) => {
+        console.error(e);
+        setAlbumsFailed(true);
+      });
+  }, []);
 
   const handleGpsImport = async (file: File | undefined) => {
     if (!file) return;
@@ -74,11 +96,37 @@ export function UploadPage() {
     }
   };
 
+  // Reloads the album list and says whether the album is still in it (null: unknown).
+  // An album that is gone drops out of the select, which goes back to None.
+  const albumStillListed = async (id: string): Promise<boolean | null> => {
+    let list: Album[];
+    try {
+      list = await api.listAlbums();
+    } catch (e) {
+      console.error("Failed to reload albums:", e);
+      return null;
+    }
+    setAlbums(list);
+    const listed = list.some((a) => a.id === id);
+    if (!listed) setAlbumId((cur) => (cur === id ? "" : cur));
+    return listed;
+  };
+
   const handleUpload = async () => {
     if (!files || files.length === 0) return;
     setUploading(true);
     setError(null);
     setResult(null);
+    const album = albums.find((a) => a.id === albumId);
+    let albumAdded = 0;
+
+    // The album list may be stale: the album was deleted, or the caller removed or left.
+    // Find out before sending gigabytes the backend would refuse batch after batch.
+    if (album && (await albumStillListed(album.id)) === false) {
+      setError(albumGoneMessage(album.name));
+      setUploading(false);
+      return;
+    }
 
     // One request for everything would exceed the 4 GiB request limit (413), so send batches.
     const { batches, tooLarge } = planUploadBatches(Array.from(files));
@@ -98,17 +146,37 @@ export function UploadPage() {
         form.append("file_mtime", String(file.lastModified)); // ms since epoch
       }
       try {
-        const data = await api.upload(form);
+        // Every batch is its own request, so each one names the album.
+        const data = await api.upload(form, album?.id);
+        albumAdded += data.album_added ?? 0;
         uploaded.push(...(data.uploaded ?? []));
         skipped.push(...(data.skipped ?? unreported(batch, data.uploaded, data.failed)));
         failedNames.push(...(data.failed ?? []));
       } catch (e: unknown) {
-        errors.push(e instanceof Error ? e.message : "Upload failed");
         failedNames.push(...batch.map((f) => f.name));
+        // The backend answers 404 for an album the caller cannot add to, before reading the files.
+        // Without a buffering proxy it then closes the connection mid-body, which the browser
+        // reports as a network error (or the dev proxy as a 5xx), so ask the album list too.
+        const is404 = e instanceof ApiError && e.status === 404;
+        if (album) {
+          const listed = await albumStillListed(album.id);
+          if (is404 || listed === false) {
+            // Every further batch would be refused the same way: do not send them.
+            errors.push(albumGoneMessage(album.name));
+            failedNames.push(...batches.slice(i + 1).flatMap((b) => b.map((f) => f.name)));
+            break;
+          }
+        }
+        errors.push(e instanceof Error ? e.message : "Upload failed");
       }
     }
 
-    setResult({ uploaded, skipped, failed: failedNames });
+    setResult({
+      uploaded,
+      skipped,
+      failed: failedNames,
+      album: album && { name: album.name, added: albumAdded },
+    });
     setError(errors.length > 0 ? [...new Set(errors)].join("; ") : null);
     setProgress(null);
     setUploading(false);
@@ -140,6 +208,27 @@ export function UploadPage() {
           />
         </div>
 
+        <div className="mt-4 flex items-center gap-2 text-sm">
+          <label htmlFor={albumSelectId} className="font-medium">
+            Add to album
+          </label>
+          <select
+            id={albumSelectId}
+            value={albumId}
+            onChange={(e) => setAlbumId(e.target.value)}
+            disabled={uploading}
+            className="min-w-0 flex-1 rounded-md border bg-background px-2 py-1 disabled:opacity-50"
+          >
+            <option value="">None</option>
+            {albums.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.is_owner ? a.name : `${a.name} (by ${a.owner_name ?? "another user"})`}
+              </option>
+            ))}
+          </select>
+        </div>
+        {albumsFailed && <p className="mt-1 text-sm text-red-500">Could not load albums</p>}
+
         {files && files.length > 0 && (
           <div className="mt-4">
             <p className="mb-2 text-sm text-muted-foreground">
@@ -162,6 +251,11 @@ export function UploadPage() {
               Uploaded {plural(result.uploaded.length)}, skipped {result.skipped.length}, failed{" "}
               {result.failed.length}
             </p>
+            {result.album && (
+              <p className="mt-1 text-sm font-medium">
+                Added {plural(result.album.added)} to "{result.album.name}"
+              </p>
+            )}
             <ResultList title={`Uploaded ${plural(result.uploaded.length)}`} names={result.uploaded} />
             <ResultList
               title={`${plural(result.skipped.length)} skipped (already in your library)`}

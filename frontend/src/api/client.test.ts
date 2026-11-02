@@ -105,6 +105,183 @@ describe("api client", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("/api/tokens");
   });
 
+  it("upload() sends album_id as a query param when given", async () => {
+    fetchMock.mockResolvedValue(response(200, { uploaded: ["a.jpg"], skipped: ["b.jpg"], album_added: 2 }));
+    const form = new FormData();
+    await expect(api.upload(form, "a1")).resolves.toEqual({ uploaded: ["a.jpg"], skipped: ["b.jpg"], album_added: 2 });
+    expect(fetchMock).toHaveBeenCalledWith("/api/media/upload?album_id=a1", { method: "POST", body: form });
+  });
+
+  it("upload() rejects with the status when the album is not found", async () => {
+    fetchMock.mockResolvedValue(response(404));
+    await expect(api.upload(new FormData(), "a1")).rejects.toMatchObject({ status: 404 });
+  });
+
+  describe("albums", () => {
+    const sampleAlbum = { id: "a1", name: "Iceland", owner_id: "u1", is_owner: true };
+    const noBody = () => ({ status: 204, ok: true, json: async () => { throw new Error("no body"); } });
+
+    it.each([
+      {
+        name: "listAlbums()",
+        call: () => api.listAlbums(),
+        reply: response(200, [sampleAlbum]),
+        url: "/api/albums",
+        method: undefined,
+        body: undefined,
+        want: [sampleAlbum],
+      },
+      {
+        name: "createAlbum()",
+        call: () => api.createAlbum("Iceland"),
+        reply: response(201, sampleAlbum),
+        url: "/api/albums",
+        method: "POST",
+        body: { name: "Iceland" },
+        want: sampleAlbum,
+      },
+      {
+        name: "renameAlbum() accepts a 204",
+        call: () => api.renameAlbum("a1", "Iceland 2025"),
+        reply: noBody(),
+        url: "/api/albums/a1",
+        method: "PATCH",
+        body: { name: "Iceland 2025" },
+        want: undefined,
+      },
+      {
+        name: "deleteAlbum()",
+        call: () => api.deleteAlbum("a1"),
+        reply: noBody(),
+        url: "/api/albums/a1",
+        method: "DELETE",
+        body: undefined,
+        want: undefined,
+      },
+      {
+        name: "listAlbumMembers()",
+        call: () => api.listAlbumMembers("a1"),
+        reply: response(200, [{ user_id: "u1", is_owner: true }]),
+        url: "/api/albums/a1/members",
+        method: undefined,
+        body: undefined,
+        want: [{ user_id: "u1", is_owner: true }],
+      },
+      {
+        name: "addAlbumMember() sends user_id",
+        call: () => api.addAlbumMember("a1", "u2"),
+        reply: noBody(),
+        url: "/api/albums/a1/members",
+        method: "POST",
+        body: { user_id: "u2" },
+        want: undefined,
+      },
+      {
+        name: "removeAlbumMember()",
+        call: () => api.removeAlbumMember("a1", "u2"),
+        reply: noBody(),
+        url: "/api/albums/a1/members/u2",
+        method: "DELETE",
+        body: undefined,
+        want: undefined,
+      },
+      {
+        name: "addToAlbum() with media ids",
+        call: () => api.addToAlbum("a1", { mediaIds: ["m1", "m2"] }),
+        reply: response(200, { added: 2 }),
+        url: "/api/albums/a1/media",
+        method: "POST",
+        body: { media_ids: ["m1", "m2"] },
+        want: { added: 2 },
+      },
+      {
+        name: "addToAlbum() with a trip",
+        call: () => api.addToAlbum("a1", { tripId: "t1" }),
+        reply: response(200, { added: 7 }),
+        url: "/api/albums/a1/media",
+        method: "POST",
+        body: { trip_id: "t1" },
+        want: { added: 7 },
+      },
+      {
+        name: "removeFromAlbum() with media ids",
+        call: () => api.removeFromAlbum("a1", { mediaIds: ["m1"] }),
+        reply: response(200, { removed: 1 }),
+        url: "/api/albums/a1/media/remove",
+        method: "POST",
+        body: { media_ids: ["m1"] },
+        want: { removed: 1 },
+      },
+      {
+        name: "removeFromAlbum() with a trip",
+        call: () => api.removeFromAlbum("a1", { tripId: "t1" }),
+        reply: response(200, { removed: 3 }),
+        url: "/api/albums/a1/media/remove",
+        method: "POST",
+        body: { trip_id: "t1" },
+        want: { removed: 3 },
+      },
+      {
+        name: "mediaAlbums()",
+        call: () => api.mediaAlbums("m1"),
+        reply: response(200, [{ id: "a1", name: "Iceland" }]),
+        url: "/api/media/m1/albums",
+        method: undefined,
+        body: undefined,
+        want: [{ id: "a1", name: "Iceland" }],
+      },
+      {
+        name: "listUsers()",
+        call: () => api.listUsers(),
+        reply: response(200, [{ id: "u2", display_name: "Bob", email: null }]),
+        url: "/api/users",
+        method: undefined,
+        body: undefined,
+        want: [{ id: "u2", display_name: "Bob", email: null }],
+      },
+    ])("$name", async ({ call, reply, url, method, body, want }) => {
+      fetchMock.mockResolvedValue(reply);
+      await expect(call()).resolves.toEqual(want);
+      const [gotUrl, init] = fetchMock.mock.calls[0];
+      expect(gotUrl).toBe(url);
+      expect(init.method).toBe(method);
+      if (body === undefined) {
+        expect(init.body).toBeUndefined();
+      } else {
+        expect(init.headers).toEqual({ "Content-Type": "application/json" });
+        expect(JSON.parse(init.body)).toEqual(body);
+      }
+    });
+
+    it.each([
+      { name: "listAlbums()", call: () => api.listAlbums() },
+      { name: "listAlbumMembers()", call: () => api.listAlbumMembers("a1") },
+      { name: "mediaAlbums()", call: () => api.mediaAlbums("m1") },
+      { name: "listUsers()", call: () => api.listUsers() },
+    ])("$name turns a null list into []", async ({ call }) => {
+      fetchMock.mockResolvedValue(response(200, null));
+      await expect(call()).resolves.toEqual([]);
+    });
+
+    it.each([
+      { name: "renameAlbum() as a member", call: () => api.renameAlbum("a1", "x"), status: 403, message: "PATCH /albums/a1 failed: 403" },
+      { name: "addAlbumMember() for an unknown user", call: () => api.addAlbumMember("a1", "u9"), status: 404, message: "POST /albums/a1/members failed: 404" },
+      { name: "removeAlbumMember() for the owner", call: () => api.removeAlbumMember("a1", "u1"), status: 400, message: "DELETE /albums/a1/members/u1 failed: 400" },
+      { name: "removeFromAlbum() for a foreign item", call: () => api.removeFromAlbum("a1", { mediaIds: ["m9"] }), status: 403, message: "POST /albums/a1/media/remove failed: 403" },
+      { name: "deleteAlbum() for a non-member", call: () => api.deleteAlbum("a9"), status: 404, message: "DELETE /albums/a9 failed: 404" },
+    ])("$name rejects with the status", async ({ call, status, message }) => {
+      fetchMock.mockResolvedValue(response(status));
+      await expect(call()).rejects.toMatchObject({ status, message });
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it("redirects to login on 401", async () => {
+      fetchMock.mockResolvedValue(response(401));
+      await expect(api.addToAlbum("a1", { tripId: "t1" })).rejects.toBeInstanceOf(ApiError);
+      expect(assign).toHaveBeenCalledWith("/api/auth/login?return_to=" + encodeURIComponent("/trips?x=1"));
+    });
+  });
+
   it("revokeToken() sends DELETE and rejects on failure", async () => {
     fetchMock.mockResolvedValueOnce({ status: 204, ok: true, json: async () => { throw new Error("no body"); } });
     await expect(api.revokeToken("t1")).resolves.toBeUndefined();

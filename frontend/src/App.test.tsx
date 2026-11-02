@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { api } from "@/api/client";
@@ -9,6 +9,7 @@ vi.mock("@/api/client", () => ({
 }));
 vi.mock("@/pages/MapPage", () => ({ MapPage: () => null }));
 vi.mock("@/pages/TripsPage", () => ({ TripsPage: () => null }));
+vi.mock("@/pages/AlbumsPage", () => ({ AlbumsPage: () => <div data-testid="albums-page" /> }));
 vi.mock("@/pages/GamePage", () => ({ GamePage: () => null }));
 vi.mock("@/pages/UploadPage", () => ({ UploadPage: () => null }));
 vi.mock("@/pages/SettingsPage", () => ({ SettingsPage: () => null }));
@@ -39,5 +40,23 @@ describe("App logout", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Logout" }));
     await waitFor(() => expect(mockApi.logout).toHaveBeenCalledTimes(1));
     expect(screen.queryByText("Logout failed, try again")).not.toBeInTheDocument();
+  });
+});
+
+describe("App tabs", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockApi.me.mockResolvedValue({ id: "u1", email: "a@b.c", display_name: "Alice", role: "user" });
+  });
+
+  it("shows the Albums tab after Trips and opens the Albums page", async () => {
+    render(<App />);
+    const nav = await screen.findByRole("navigation");
+    const labels = within(nav).getAllByRole("button").map((b) => b.textContent);
+    expect(labels).toEqual(["Map", "Trips", "Albums", "Game", "Upload", "Settings"]);
+    expect(screen.queryByTestId("albums-page")).not.toBeInTheDocument();
+
+    await userEvent.click(within(nav).getByRole("button", { name: "Albums" }));
+    expect(screen.getByTestId("albums-page")).toBeInTheDocument();
   });
 });

@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import { MapContainer, TileLayer, Marker, Polyline, useMapEvents, useMap } from "react-leaflet";
-import type { GameRound, GuessResult, OrientationKeyframe, Trip, FilterState } from "@/types";
+import type { Album, GameRound, GuessResult, OrientationKeyframe, Trip, FilterState } from "@/types";
 import { api, ApiError } from "@/api/client";
+import { activeFilterCount, emptyFilters, filterParams } from "@/lib/filters";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import Panorama360 from "@/components/viewer/Panorama360";
@@ -89,40 +90,43 @@ export function GamePage() {
   const [result, setResult] = useState<GuessResult | null>(null);
   const markerRef = useRef<L.Marker | null>(null);
   const [trips, setTrips] = useState<Trip[]>([]);
-  const [filters, setFilters] = useState<FilterState>({ fromDate: "", toDate: "", tripIds: [], mediaTypes: [] });
+  const [albums, setAlbums] = useState<Album[]>([]);
+  const [filters, setFilters] = useState<FilterState>(emptyFilters);
   const [mapHovered, setMapHovered] = useState(false);
   const [mapDragging, setMapDragging] = useState(false);
   const mapMouseLeft = useRef(false);
-  const [noMedia, setNoMedia] = useState(false);
+  // Why there is no round to play, shown above Start Round.
+  const [notice, setNotice] = useState<string | null>(null);
+  const [guessError, setGuessError] = useState<string | null>(null);
 
   useEffect(() => {
     api.get<Trip[]>("/trips").then(setTrips);
+    api.listAlbums().then(setAlbums).catch(() => {});
   }, []);
 
-  const activeCount = [
-    filters.fromDate || filters.toDate,
-    filters.tripIds.length > 0,
-    filters.mediaTypes.length > 0,
-  ].filter(Boolean).length;
+  const activeCount = activeFilterCount(filters);
+
+  const changeFilters = (next: FilterState) => {
+    setFilters(next);
+    // The notice was about the previous filters.
+    setNotice(null);
+  };
 
   const startRound = async () => {
-    const params: Record<string, string | string[]> = {};
-    if (filters.fromDate) params.from_date = filters.fromDate;
-    if (filters.toDate) params.to_date = filters.toDate;
-    if (filters.tripIds.length) params.trip_id = filters.tripIds;
-    if (filters.mediaTypes.length) params.media_type = filters.mediaTypes;
     let r: GameRound;
     try {
-      r = await api.get<GameRound>("/game/round", params);
+      r = await api.get<GameRound>("/game/round", filterParams(filters));
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) {
-        setNoMedia(true);
+        // With filters set, a 404 only says that nothing matches them.
+        setNotice(activeCount > 0 ? "No geolocated media match these filters" : "No geolocated media yet");
         setState("idle");
         return;
       }
       throw e;
     }
-    setNoMedia(false);
+    setNotice(null);
+    setGuessError(null);
     setRound(r);
     setGuess(null);
     setGuessDate("");
@@ -137,13 +141,29 @@ export function GamePage() {
 
   const submitGuess = async () => {
     if (!round || !guess) return;
-    const res = await api.post<GuessResult>("/game/guess", {
-      media_id: round.id,
-      guess_lat: guess.lat,
-      guess_lng: guess.lng,
-      guess_date: parseDdMmYyyy(guessDate),
-      max_dist_km: round.max_dist_km,
-    });
+    setGuessError(null);
+    let res: GuessResult;
+    try {
+      res = await api.post<GuessResult>("/game/guess", {
+        media_id: round.id,
+        guess_lat: guess.lat,
+        guess_lng: guess.lng,
+        guess_date: parseDdMmYyyy(guessDate),
+        max_dist_km: round.max_dist_km,
+      });
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) {
+        // Deleted by its owner, or no longer shared with the player (album or membership gone).
+        // The presigned URL keeps showing it for a while, so say why the round ends.
+        setNotice("This photo is no longer available");
+        setRound(null);
+        setState("idle");
+        return;
+      }
+      console.error("Failed to submit guess:", e);
+      setGuessError("Could not submit guess");
+      return;
+    }
     setResult(res);
     setState("result");
   };
@@ -154,8 +174,9 @@ export function GamePage() {
         <>
           <FilterPanel
             trips={trips}
+            albums={albums}
             filters={filters}
-            onChange={setFilters}
+            onChange={changeFilters}
             activeCount={activeCount}
           />
           <div className="m-auto text-center">
@@ -164,8 +185,8 @@ export function GamePage() {
               You'll be shown a photo or video from your gallery. Guess where and
               when it was taken.
             </p>
-            {noMedia && (
-              <p className="mb-6 text-sm font-medium">No geolocated media yet</p>
+            {notice && (
+              <p className="mb-6 text-sm font-medium">{notice}</p>
             )}
             <button
               className="rounded-lg bg-primary px-6 py-2 text-primary-foreground font-medium"
@@ -265,6 +286,11 @@ export function GamePage() {
                 Submit
               </button>
             </div>
+            {guessError && (
+              <p role="alert" className="rounded-xl bg-black/70 px-3 py-2 text-sm text-red-300 backdrop-blur-sm">
+                {guessError}
+              </p>
+            )}
           </div>
         </div>
       )}

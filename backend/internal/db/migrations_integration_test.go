@@ -270,3 +270,69 @@ func TestMigration000008_Ownership(t *testing.T) {
 	require.NoError(t, m.Up())
 	assertOwnershipSchema(t, dsn)
 }
+
+var albumTables = []string{"albums", "album_members", "album_media"}
+
+func assertAlbumsSchema(t *testing.T, dsn string) {
+	t.Helper()
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		for _, table := range albumTables {
+			assert.True(t, tableExists(ctx, t, conn, table), "table %s should exist", table)
+		}
+		for _, c := range []struct{ table, name string }{
+			{"media", "media_id_owner_key"},
+			{"album_members", "album_members_pkey"},
+			{"album_media", "album_media_album_id_owner_id_fkey"},
+			{"album_media", "album_media_media_id_owner_id_fkey"},
+		} {
+			assert.True(t, constraintExists(ctx, t, conn, c.table, c.name), "%s.%s", c.table, c.name)
+		}
+
+		var n int
+		require.NoError(t, conn.QueryRow(ctx, `SELECT COUNT(*) FROM media`).Scan(&n))
+		assert.Equal(t, 1, n, "legacy media row survives")
+	})
+}
+
+// seedLegacyAlbum puts the legacy media into an album of the Owner, so the down
+// migration has to drop populated tables.
+func seedLegacyAlbum(t *testing.T, dsn string) {
+	t.Helper()
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		var albumID string
+		require.NoError(t, conn.QueryRow(ctx,
+			`INSERT INTO albums (owner_id, name) VALUES ($1, 'Family') RETURNING id`, legacyOwnerID,
+		).Scan(&albumID))
+		_, err := conn.Exec(ctx, `INSERT INTO album_members (album_id, user_id) VALUES ($1, $2)`, albumID, legacyOwnerID)
+		require.NoError(t, err)
+		tag, err := conn.Exec(ctx, `
+			INSERT INTO album_media (album_id, media_id, owner_id) SELECT $1, id, owner_id FROM media`, albumID)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), tag.RowsAffected())
+	})
+}
+
+func TestMigration000009_Albums(t *testing.T) {
+	dsn := testdb.NewEmpty(t)
+	m := newMigrator(t, dsn)
+
+	migrateTo(t, m, 6)
+	seedLegacyData(t, dsn)
+	migrateTo(t, m, 8)
+
+	migrateTo(t, m, 9)
+	assertAlbumsSchema(t, dsn)
+	seedLegacyAlbum(t, dsn)
+
+	migrateTo(t, m, 8)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		for _, table := range albumTables {
+			assert.False(t, tableExists(ctx, t, conn, table), "table %s should be dropped by down migration", table)
+		}
+		assert.False(t, constraintExists(ctx, t, conn, "media", "media_id_owner_key"))
+	})
+	assertOwnershipSchema(t, dsn)
+
+	migrateTo(t, m, 9)
+	assertAlbumsSchema(t, dsn)
+}

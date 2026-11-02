@@ -1,10 +1,10 @@
 # AGENTS.md — GeoGallery
 
-AI agent context for GeoGallery, a multi-user personal media gallery and GeoGuessr-like game. It has invite-only OIDC login, and every user has a private library.
+AI agent context for GeoGallery, a multi-user personal media gallery and GeoGuessr-like game. It has invite-only OIDC login. Every user has a private library and can share items with other users through albums.
 
 ## Context
 
-Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-compatible) and metadata in PostGIS. A Go backend serves them to a React/Vite frontend. Users sign in through one generic OIDC issuer: Logto Cloud for the hosted instance, Keycloak for dev/E2E. Every media, trip and GPS-track row has an `owner_id`, and every query is scoped to it. Media is ingested by browser upload or by the operator command `server scan --user <id>`. The ingest pipeline extracts EXIF, detects 360° content and resolves GPS coordinates; mistakes here corrupt media metadata permanently. IdP setup: `docs/auth.md`.
+Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-compatible) and metadata in PostGIS. A Go backend serves them to a React/Vite frontend. Users sign in through one generic OIDC issuer: Logto Cloud for the hosted instance, Keycloak for dev/E2E. Every media, trip and GPS-track row has an `owner_id`, and every query is scoped to it. The one exception is media reads: a user can also read items that sit in an album they are a member of (`readableMediaCond`). Sharing is by reference, so media rows are never copied and `owner_id` never changes. Media is ingested by browser upload or by the operator command `server scan --user <id>`. The ingest pipeline extracts EXIF, detects 360° content and resolves GPS coordinates; mistakes here corrupt media metadata permanently. IdP setup: `docs/auth.md`.
 
 ## Key Paths
 
@@ -17,25 +17,32 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `backend/internal/httplog/` | Path-only slog request logger (never logs the query string) |
 | `backend/internal/db/db.go` | pgx pool + golang-migrate runner |
 | `backend/internal/testdb/` | Throwaway PostGIS databases for integration tests (`New`, `NewEmpty`) |
-| `backend/internal/handlers/` | One file per domain: media, trips, game, ingest, gps_tracks, gps_matcher, admin |
-| `backend/internal/handlers/visibility.go` | `readableMediaCond`, the single extension point for media read access |
-| `backend/internal/handlers/register.go` | `MediaRegistrar.registerMedia` — shared ingest path for upload and scan; `newStorageKey` |
+| `backend/internal/handlers/` | One file per domain: media, trips, game, ingest, gps_tracks, gps_matcher, albums, admin |
+| `backend/internal/handlers/visibility.go` | `readableMediaCond`, the single place that encodes media read access (own, or in an album the caller is a member of) |
+| `backend/internal/handlers/filters.go` | `validateMediaFilters` + `buildMediaFilter`, the filters shared by `/api/media` and `/api/game/round` (dates, media types, trips, albums, owner) |
+| `backend/internal/handlers/albums.go` | `AlbumHandler`: albums, members, album media, `GET /api/media/{id}/albums`, the `GET /api/users` directory; `authorize` (non-member 404, member on an owner-only action 403) |
+| `backend/internal/handlers/register.go` | `MediaRegistrar.registerMedia` — shared ingest path for upload and scan, returns `(mediaID, inserted, err)`; `newStorageKey` |
 | `backend/internal/handlers/ingest.go` | `RunIngestScan` + `NewIngestDeps` (called by `server scan`; no HTTP route) |
 | `backend/internal/handlers/gps_matcher.go` | `RunGPSMatcher` — interpolates GPS from the owner's `gps_tracks` into `media.location` |
 | `backend/internal/handlers/trip_detect.go` | `RunTripDetect` — groups one owner's media into trips by time gap |
 | `backend/internal/ingest/exif.go` | EXIF extraction + 360° detection + `DetectMediaType` |
 | `backend/internal/geo/gps.go` | GPS interpolation (Haversine + confidence scoring) |
 | `backend/internal/storage/s3.go` | S3/MinIO client wrapper (presigned GETs, 15 min) |
-| `backend/migrations/` | golang-migrate SQL, numbered `000001_…` |
+| `backend/migrations/` | golang-migrate SQL, numbered `000001_…`; `000009_albums` adds `albums`, `album_members`, `album_media` and `media_id_owner_key` |
 | `deploy/keycloak/geogallery-realm.json` | Dev/E2E Keycloak realm (client + test users alice/bob/carol, self-registration on). Dev only |
 | `docs/auth.md` | Identity provider setup (Logto, other providers, production Keycloak), API tokens, port hardening |
+| `docs/sharing-albums.md` | Sharing/albums design: decisions, invariants, schema, routes; "Implementation notes" lists where the code differs |
 | `frontend/src/api/client.ts` | Typed fetch wrapper — all backend calls go here; a 401 redirects to login |
 | `frontend/src/types/index.ts` | Canonical TypeScript types shared across the app |
 | `frontend/src/components/auth/` | `AuthGate`, `LoginScreen`, `AuthContext` |
 | `frontend/src/components/map/` | Leaflet map components |
 | `frontend/src/components/viewer/` | `Panorama360.tsx`, `Video360.tsx` — 360° media viewers |
-| `frontend/src/pages/` | One file per tab: MapPage, TripsPage, GamePage, UploadPage, SettingsPage (API tokens), AdminPage (users, invites) |
-| `frontend/e2e/` | Playwright suite: `playwright.config.ts`, `support.ts` (`E2E_BACKEND_ENV`), `auth.setup.ts`, `*.e2e.ts` |
+| `frontend/src/components/albums/` | `AlbumMenu` (the viewer's per-item album checkboxes + "New album…"), `AlbumPickerDialog` (Trips "Add to album…") |
+| `frontend/src/components/MediaGalleryOverlay.tsx` | Full-screen gallery for a title + media query params; shared by the Trips and Albums pages (replaces `TripGalleryOverlay`) |
+| `frontend/src/lib/filters.ts` | `emptyFilters`, `filterParams` (`FilterState` → `/api/media` and `/api/game/round` params), `activeFilterCount` |
+| `frontend/src/lib/errors.ts` | `describeError` — album-aware error text from an `ApiError` status (404 / 403) |
+| `frontend/src/pages/` | One file per tab: MapPage, TripsPage ("Add to album…" per trip), AlbumsPage (album cards, members dialog with picker and leave, gallery), GamePage, UploadPage (optional "Add to album" select), SettingsPage (API tokens), AdminPage (users, invites) |
+| `frontend/e2e/` | Playwright suite: `playwright.config.ts`, `support.ts` (`E2E_BACKEND_ENV`), `auth.setup.ts`, `*.e2e.ts`; `sharing.e2e.ts` runs in its own `sharing` project after all others |
 | `scripts/e2e-reset-db.sh` | Drops and recreates `geogallery_e2e` via `docker compose exec db` |
 | `ingest/` | Drop media here, then run `server scan --user <id>` |
 
@@ -76,7 +83,7 @@ Auth column:
 - **session-only:** a session cookie; API tokens get 403.
 - **admin:** session-only, and the user must be an admin.
 
-`http.CrossOriginProtection` runs on all of `/api`. A non-owned resource returns 404.
+`http.CrossOriginProtection` runs on all of `/api`. A non-owned resource returns 404. Media in an album the caller is a member of is **readable** (list, `/url`, keyframes GET, game), but every media write stays owner-only and returns 404 on shared media. Album routes return 404 to a non-member and 403 to a member attempting an owner-only action. A malformed UUID in an album path → 404; in an album request body (`user_id`, `media_ids`, `trip_id`) → 400. Body checks run before the membership check, so a bad body is 400 even for a non-member.
 
 | Method | Path | Auth | Handler |
 |---|---|---|---|
@@ -85,24 +92,35 @@ Auth column:
 | `GET` | `/api/auth/callback` | public | OIDC callback. Creates the session or redirects to `/?auth_error=not_invited\|invite_invalid\|disabled` |
 | `POST` | `/api/auth/logout` | public | Delete session, clear cookie, `{"redirect_url": end_session URL with id_token_hint, or "/"}` |
 | `GET` | `/api/auth/me` | user | `{id, email, display_name, role}` |
-| `GET` | `/api/media` | user | List the caller's media (max 500, `offset`, ordered by `taken_at DESC`); supports `from_date`, `to_date`, `trip_id[]` (incl. `unassigned`), `media_type[]` filters; 400 on a malformed date or `trip_id` |
-| `POST` | `/api/media/upload` | user | Multipart upload (field: `files[]`, `file_mtime[]` ms-since-epoch); body limit 4 GiB; returns `{uploaded, skipped, failed}` filename lists (`skipped` = per-owner duplicates) |
-| `GET` | `/api/media/{id}/url` | user | Get presigned URL for a media item |
-| `PATCH` | `/api/media/{id}/location` | user | Manual location `{lat, lng}`: sets `gps_source='manual'`; if `taken_at` is known, also upserts a `manual` GPS track point and re-runs the matcher; 404 if not owned |
-| `PATCH` | `/api/media/{id}/view-settings` | user | Update 360° default view (`initial_yaw`, `initial_pitch`, `initial_fov`); 404 if not owned |
-| `GET` | `/api/media/{id}/keyframes` | user | Get video orientation keyframes (`[]` for missing or non-owned IDs) |
-| `PUT` | `/api/media/{id}/keyframes` | user | Replace all keyframes for a video |
-| `DELETE` | `/api/media/{id}` | session-only | Delete media from DB and MinIO (keyframes cascade); S3 delete is best-effort, logged on failure |
+| `GET` | `/api/media` | user | List the media the caller can read: their own plus items in albums they are a member of (max 500, `offset`, ordered by `taken_at DESC NULLS LAST, id`). Filters: `from_date`, `to_date`, `media_type[]`, `trip_id[]` (incl. `unassigned`; matches only the caller's own media), `album_id[]` (only albums the caller is a member of; a foreign ID matches nothing), `owner=mine\|shared` (default: everything readable). Ticked trips and albums are ORed together, then ANDed with the rest. Rows carry `owner_id` and `owner_name` (display name, else email); `trip_id` is `null` on rows the caller does not own. 400 on a malformed date, `trip_id`, `album_id` or `owner` |
+| `POST` | `/api/media/upload` | user | Multipart upload (field: `files[]`, `file_mtime[]` ms-since-epoch); body limit 4 GiB; returns `{uploaded, skipped, failed}` filename lists (`skipped` = per-owner duplicates). Optional query param `?album_id=<uuid>`: a malformed ID or a non-member gets 404 **before** the body is read; new files **and** duplicates are added to the album after the matcher and trip detection, and the response gains `album_added` (rows newly added; present only with `album_id`) |
+| `GET` | `/api/media/{id}/url` | user | Get presigned URL for a readable media item (own or shared through an album); 404 otherwise |
+| `PATCH` | `/api/media/{id}/location` | user | Manual location `{lat, lng}`: sets `gps_source='manual'`; if `taken_at` is known, also upserts a `manual` GPS track point and re-runs the matcher; 404 if not owned (shared media included) |
+| `PATCH` | `/api/media/{id}/view-settings` | user | Update 360° default view (`initial_yaw`, `initial_pitch`, `initial_fov`); 404 if not owned (shared media included) |
+| `GET` | `/api/media/{id}/keyframes` | user | Get video orientation keyframes of a readable item (`[]` for missing or unreadable IDs) |
+| `PUT` | `/api/media/{id}/keyframes` | user | Replace all keyframes for a video; owner only, 404 on shared media |
+| `GET` | `/api/media/{id}/albums` | user | `[{id, name}]`: albums the caller is a member of that contain this item; `[]` for an unreadable or malformed ID (feeds the viewer's album menu) |
+| `DELETE` | `/api/media/{id}` | session-only | Delete media from DB and MinIO (keyframes and album contributions cascade, so it disappears for every album member); owner only, 404 on shared media; S3 delete is best-effort, logged on failure |
 | `GET` | `/api/trips` | user | List the caller's trips with media count + cover key (`[]` when none) |
 | `PATCH` | `/api/trips/{id}` | user | Edit a trip (`{"name"?, "start_date"?, "end_date"?}`, at least one) — sets `user_edited = true` |
 | `DELETE` | `/api/trips/{id}` | session-only | Delete a trip (only `user_edited = true` trips); unassigns media for re-detection |
-| `GET` | `/api/game/round` | user | Random geolocated media of the caller; supports same filters as `/api/media`; 404 when none, 400 on malformed filters |
-| `POST` | `/api/game/guess` | user | Submit a guess, returns scores |
+| `GET` | `/api/albums` | user | Albums the caller is a member of: `[{id, name, owner_id, owner_name, is_owner, member_count, media_count, start_date, end_date, created_at}]` (dates = min/max `taken_at`, `null` without dated media), newest first |
+| `POST` | `/api/albums` | user | `{"name"}` (trimmed, 1–200 chars) → 201 album; inserts the album and the owner's member row in one transaction |
+| `PATCH` | `/api/albums/{id}` | user | Rename `{"name"}` → 204; owner only (member 403, non-member 404) |
+| `DELETE` | `/api/albums/{id}` | session-only | Delete the album → 204; owner only; members and contributions cascade, the media themselves stay |
+| `GET` | `/api/albums/{id}/members` | user | Member only: `[{user_id, display_name, email, is_owner, added_at}]`, owner first |
+| `POST` | `/api/albums/{id}/members` | session-only | Owner only: `{"user_id"}` → 204, idempotent; the target must be an active, claimed user (else 404) |
+| `DELETE` | `/api/albums/{id}/members/{user_id}` | session-only | The owner removes another member, or a member removes themselves (leave) → 204. The owner removing themselves → 400; a member removing someone else → 403; a target who is not a member → 404. The cascade removes that member's contributions |
+| `POST` | `/api/albums/{id}/media` | user | Member only: exactly one of `{"media_ids": [...]}` (1–5000) or `{"trip_id"}` (a one-time snapshot of the caller's own trip; a foreign trip → 404), else 400 → `{"added": n}`. Only the caller's own media are added; other IDs and items already in the album are skipped silently (no re-sharing) |
+| `POST` | `/api/albums/{id}/media/remove` | user | Same body (a `trip_id` resolves only to the caller's own trip) → `{"removed": n}`; the media stay. The owner may remove any item; a member only their own (a request naming someone else's item → 403 for the whole request) |
+| `GET` | `/api/game/round` | user | Random geolocated readable media (own + shared); supports the same filters as `/api/media`, including `album_id[]` and `owner`; `max_dist_km` spans the same filtered set; 404 when none, 400 on malformed filters |
+| `POST` | `/api/game/guess` | user | Submit a guess on a readable item, returns scores; 404 if the item is no longer readable |
 | `POST` | `/api/gps-tracks/import` | user | Bulk-insert GPS track points (JSON array of `{recorded_at, lat, lng, source, altitude_m?, accuracy_m?, activity?}`, body limit 100 MiB); returns `{inserted, skipped, errors}`; runs GPS matcher after insert |
 | `POST` | `/api/gps-matcher/run` | user | Re-run GPS matcher over the caller's media that has no EXIF or manual location (including previously interpolated rows) |
 | `GET` | `/api/tokens` | session-only | List the caller's API tokens (never hash or plaintext) |
 | `POST` | `/api/tokens` | session-only | `{"name", "expires_in_days"?: 1–365, default 90}` → 201 with plaintext `token` once; max 25 active (409) |
 | `DELETE` | `/api/tokens/{id}` | session-only | Revoke (soft delete); 404 for non-UUID, foreign or already revoked |
+| `GET` | `/api/users` | session-only | User directory for the album member picker: `[{id, display_name, email}]` of active, claimed users (`issuer IS NOT NULL AND disabled_at IS NULL`) |
 | `GET` | `/api/admin/users` | admin | List users |
 | `PATCH` | `/api/admin/users/{id}` | admin | `{"disabled": bool}` only; disabling deletes sessions and revokes tokens and the user's unused invites; self-disable → 400 |
 | `POST` | `/api/admin/invites` | admin | `{"role": "user"\|"admin"}` → 201 `{"url": "..."}` (72 h; never a claim invite) |
@@ -114,22 +132,27 @@ There is no HTTP ingest route. Folder scans are `server scan --user <id>` only.
 - Handler structs hold deps (`*pgxpool.Pool`, `*storage.Client`). Construct with `New*Handler(...)`.
 - New routes: register in `newRouter` in `main.go`, inside `r.Route("/api", ...)`. Put them in the right group: the `RequireUser` group by default, or the nested `RequireSession` group for anything irreversible or security-sensitive, with `RequireAdmin` nested inside for admin routes.
 - **Owner scoping.** Every handler behind `RequireUser` gets the caller with `auth.MustUser(r.Context())`. It panics if the route is not behind the middleware, and `Recoverer` turns that into a loud 500 instead of an unscoped query.
-  - Every SQL read and write filters on the owner, and every insert writes `owner_id`.
-  - A resource the caller does not own returns **404, never 403**.
-  - Media **reads** use `readableMediaCond(alias, n)` from `visibility.go`, the extension point for future sharing. Write paths keep a literal `owner_id = $n`.
+  - Every SQL read and write filters on the owner, and every insert writes `owner_id`. The exceptions are media reads and album routes, which are scoped by album membership instead (next bullets).
+  - A resource the caller does not own returns **404, never 403**. Albums refine this: a non-member gets 404 on everything album-scoped, and a member attempting an owner-only action (rename, delete, manage members, remove someone else's item) gets **403**, because they can see the album. `AlbumHandler.authorize` encodes both.
+  - Media **reads** use `readableMediaCond(alias, n)` from `visibility.go`: `(alias.owner_id = $n OR EXISTS (SELECT 1 FROM album_media am JOIN album_members mem ON mem.album_id = am.album_id WHERE am.media_id = alias.id AND mem.user_id = $n))`. It is the single place that encodes read access; never add a second path. The alias is **required** (use `FROM media m` and `"m"`): unqualified, `id`/`owner_id` would resolve to `album_media` columns inside the `EXISTS`. `/api/media` and `/api/game/round` get it through `buildMediaFilter` (`filters.go`), which also builds the shared filters; run `validateMediaFilters` first.
+  - Media **writes** keep a literal `owner_id = $n` and never use `readableMediaCond`: location, view settings, keyframes PUT, delete. A member touching a shared item gets 404.
+  - Trips are personal: trip filters (including `unassigned`) are ANDed with `m.owner_id = $1`, and `trip_id` is returned as `NULL` for media the caller does not own.
+  - Only an item's owner contributes it to an album, and only while a member: album media inserts select `FROM media m WHERE m.owner_id = $me`, and the composite FKs on `album_media` enforce it in the database.
   - `RunGPSMatcher`, `RunTripDetect` and `RunIngestScan` take an `ownerID`. Never match one user's media against another user's tracks.
-- **Auth methods.** `auth.MethodFrom(ctx)` is `MethodSession` (cookie) or `MethodToken` (Bearer `gg_pat_…`). The zero value `MethodNone` never counts as a session. Session-only routes: `DELETE /api/media/{id}`, `DELETE /api/trips/{id}`, `/api/tokens*`, `/api/admin/*`. A `Bearer` header is authoritative; other schemes fall through to the cookie.
+- **GPS stays per owner.** `RunGPSMatcher` (its media query and `bracketingPoints`), `insertExifGPSTrack` and `auto_detect_trips`/`RunTripDetect` keep their literal `owner_id` filters and must **never** use `readableMediaCond`. Media shared with a user through an album are not that user's rows: their matcher must neither write to them nor read their locations as track points, and their trip detection must never assign them. Comments in `gps_matcher.go` and `trip_detect.go` say so; `TestSharing_GPSIsolation` and `TestSharing_TripDetectIgnoresSharedMedia` pin it.
+- **Auth methods.** `auth.MethodFrom(ctx)` is `MethodSession` (cookie) or `MethodToken` (Bearer `gg_pat_…`). The zero value `MethodNone` never counts as a session. Session-only routes: `DELETE /api/media/{id}`, `DELETE /api/trips/{id}`, `DELETE /api/albums/{id}`, `POST /api/albums/{id}/members`, `DELETE /api/albums/{id}/members/{user_id}`, `GET /api/users`, `/api/tokens*`, `/api/admin/*`. Granting or revoking album access and listing users' emails need a session, so an API token can never widen who sees the data. A `Bearer` header is authoritative; other schemes fall through to the cookie.
 - **Secrets in logs.** Never log tokens (session, invite, API), ID tokens, query strings or `Authorization` headers. Invite tokens and OIDC `code`/`state` travel in query strings, which is why the request logger (`internal/httplog`) logs `r.URL.Path` only. Tokens are stored as sha256 hashes.
 - New config values: add to `config.go` with a default that works locally without editing `.env`. `OIDC_ISSUER_URL` is used verbatim; never normalise it.
 - Logging: use `log/slog` (stdlib). `slog.SetDefault` is called in `main.go` — call `slog.Error/Warn/Info/Debug` directly anywhere in the backend. Always log before returning a 500: `slog.Error("context: what failed", "err", err)`. Per-item loops that continue on error must log at Error level, not silently skip.
 - Migrations: `000003_description.up.sql` / `.down.sql` — **never edit existing migration files**.
 - PostGIS geometry: `GEOGRAPHY(POINT, 4326)`, `ST_MakePoint(lng, lat)` (longitude first!), read back with `ST_Y` (lat) and `ST_X` (lng).
 - **S3 keys** for new uploads: `media/{owner_id}/{32 random hex chars}{.ext}`, built by `newStorageKey`. The extension is lowercased and kept only if supported. Never put the filename or a timestamp in a key: presigned URLs expose the key and would leak game hints. The original name stays in `media.filename`. Older objects keep their legacy `media/{unix_nano}/{filename}` keys. Serve via presigned URLs only (15 min) — the bucket is private; never expose raw MinIO URLs to the frontend.
-- Deduplication: `registerMedia` hashes first + last 64 KB of each file (`file_hash`). `ON CONFLICT (owner_id, file_hash) DO NOTHING` — dedup is per owner; re-uploading or re-scanning the same file is always safe.
-- Auto-run order after ingest: `RunGPSMatcher` → `RunTripDetect`, for the ingesting owner. Both are called at the end of scan and upload.
+- Deduplication: `registerMedia` hashes first + last 64 KB of each file (`file_hash`). `ON CONFLICT (owner_id, file_hash) DO NOTHING RETURNING id`; on a duplicate it looks up the existing row's ID and returns `(id, inserted=false, nil)`, so upload can still add duplicates to an album. It deletes the object it just uploaded when the INSERT dedups or certainly stored nothing (best-effort, logged), so duplicates leave no orphan S3 objects. Dedup is per owner (no cross-user dedup: the same file from two users is two items); re-uploading or re-scanning the same file is always safe.
+- Auto-run order after ingest: `RunGPSMatcher` → `RunTripDetect`, for the ingesting owner. Both are called at the end of scan and upload. An upload with `?album_id` then adds the request's new and duplicate media IDs in one `INSERT … SELECT $1, unnest($2::uuid[]), $3 ON CONFLICT DO NOTHING`. If the matcher, trip detection or that insert fails, the request returns 500 and the files stay in the uploader's library without being added to the album.
 - Trip deletion: `DELETE /api/trips/{id}` is only allowed for `user_edited = true` trips. Auto-detected trips are protected; renaming a trip flips it to `user_edited = true`.
-- Media deletion: `DELETE /api/media/{id}` removes the DB row (cascades to `video_keyframes`) then best-effort deletes the S3 object. S3 failure is logged but does not roll back the DB transaction — the DB is the source of truth.
-- New handlers should validate UUID path params with `auth.CanonicalUUID` before querying, so a malformed ID returns 404, not a Postgres 22P02 500. The admin and token routes already do; the media and trips handlers still pass the raw chi param.
+- Albums: the album owner always has an `album_members` row, inserted in the create transaction, and it can never be deleted (the owner cannot leave: 400; they delete the album instead). A disabled user keeps their memberships and contributions, drops out of `GET /api/users` and cannot be added again; albums they own stay readable but unmanageable (no ownership transfer).
+- Media deletion: `DELETE /api/media/{id}` removes the DB row (cascades to `video_keyframes` and `album_media`) then best-effort deletes the S3 object. S3 failure is logged but does not roll back the DB transaction — the DB is the source of truth.
+- New handlers should validate UUID path params with `auth.CanonicalUUID` before querying, so a malformed ID returns 404, not a Postgres 22P02 500. The admin, token and album routes already do (and `buildMediaFilter` binds trip and album IDs in canonical form); the media and trips handlers still pass the raw chi param.
 
 ## Frontend Conventions
 
@@ -137,6 +160,8 @@ There is no HTTP ingest route. Folder scans are `server scan --user <id>` only.
 - The app is wrapped in `AuthGate`. It calls `api.me()`, and renders `LoginScreen` when signed out. Read the current user from `AuthContext`. The Admin tab renders only for `role === "admin"`. This is cosmetic: the backend enforces roles.
 - Never persist an API token client-side. The plaintext lives only in SettingsPage component state and is cleared when the dialog closes.
 - Types shared across pages/components live in `frontend/src/types/index.ts`.
+- Shared media: the UI decides "is mine" by comparing `MediaItem.owner_id` with the `AuthContext` user. A shared item shows "Shared by {owner_name}" and hides delete, edit location and edit view. `AlbumMenu` gives an own item add/remove checkboxes and "New album…", and a shared item only a read-only list of the albums it came through (no re-sharing). This is cosmetic too: the backend returns 404 for writes on shared media.
+- Map and Game filters: `FilterState` (`albumIds`, `owner: "all" | "mine" | "shared"` beside dates, trips and media types) becomes query params only through `filterParams` in `src/lib/filters.ts`. FilterPanel's "Collections" (trips + albums) count as one active filter, and the backend ORs them.
 - Vite dev proxy: `/api` → `process.env.VITE_API_TARGET ?? "http://localhost:8080"` (`vite.config.ts`). Auth relies on same-origin `/api`; the backend sends no CORS headers.
 - Path alias `@` resolves to `src/` — use `@/components/...` not relative paths.
 - shadcn/ui components in `src/components/ui/`. Add new ones with `npx shadcn@latest add <component>`.
@@ -218,22 +243,28 @@ Changing `KEYCLOAK_PORT` or `FRONTEND_PORT` requires matching `redirectUris` / `
 | `trips` | Auto-detected or manually named trip groupings. `owner_id` (NOT NULL), `user_edited` flag: set when user renames; only `user_edited` trips can be deleted. `UNIQUE (id, owner_id)` backs the composite FK. |
 | `gps_tracks` | Raw GPS track points (Google Timeline, Strava, EXIF, manual, etc.). `owner_id` (NOT NULL), `UNIQUE (owner_id, source, recorded_at)`. Indexed on `(owner_id, recorded_at)` and location. |
 | `video_keyframes` | Per-video orientation keyframes (`time_seconds`, `yaw`, `pitch`, `fov`). FK → `media.id` ON DELETE CASCADE. |
+| `albums` | `id`, `owner_id` (the album owner; FK users ON DELETE RESTRICT), `name` (1–200 chars), `created_at`. Indexed on `owner_id`. No ownership transfer. |
+| `album_members` | PK `(album_id, user_id)`; `album_id` → albums ON DELETE CASCADE, `user_id` → users ON DELETE RESTRICT, `added_at`. The album owner has a row too (created with the album, never deleted), so `readableMediaCond` needs a single join. Indexed on `user_id`. |
+| `album_media` | One contribution: PK `(album_id, media_id)`, `owner_id` (the media's owner = the contributor), `added_at`. Indexed on `media_id`. |
 
 - **Composite trip FK:** `media (trip_id, owner_id) → trips (id, owner_id) ON DELETE SET NULL (trip_id)`. The database itself makes it impossible for media to sit in another owner's trip.
+- **Album FKs (migration 9):** `media_id_owner_key UNIQUE (id, owner_id)` on `media` backs two composite FKs on `album_media`:
+  - `(album_id, owner_id) → album_members (album_id, user_id) ON DELETE CASCADE`: only members contribute, and leaving or removal takes that member's contributions with them.
+  - `(media_id, owner_id) → media (id, owner_id) ON DELETE CASCADE`: only the media owner can contribute an item (no re-sharing), and deleting the media removes it from every album.
+  - Deleting an album cascades its members and contributions; the media rows are never touched.
 - **Trip detection** is the SQL function `auto_detect_trips(p_owner UUID, gap_hours INT)`. It only touches that owner's auto trips.
 - Users are never deleted, only disabled (`ON DELETE RESTRICT` on owned data).
-- GPS resolution priority: EXIF → timestamp-interpolated from the owner's `gps_tracks` → null.
+- GPS resolution priority: EXIF → timestamp-interpolated from the owner's `gps_tracks` → null. Never from another user's tracks or shared media.
 
 ## Unimplemented Work (in priority order)
 
-1. **Sharing and albums** — the next plan. Intended shape: a `shares(resource_type, resource_id, grantee_user_id, permission)` table or album membership. `readableMediaCond` becomes `owner_id = $n OR EXISTS (…)`, and write paths stay owner-only.
-2. **360° media rendering improvements** — currently renders via Pannellum/Photo Sphere Viewer. The view-settings and keyframe editors exist in the backend; the frontend 360° viewer components exist but the editor UI is not wired up end-to-end.
-3. **Pagination** — `GET /api/media` currently hard-limited to 500 rows. Add `?page=`/`?limit=` with cursor-based pagination.
-4. **Map clustering** — add `react-leaflet-cluster` or Supercluster when library grows large.
-5. **Filename-based timestamp guessing** — parse common filename patterns (e.g. `20230729_210400.jpg`) as `taken_at` fallback after file mtime.
-6. **XMP 360° detection** — parse `XMP-GPano:ProjectionType = equirectangular` for reliable 360° detection without depending on filename or aspect ratio.
+1. **360° media rendering improvements** — currently renders via Pannellum/Photo Sphere Viewer. The view-settings and keyframe editors exist in the backend; the frontend 360° viewer components exist but the editor UI is not wired up end-to-end.
+2. **Pagination** — `GET /api/media` currently hard-limited to 500 rows. Add `?page=`/`?limit=` with cursor-based pagination. More pressing now that shared albums add to the volume. If the `OR EXISTS` in `readableMediaCond` makes the list slow, split it into `UNION ALL` (own ∪ shared).
+3. **Map clustering** — add `react-leaflet-cluster` or Supercluster when library grows large.
+4. **Filename-based timestamp guessing** — parse common filename patterns (e.g. `20230729_210400.jpg`) as `taken_at` fallback after file mtime.
+5. **XMP 360° detection** — parse `XMP-GPano:ProjectionType = equirectangular` for reliable 360° detection without depending on filename or aspect ratio.
 
-Also out of scope so far: API token scopes, user deletion/export, multi-issuer login, re-link invites after a `sub`-changing provider migration, and CI.
+Also out of scope so far: API token scopes, user deletion/export, multi-issuer login, re-link invites after a `sub`-changing provider migration, and CI. For sharing (design: `docs/sharing-albums.md`): direct per-user shares, viewer-only roles, live trip→album links, album invite links, ownership transfer, public links, album cover picking, `server scan --album` and cross-user dedup.
 
 ## Testing
 
@@ -247,23 +278,31 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `internal/auth/handlers_test.go` — login/callback/logout against `oidctest` + in-memory fake store (`fakestore_test.go`): state/nonce/signature, `return_to`, invites, prompt rules, userinfo fallback, session rotation, logout hint
 - `internal/auth/middleware_test.go` — cookie and Bearer cases, `RequireSession`, `RequireAdmin`
 - `internal/auth/tokens_test.go`, `invite_test.go`, `oidc_test.go`, `returnto_test.go`
-- `cmd/server/main_test.go` — route wiring (token → 403 on session-only routes), `scan` user checks and exit behaviour, `users` table
+- `cmd/server/main_test.go` — route wiring (token → 403 on session-only routes, album routes included), `scan` user checks and exit behaviour, `users` table
 - `internal/handlers/admin_test.go` — admin handlers
 - `internal/handlers/gps_matcher_test.go`, `gps_matcher_handler_test.go` — GPS matcher logic and handler
 - `internal/handlers/gps_tracks_test.go` — GPS track import endpoint
-- `internal/handlers/media_test.go`, `upload_scan_matcher_test.go` — media list/upload/scan/dedup flow, owner propagation, opaque keys
+- `internal/handlers/media_test.go`, `upload_scan_matcher_test.go` — media list/upload/scan/dedup flow, owner propagation, opaque keys, owner fields and `trip_id` only on own rows, `rows.Err()` → 500, upload `?album_id` (refused before the body, duplicates added), `registerMedia` returning the media ID and deleting a duplicate's object
 - `internal/handlers/media_delete_test.go`, `media_location_test.go` — delete and manual location
 - `internal/handlers/exif_gps_track_test.go` — EXIF GPS track insertion
-- `internal/handlers/game_test.go` — game round/guess: no rows → 404, other DB errors → 500
+- `internal/handlers/game_test.go` — game round/guess: no rows → 404, other DB errors → 500, round and `max_dist_km` share `buildMediaFilter`, bad `album_id`/`owner` → 400
+- `internal/handlers/visibility_test.go` — `readableMediaCond` SQL for several aliases and arg numbers
+- `internal/handlers/filters_test.go` — `validateMediaFilters` and `buildMediaFilter` (table-driven: trips/albums union, owner, canonical ID binding)
+- `internal/handlers/albums_test.go` — album name validation, `media_ids`/`trip_id` body parsing
 - Direct handler calls need a user in context: use `withTestUser(r)` (`testuser_test.go`); without it `MustUser` panics and kills the test binary.
 
 **Backend — integration tests (real PostGIS; skipped unless `TEST_DATABASE_URL` is set)**
 - `TEST_DATABASE_URL` must be a `postgres://` URL whose user may `CREATE DATABASE` (the compose user is a superuser). `testdb.New(t)` creates a uniquely named, fully migrated database and drops it `WITH (FORCE)` on cleanup. `testdb.NewEmpty(t)` returns an unmigrated DSN.
 - `internal/testdb/testdb_test.go`
-- `internal/db/migrations_integration_test.go` — migrate to 6, seed, up, assert backfill, down/up round trip
+- `internal/db/migrations_integration_test.go` — migrate to 6, seed, up, assert backfill, down/up round trip; migration 9 up/down with populated album tables
+- `internal/db/albums_schema_integration_test.go` — the album FKs and cascades (contributor must be a member and the media owner; member removal, album and media deletion)
 - `internal/auth/store_integration_test.go` — invite consumption and claim races, `SetDisabled` (incl. creator's invites), sessions/tokens refused for inactive users, `RebindIssuer`, token SQL
 - `internal/handlers/ownership_integration_test.go` — cross-user isolation on every route, matcher/trip-detection scoping, per-owner dedup, composite FK
-- `internal/handlers/ingest_scan_integration_test.go` — `RunIngestScan` ownership, re-run skip, per-owner dedup, failure count
+- `internal/handlers/ingest_scan_integration_test.go` — `RunIngestScan` ownership, re-run skip, per-owner dedup, failure count, no orphan objects
+- `internal/handlers/albums_integration_test.go` — every album route: create/list, rename, delete keeps media, members, remove/leave, disabled users keep memberships, album media add/remove, `/api/media/{id}/albums`, `/api/users`
+- `internal/handlers/sharing_integration_test.go` — read access follows membership, members cannot write shared media, filters on shared rows, owner fields, GPS isolation, trip detection ignores shared media
+- `internal/handlers/filters_integration_test.go` — `/api/media` and `/api/game/round` filters, canonical ID binding, OFFSET pages hold every item once
+- `internal/handlers/upload_album_integration_test.go` — upload `?album_id` refused before the body is read, new files and duplicates added, `registerMedia` returns the existing ID
 - Use `testing` + [testify](https://github.com/stretchr/testify) (`assert`/`require`). Test files live alongside source.
 - Pure logic tests use no external deps. Handler tests use `net/http/httptest`.
 - Use table-driven tests (`[]struct{ input ...; want ... }`).
@@ -272,15 +311,18 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 **Frontend — unit tests**
 - `src/App.test.tsx`, `src/api/client.test.ts` (401 redirect; `me()` does not redirect)
 - `src/components/auth/AuthGate.test.tsx`, `LoginScreen.test.tsx`
-- `src/pages/MapPage.test.tsx`, `TripsPage.test.tsx`, `GamePage.test.tsx`, `UploadPage.test.tsx`, `SettingsPage.test.tsx`, `AdminPage.test.tsx`
+- `src/pages/MapPage.test.tsx`, `TripsPage.test.tsx`, `AlbumsPage.test.tsx`, `GamePage.test.tsx`, `UploadPage.test.tsx`, `SettingsPage.test.tsx`, `AdminPage.test.tsx`
 - `src/components/map/FilterPanel.test.tsx`, `MediaMap.test.tsx`
+- `src/components/MediaGalleryOverlay.test.tsx`, `src/components/albums/AlbumMenu.test.tsx`, `AlbumPickerDialog.test.tsx`
+- `src/lib/filters.test.ts`, `errors.test.ts`, `uploadBatches.test.ts`
 - Vitest + React Testing Library. Run with `npm run test`.
 - Test components that contain logic; pure utility functions in `src/lib/` get unit tests.
 
 **E2E — Playwright + Keycloak (`frontend/e2e/`, local only, no CI)**
 - `npm run e2e`. One-time: `npx playwright install chromium`. Preconditions: see Commands. Only one run at a time.
 - Playwright starts two webServers before setup: the backend (build → `scripts/e2e-reset-db.sh` → serve on `:8091`) and Vite on `:5174`. `auth.setup.ts` then runs `./.e2e/server invite` for alice (admin) and bob, logs each in through Keycloak in a fresh browser context, and saves `e2e/.auth/{alice,bob}.json`.
-- Specs: anonymous sign-in screen, carol not invited, alice uploads `fixtures/gps.jpg`, bob's empty library, admin tab and invites, logout without a Keycloak prompt (fresh context), and the API token lifecycle (bob).
+- Specs: anonymous sign-in screen, carol not invited, alice uploads `fixtures/gps.jpg`, bob's empty library, admin tab and invites, logout without a Keycloak prompt (fresh context), the API token lifecycle (bob), and sharing (`sharing.e2e.ts`: alice creates an album, adds bob, uploads the duplicate `gps.jpg` into it; bob sees it "Shared by" with no delete button, not on his Trips page, and the album on his Albums page; alice removes bob, bob's map is empty, and alice deletes the album, with an API fallback in a `finally`).
+- `sharing.e2e.ts` is its own `sharing` project that depends on the `e2e` project, so it runs after every other spec: it would otherwise turn the upload spec's new file into a duplicate and show bob's empty-library spec a shared photo. If any `e2e` spec fails, the sharing spec does not run.
 - Keep `E2E_BACKEND_ENV` the single source for the E2E backend env, so invites target `geogallery_e2e` and print `:5174` links.
 
 ## Key Design Decisions
@@ -288,8 +330,9 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - **Invite-only multi-user with one generic OIDC issuer.** No vendor SDK in Go or React. Social login (Google, Facebook, …) is configured in the IdP. Users are keyed by (configured issuer, `sub`), so adding issuers later would not break the schema. An unknown identity without a valid invite is rejected, and the first admin comes from `server invite --admin`, never from "first login wins".
 - **Logto Cloud for the hosted instance; Keycloak as the dev/E2E IdP** and the documented self-host option. The code paths are identical. Supabase Auth and Hanko are not supported (see `docs/auth.md`).
 - **Backend-for-frontend sessions.** Same-origin `/api/auth/*` routes. Opaque server-side sessions in an HttpOnly, SameSite=Lax cookie, stored hashed, with a 30-day absolute TTL. Logout and disabling a user take effect immediately, and there is no signing secret to manage. No CORS; `http.CrossOriginProtection` guards state-changing (non-GET/HEAD/OPTIONS) requests.
-- **Personal API tokens** (`gg_pat_…`, sha256-hashed, always expiring, ≤ 365 days) for scripts. They cannot delete, manage tokens or reach admin routes.
-- **Ownership in the schema.** `owner_id NOT NULL` on media, trips and gps_tracks, a composite trip FK, and per-owner dedup. Non-owned resources return 404. `readableMediaCond` is the single hook for future sharing.
+- **Personal API tokens** (`gg_pat_…`, sha256-hashed, always expiring, ≤ 365 days) for scripts. They cannot delete, manage tokens or album members, list users or reach admin routes.
+- **Ownership in the schema.** `owner_id NOT NULL` on media, trips and gps_tracks, a composite trip FK, and per-owner dedup. Non-owned resources return 404. `readableMediaCond` is the single place that encodes media read access.
+- **Sharing through albums only, by reference.** No per-media grants: to share one photo, put it in an album. Owner + members; every member views everything and adds or removes their own media, and only the owner renames, manages members, deletes the album or removes other people's items. No re-sharing: only an item's owner puts it into an album, and only while a member. Contributions leave with the member: composite FKs tie each contribution to the media owner and to a membership, so leaving or removal takes that member's items out of the album. Trips and GPS stay personal. A share exposes the item's location, `gps_confidence`, `gps_source`, `taken_at`, `filename` and its EXIF, which is intended. Design: `docs/sharing-albums.md`.
 - **Folder ingest is an operator CLI** (`server scan --user`), not an HTTP endpoint: it needs server filesystem access.
 - **Opaque S3 keys and a private bucket.** Presigned URLs reveal neither the filename nor the upload time. EXIF inside served files is an accepted game-hint risk.
 - **MinIO AIStore over standard MinIO** — AIStore edition for performance; requires a license file.
@@ -298,4 +341,4 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - **chi over Gin/Echo** — handlers are plain `http.Handler`, zero lock-in, composes with stdlib middleware.
 - **File mtime as upload fallback** — EXIF `DateTime` preferred; browser sends `file_mtime[]` (ms-since-epoch) so the server can use real file mtime instead of `time.Now()`.
 - **Partial hash dedup** — first + last 64 KB + file size hashed for fast collision-resistant dedup without reading the full file.
-- **Relative scoring** — game location score is relative to the geographic spread of the media collection (`max_dist_km` from `NewRound`), not a fixed global scale; GPS confidence adjusts tolerance.
+- **Relative scoring** — game location score is relative to the geographic spread of the media collection (`max_dist_km` from `NewRound`), not a fixed global scale; GPS confidence adjusts tolerance. With `owner` unset the spread includes shared media, so a friend's far-away album changes the scale; `owner=mine` restores own-only scoring.

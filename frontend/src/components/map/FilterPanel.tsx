@@ -1,23 +1,41 @@
-import { useState } from "react";
-import type { Trip, FilterState, MediaItem } from "../../types";
+import { useId, useState, type ReactNode } from "react";
+import type { Album, FilterState, MediaItem, Trip } from "@/types";
+import { emptyFilters } from "@/lib/filters";
 
 const ALL_MEDIA_TYPES: MediaItem["media_type"][] = ["photo", "video", "photo_360", "video_360"];
 
+const OWNER_OPTIONS: { value: FilterState["owner"]; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "mine", label: "Mine" },
+  { value: "shared", label: "Shared with me" },
+];
+
 interface Props {
   trips: Trip[];
+  albums: Album[];
   filters: FilterState;
   onChange: (f: FilterState) => void;
   activeCount: number;
+}
+
+function SectionTitle({ children }: { children: ReactNode }) {
+  return (
+    <p className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+      {children}
+    </p>
+  );
 }
 
 function Checkbox({
   checked,
   onChange,
   label,
+  hint,
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
   label: string;
+  hint?: string;
 }) {
   return (
     <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -28,30 +46,18 @@ function Checkbox({
         className="rounded"
       />
       {label}
+      {hint && <span className="text-xs text-muted-foreground"> {hint}</span>}
     </label>
   );
 }
 
-export function FilterPanel({ trips, filters, onChange, activeCount }: Props) {
+function toggle<T>(list: T[], value: T): T[] {
+  return list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
+}
+
+export function FilterPanel({ trips, albums, filters, onChange, activeCount }: Props) {
   const [open, setOpen] = useState(false);
-
-  function toggleTrip(id: string) {
-    const next = filters.tripIds.includes(id)
-      ? filters.tripIds.filter((t) => t !== id)
-      : [...filters.tripIds, id];
-    onChange({ ...filters, tripIds: next });
-  }
-
-  function toggleMediaType(type: MediaItem["media_type"]) {
-    const next = filters.mediaTypes.includes(type)
-      ? filters.mediaTypes.filter((t) => t !== type)
-      : [...filters.mediaTypes, type];
-    onChange({ ...filters, mediaTypes: next });
-  }
-
-  function reset() {
-    onChange({ fromDate: "", toDate: "", tripIds: [], mediaTypes: [] });
-  }
+  const ownerRadioName = useId();
 
   return (
     <div className="absolute left-4 top-4 z-[800]">
@@ -70,10 +76,28 @@ export function FilterPanel({ trips, filters, onChange, activeCount }: Props) {
 
       {open && (
         <div className="mt-1 w-64 rounded-lg border bg-background p-3 shadow-lg space-y-3">
+          <fieldset>
+            <legend className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              Show
+            </legend>
+            <div className="flex flex-wrap gap-x-3 gap-y-1">
+              {OWNER_OPTIONS.map((option) => (
+                <label key={option.value} className="flex items-center gap-1.5 text-sm cursor-pointer">
+                  <input
+                    type="radio"
+                    name={ownerRadioName}
+                    value={option.value}
+                    checked={filters.owner === option.value}
+                    onChange={() => onChange({ ...filters, owner: option.value })}
+                  />
+                  {option.label}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
           <div>
-            <p className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-              Date range
-            </p>
+            <SectionTitle>Date range</SectionTitle>
             <div className="space-y-1">
               <input
                 type="date"
@@ -92,39 +116,55 @@ export function FilterPanel({ trips, filters, onChange, activeCount }: Props) {
             </div>
           </div>
 
-          {trips.length > 0 && (
+          {/* Trips and albums are one filter: the backend matches media in any ticked collection. */}
+          {(trips.length > 0 || albums.length > 0) && (
             <div>
-              <p className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                Trips
-              </p>
-              <div className="space-y-1 max-h-40 overflow-y-auto">
-                <Checkbox
-                  checked={filters.tripIds.includes("unassigned")}
-                  onChange={() => toggleTrip("unassigned")}
-                  label="Unassigned"
-                />
-                {trips.map((trip) => (
-                  <Checkbox
-                    key={trip.id}
-                    checked={filters.tripIds.includes(trip.id)}
-                    onChange={() => toggleTrip(trip.id)}
-                    label={trip.name}
-                  />
-                ))}
+              <SectionTitle>Collections</SectionTitle>
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {trips.length > 0 && (
+                  <div role="group" aria-label="Trips" className="space-y-1">
+                    <p className="text-xs text-muted-foreground">Trips</p>
+                    <Checkbox
+                      checked={filters.tripIds.includes("unassigned")}
+                      onChange={() => onChange({ ...filters, tripIds: toggle(filters.tripIds, "unassigned") })}
+                      label="Unassigned"
+                    />
+                    {trips.map((trip) => (
+                      <Checkbox
+                        key={trip.id}
+                        checked={filters.tripIds.includes(trip.id)}
+                        onChange={() => onChange({ ...filters, tripIds: toggle(filters.tripIds, trip.id) })}
+                        label={trip.name}
+                      />
+                    ))}
+                  </div>
+                )}
+                {albums.length > 0 && (
+                  <div role="group" aria-label="Albums" className="space-y-1">
+                    <p className="text-xs text-muted-foreground">Albums</p>
+                    {albums.map((album) => (
+                      <Checkbox
+                        key={album.id}
+                        checked={filters.albumIds.includes(album.id)}
+                        onChange={() => onChange({ ...filters, albumIds: toggle(filters.albumIds, album.id) })}
+                        label={album.name}
+                        hint={album.is_owner ? undefined : `by ${album.owner_name ?? "another user"}`}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
 
           <div>
-            <p className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-              Media type
-            </p>
+            <SectionTitle>Media type</SectionTitle>
             <div className="space-y-1">
               {ALL_MEDIA_TYPES.map((type) => (
                 <Checkbox
                   key={type}
                   checked={filters.mediaTypes.includes(type)}
-                  onChange={() => toggleMediaType(type)}
+                  onChange={() => onChange({ ...filters, mediaTypes: toggle(filters.mediaTypes, type) })}
                   label={type}
                 />
               ))}
@@ -133,7 +173,7 @@ export function FilterPanel({ trips, filters, onChange, activeCount }: Props) {
 
           {activeCount > 0 && (
             <button
-              onClick={reset}
+              onClick={() => onChange(emptyFilters)}
               className="w-full rounded border px-2 py-1 text-sm hover:bg-muted"
             >
               Reset filters

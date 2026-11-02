@@ -67,6 +67,8 @@ func TestRunIngestScan_Integration_OwnershipAndDedup(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ScanResult{Skipped: 2}, res, "a second run for A deduplicates")
 	assert.Equal(t, 2, countMedia(t, pool, userA))
+	assert.Len(t, store.deleted, 2, "the second run's objects are deleted again")
+	assertNoOrphans(t, pool, store)
 
 	res, err = RunIngestScan(ctx, deps, dir, userB)
 	require.NoError(t, err)

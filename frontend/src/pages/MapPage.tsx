@@ -1,10 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ExternalLink, Trash2 } from "lucide-react";
 import { MediaMap } from "../components/map/MediaMap";
 import { FilterPanel } from "../components/map/FilterPanel";
 import { EditLocationModal } from "../components/EditLocationModal";
-import type { FilterState, MediaItem, OrientationKeyframe, Trip } from "../types";
+import type { Album, FilterState, MediaItem, OrientationKeyframe, Trip } from "../types";
 import { api } from "../api/client";
+import { activeFilterCount, emptyFilters, filterParams } from "@/lib/filters";
+import { useCurrentUser } from "@/components/auth/AuthContext";
+import { AlbumMenu } from "@/components/albums/AlbumMenu";
 import Panorama360 from "../components/viewer/Panorama360";
 import Video360 from "../components/viewer/Video360";
 
@@ -335,11 +338,11 @@ function EditViewModal({
 }
 
 export function MapPage() {
+  const user = useCurrentUser();
   const [items, setItems] = useState<MediaItem[]>([]);
   const [trips, setTrips] = useState<Trip[]>([]);
-  const [filters, setFilters] = useState<FilterState>({
-    fromDate: "", toDate: "", tripIds: [], mediaTypes: [],
-  });
+  const [albums, setAlbums] = useState<Album[]>([]);
+  const [filters, setFilters] = useState<FilterState>(emptyFilters);
   const [loadingMedia, setLoadingMedia] = useState(false);
   const [selected, setSelected] = useState<MediaItem | null>(null);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
@@ -351,6 +354,8 @@ export function MapPage() {
   const [clusterIndex, setClusterIndex] = useState(0);
   const [editingView, setEditingView] = useState(false);
   const [editingLocation, setEditingLocation] = useState(false);
+  // Bumped to refetch the media list under the same filters.
+  const [mediaReload, setMediaReload] = useState(0);
   const pendingId = useRef<string | null>(null);
 
   useEffect(() => {
@@ -360,11 +365,7 @@ export function MapPage() {
     setLoadingMedia(true);
     setListError(null);
 
-    const params: Record<string, string | string[]> = {};
-    if (filters.fromDate) params.from_date = filters.fromDate;
-    if (filters.toDate) params.to_date = filters.toDate;
-    if (filters.tripIds.length) params.trip_id = filters.tripIds;
-    if (filters.mediaTypes.length) params.media_type = filters.mediaTypes;
+    const params = filterParams(filters);
 
     let offset = 0;
 
@@ -391,19 +392,26 @@ export function MapPage() {
     fetchPage();
 
     return () => { cancelled = true; };
-  }, [filters]);
+  }, [filters, mediaReload]);
 
   useEffect(() => {
     api.get<Trip[]>("/trips").then(setTrips).catch(() => {});
+    // The filter panel then just lists no albums.
+    api.listAlbums().then(setAlbums).catch((e) => console.error("Failed to load albums:", e));
   }, []);
 
-  const activeCount = useMemo(() => {
-    let n = 0;
-    if (filters.fromDate || filters.toDate) n++;
-    if (filters.tripIds.length > 0) n++;
-    if (filters.mediaTypes.length > 0) n++;
-    return n;
-  }, [filters]);
+  // An album menu change only alters the map when the filters select that album.
+  function handleAlbumChange(albumId: string) {
+    if (filters.albumIds.includes(albumId)) setMediaReload((n) => n + 1);
+  }
+
+  function handleAlbumCreated(album: Album) {
+    setAlbums((prev) => (prev.some((a) => a.id === album.id) ? prev : [...prev, album]));
+  }
+
+  const activeCount = activeFilterCount(filters);
+  // Shared items are read-only: the backend 404s their writes, so hide the controls.
+  const isOwn = selected?.owner_id === user.id;
 
   function fetchUrl(item: MediaItem) {
     pendingId.current = item.id;
@@ -473,6 +481,7 @@ export function MapPage() {
     <div className="relative h-full w-full">
       <FilterPanel
         trips={trips}
+        albums={albums}
         filters={filters}
         onChange={setFilters}
         activeCount={activeCount}
@@ -497,14 +506,16 @@ export function MapPage() {
           <div className="flex items-start justify-between gap-2 mb-1">
             <p className="font-medium truncate">{selected.filename}</p>
             <div className="flex items-center gap-1 shrink-0">
-              <button
-                className="text-muted-foreground hover:text-destructive"
-                onClick={() => handleDeleteMedia(selected)}
-                aria-label="Delete media"
-                title="Delete media"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
+              {isOwn && (
+                <button
+                  className="text-muted-foreground hover:text-destructive"
+                  onClick={() => handleDeleteMedia(selected)}
+                  aria-label="Delete media"
+                  title="Delete media"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              )}
               <button
                 className="text-muted-foreground hover:text-foreground"
                 onClick={() => handleSelect(null)}
@@ -514,6 +525,12 @@ export function MapPage() {
               </button>
             </div>
           </div>
+
+          {!isOwn && (
+            <p className="text-xs text-muted-foreground">
+              Shared by {selected.owner_name ?? "another user"}
+            </p>
+          )}
 
           {selected.taken_at && (
             <p className="text-sm text-muted-foreground">
@@ -541,14 +558,23 @@ export function MapPage() {
             </a>
           )}
 
-          <button
-            className="mt-1 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted"
-            onClick={() => setEditingLocation(true)}
-          >
-            Edit GPS location
-          </button>
+          {isOwn && (
+            <button
+              className="mt-1 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted"
+              onClick={() => setEditingLocation(true)}
+            >
+              Edit GPS location
+            </button>
+          )}
 
-          {(selected.media_type === "photo_360" || selected.media_type === "video_360") && (
+          <AlbumMenu
+            item={selected}
+            isOwn={isOwn}
+            onChange={handleAlbumChange}
+            onAlbumCreated={handleAlbumCreated}
+          />
+
+          {isOwn && (selected.media_type === "photo_360" || selected.media_type === "video_360") && (
             <button
               className="mt-2 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted"
               onClick={() => setEditingView(true)}
@@ -612,7 +638,7 @@ export function MapPage() {
         />
       )}
 
-      {editingLocation && selected && (
+      {editingLocation && selected && isOwn && (
         <EditLocationModal
           item={selected}
           onClose={() => setEditingLocation(false)}
@@ -625,7 +651,7 @@ export function MapPage() {
         />
       )}
 
-      {editingView && selected && mediaUrl && (
+      {editingView && selected && mediaUrl && isOwn && (
         <EditViewModal
           item={selected}
           url={mediaUrl}

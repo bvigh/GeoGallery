@@ -2,14 +2,17 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func errRowDB(err error, calls *int) *mockDB {
@@ -40,6 +43,53 @@ func TestNewRound_QueryErrors(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), tt.wantBody)
 			assert.Equal(t, 1, calls)
 		})
+	}
+}
+
+func TestNewRound_RoundAndMaxDistShareFilter(t *testing.T) {
+	const query = "from_date=2024-01-01&media_type=photo&trip_id=unassigned&trip_id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" +
+		"&album_id=cccccccc-cccc-4ccc-8ccc-cccccccccccc&owner=shared"
+	type call struct {
+		sql  string
+		args []any
+	}
+	var calls []call
+	db := &mockDB{queryRowFn: func(_ context.Context, sql string, args ...any) pgx.Row {
+		calls = append(calls, call{sql, args})
+		if len(calls) == 1 {
+			return &mockRow{scanFn: func(dest ...any) error {
+				*dest[0].(*string) = "m1"
+				*dest[1].(*string) = "photo"
+				*dest[2].(*string) = "media/k.jpg"
+				return nil
+			}}
+		}
+		return &mockRow{scanFn: func(dest ...any) error {
+			*dest[0].(*float64) = 42
+			return nil
+		}}
+	}}
+	store := &mockStorage{presignFn: func(context.Context, string) (string, error) { return "https://s3.test/k", nil }}
+
+	rec := httptest.NewRecorder()
+	(&GameHandler{db: db, storage: store}).NewRound(rec,
+		withTestUser(httptest.NewRequest(http.MethodGet, "/api/game/round?"+query, nil)))
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var round roundMedia
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &round))
+	assert.InDelta(t, 42, round.MaxDistKm, 1e-9)
+
+	q, err := url.ParseQuery(query)
+	require.NoError(t, err)
+	wantConds, wantArgs := buildMediaFilter(q, testOwnerID)
+	require.Len(t, wantConds, 5, "read access, from_date, media_type, collections, owner")
+	wantWhere := strings.Join(strings.Fields(
+		"FROM media m WHERE "+strings.Join(append(wantConds, "m.location IS NOT NULL"), " AND ")), " ")
+	require.Len(t, calls, 2, "round query, then max_dist_km")
+	for i, c := range calls {
+		assert.Contains(t, strings.Join(strings.Fields(c.sql), " "), wantWhere, "call %d", i)
+		assert.Equal(t, wantArgs, c.args, "call %d", i)
 	}
 }
 
@@ -78,6 +128,8 @@ func TestMalformedFilters_Return400(t *testing.T) {
 		{"bad to_date", "to_date=2024-13-01"},
 		{"datetime instead of date", "from_date=2024-03-01T00:00:00Z"},
 		{"non-uuid trip_id", "trip_id=unassigned&trip_id=nope"},
+		{"non-uuid album_id", "album_id=nope"},
+		{"unknown owner", "owner=everyone"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

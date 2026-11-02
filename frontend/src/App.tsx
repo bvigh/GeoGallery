@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { MapPage } from "@/pages/MapPage";
 import { TripsPage } from "@/pages/TripsPage";
+import { AlbumsPage } from "@/pages/AlbumsPage";
 import { GamePage } from "@/pages/GamePage";
 import { UploadPage } from "@/pages/UploadPage";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -8,14 +9,15 @@ import { AdminPage } from "@/pages/AdminPage";
 import { AuthGate } from "@/components/auth/AuthGate";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { api } from "@/api/client";
-import { Map, Images, Gamepad2, Upload, Settings, Shield, LogOut } from "lucide-react";
+import { Map, Images, AlbumIcon, Gamepad2, Upload, Settings, Shield, LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type Tab = "map" | "trips" | "game" | "upload" | "settings" | "admin";
+type Tab = "map" | "trips" | "albums" | "game" | "upload" | "settings" | "admin";
 
 const baseTabs: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: "map", label: "Map", icon: Map },
   { id: "trips", label: "Trips", icon: Images },
+  { id: "albums", label: "Albums", icon: AlbumIcon },
   { id: "game", label: "Game", icon: Gamepad2 },
   { id: "upload", label: "Upload", icon: Upload },
   { id: "settings", label: "Settings", icon: Settings },
@@ -74,6 +76,7 @@ function Shell() {
       <main className="flex-1 overflow-hidden">
         {active === "map" && <MapPage />}
         {active === "trips" && <TripsPage />}
+        {active === "albums" && <AlbumsPage />}
         {active === "game" && <GamePage />}
         {active === "upload" && <UploadPage />}
         {active === "settings" && <SettingsPage />}

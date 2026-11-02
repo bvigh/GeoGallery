@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
-import type { Trip } from "../types";
-import { api } from "../api/client";
+import { useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
+import type { Album, Trip } from "../types";
+import { api, ApiError } from "../api/client";
+import { MediaGalleryOverlay } from "@/components/MediaGalleryOverlay";
+import { AlbumPickerDialog } from "@/components/albums/AlbumPickerDialog";
 
 const byStartDateDesc = (a: Trip, b: Trip): number => {
   if (a.start_date === null && b.start_date === null) return 0;
@@ -8,7 +11,31 @@ const byStartDateDesc = (a: Trip, b: Trip): number => {
   if (b.start_date === null) return -1;
   return b.start_date.localeCompare(a.start_date);
 };
-import { TripGalleryOverlay } from "../components/TripGalleryOverlay";
+
+// One per "Add to album…", so concurrent adds each report their own result.
+interface Notice {
+  id: number;
+  kind: "pending" | "success" | "error";
+  text: string;
+}
+
+function items(n: number): string {
+  return `${n} item${n !== 1 ? "s" : ""}`;
+}
+
+function addedMessage(album: Album, added: number): string {
+  const text = `Added ${items(added)} to "${album.name}"`;
+  // Adding a trip again only inserts what is new since last time.
+  return added === 0 ? `${text}: everything in the trip is already in it` : text;
+}
+
+// 404: the caller is no longer a member of the album, or the trip is gone.
+function addErrorMessage(trip: Trip, album: Album, err: unknown): string {
+  const text = `Could not add "${trip.name}" to "${album.name}"`;
+  return err instanceof ApiError && err.status === 404
+    ? `${text}: the album or the trip is no longer available`
+    : text;
+}
 
 export function TripsPage() {
   const [trips, setTrips] = useState<Trip[]>([]);
@@ -17,6 +44,9 @@ export function TripsPage() {
   const [editName, setEditName] = useState("");
   const [editStartDate, setEditStartDate] = useState("");
   const [editEndDate, setEditEndDate] = useState("");
+  const [pickerTrip, setPickerTrip] = useState<Trip | null>(null);
+  const [notices, setNotices] = useState<Notice[]>([]);
+  const nextNoticeId = useRef(0);
 
   useEffect(() => {
     api.get<Trip[]>("/trips").then((data) => setTrips(data ?? [])).catch(console.error);
@@ -35,6 +65,22 @@ export function TripsPage() {
       if (refreshed) setTrips(refreshed);
     }
   };
+
+  const addTripToAlbum = async (trip: Trip, album: Album) => {
+    const id = nextNoticeId.current++;
+    const settle = (kind: Notice["kind"], text: string) =>
+      setNotices((prev) => prev.map((n) => (n.id === id ? { ...n, kind, text } : n)));
+    setNotices((prev) => [...prev, { id, kind: "pending", text: `Adding "${trip.name}" to "${album.name}"…` }]);
+    try {
+      const { added } = await api.addToAlbum(album.id, { tripId: trip.id });
+      settle("success", addedMessage(album, added));
+    } catch (e) {
+      console.error(e);
+      settle("error", addErrorMessage(trip, album, e));
+    }
+  };
+
+  const dismissNotice = (id: number) => setNotices((prev) => prev.filter((n) => n.id !== id));
 
   const saveUpdate = (id: string) => {
     setTrips((prev) =>
@@ -112,6 +158,15 @@ export function TripsPage() {
                     className="text-xs text-muted-foreground hover:text-foreground"
                     onClick={(e) => {
                       e.stopPropagation();
+                      setPickerTrip(trip);
+                    }}
+                  >
+                    Add to album…
+                  </button>
+                  <button
+                    className="text-xs text-muted-foreground hover:text-foreground"
+                    onClick={(e) => {
+                      e.stopPropagation();
                       setEditing(trip.id);
                       setEditName(trip.name);
                       setEditStartDate(trip.start_date ?? "");
@@ -143,9 +198,45 @@ export function TripsPage() {
           </div>
         ))}
       </div>
+      {/* Outside the cards: React events bubble out of the dialog's portal into its parent,
+          and a card click opens the gallery. */}
+      <AlbumPickerDialog
+        open={pickerTrip !== null}
+        onOpenChange={(open) => !open && setPickerTrip(null)}
+        title={`Add "${pickerTrip?.name ?? ""}" to an album`}
+        description="Adds the trip's current media. Adding it again later picks up new items."
+        defaultName={pickerTrip?.name ?? ""}
+        onPick={(album) => pickerTrip && addTripToAlbum(pickerTrip, album)}
+      />
+      {notices.length > 0 && (
+        <div className="fixed bottom-4 left-1/2 z-[900] flex w-[min(28rem,calc(100%-2rem))] -translate-x-1/2 flex-col gap-2">
+          {notices.map((n) => (
+            <div
+              key={n.id}
+              role={n.kind === "error" ? "alert" : "status"}
+              className={`flex items-start gap-2 rounded-lg border bg-background px-3 py-2 text-sm shadow-lg ${
+                n.kind === "error" ? "border-red-300 text-red-500" : ""
+              }`}
+            >
+              <span className="min-w-0 flex-1 break-words">{n.text}</span>
+              {/* A pending add has no result yet; dismissing it would hide the outcome. */}
+              {n.kind !== "pending" && (
+                <button
+                  onClick={() => dismissNotice(n.id)}
+                  aria-label="Dismiss"
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
       {selectedTrip && (
-        <TripGalleryOverlay
-          trip={selectedTrip}
+        <MediaGalleryOverlay
+          title={selectedTrip.name}
+          params={{ trip_id: selectedTrip.id }}
           onClose={() => setSelectedTrip(null)}
           onMediaDeleted={() => {
             api.get<Trip[]>("/trips").then((data) => setTrips(data ?? [])).catch(console.error);

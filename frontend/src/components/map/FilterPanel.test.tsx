@@ -1,29 +1,54 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
-import { FilterPanel } from "./FilterPanel";
-import type { FilterState, Trip } from "../../types";
-
-const emptyFilters: FilterState = {
-  fromDate: "",
-  toDate: "",
-  tripIds: [],
-  mediaTypes: [],
-};
+import { FilterPanel } from "@/components/map/FilterPanel";
+import { activeFilterCount, emptyFilters } from "@/lib/filters";
+import type { Album, FilterState, Trip } from "@/types";
 
 const sampleTrips: Trip[] = [
   { id: "t1", name: "Iceland 2024", start_date: "2024-07-01", end_date: "2024-07-14", media_count: 10, cover_key: null, user_edited: false },
   { id: "t2", name: "Tokyo Winter", start_date: "2024-12-20", end_date: null, media_count: 5, cover_key: null, user_edited: false },
 ];
 
+function album(overrides: Partial<Album>): Album {
+  return {
+    id: "a0",
+    name: "Album",
+    owner_id: "u-me",
+    owner_name: "Alice",
+    is_owner: true,
+    member_count: 2,
+    media_count: 3,
+    start_date: null,
+    end_date: null,
+    created_at: "2025-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+const sampleAlbums: Album[] = [
+  album({ id: "a1", name: "Family" }),
+  album({ id: "a2", name: "Road trip", owner_id: "u-bob", owner_name: "Bob", is_owner: false }),
+];
+
 function renderPanel(
   overrides: Partial<FilterState> = {},
   activeCount = 0,
   onChange = vi.fn(),
-  trips = sampleTrips
+  trips = sampleTrips,
+  albums = sampleAlbums
 ) {
   const filters = { ...emptyFilters, ...overrides };
-  return { onChange, ...render(<FilterPanel trips={trips} filters={filters} onChange={onChange} activeCount={activeCount} />) };
+  return {
+    onChange,
+    ...render(
+      <FilterPanel trips={trips} albums={albums} filters={filters} onChange={onChange} activeCount={activeCount} />
+    ),
+  };
+}
+
+async function openPanel() {
+  await userEvent.click(screen.getByRole("button", { name: /filters/i }));
 }
 
 describe("FilterPanel", () => {
@@ -123,10 +148,13 @@ describe("FilterPanel", () => {
   });
 
   it("clicking Reset calls onChange with empty state", async () => {
-    const { onChange } = renderPanel({ tripIds: ["t1"], mediaTypes: ["photo"] }, 2);
+    const { onChange } = renderPanel(
+      { tripIds: ["t1"], albumIds: ["a1"], mediaTypes: ["photo"], owner: "shared" },
+      3
+    );
     await userEvent.click(screen.getByRole("button", { name: /filters/i }));
     await userEvent.click(screen.getByRole("button", { name: /reset/i }));
-    expect(onChange).toHaveBeenCalledWith({ fromDate: "", toDate: "", tripIds: [], mediaTypes: [] });
+    expect(onChange).toHaveBeenCalledWith(emptyFilters);
   });
 
   it("badge shows activeCount when > 0", () => {
@@ -137,5 +165,117 @@ describe("FilterPanel", () => {
   it("badge is hidden when activeCount is 0", () => {
     renderPanel({}, 0);
     expect(screen.queryByText("0")).not.toBeInTheDocument();
+  });
+
+  describe("collections", () => {
+    it("groups trips and albums under Collections", async () => {
+      renderPanel();
+      await openPanel();
+      expect(screen.getByText("Collections")).toBeInTheDocument();
+      const trips = within(screen.getByRole("group", { name: "Trips" }));
+      expect(trips.getByLabelText("Unassigned")).toBeInTheDocument();
+      expect(trips.getByLabelText("Iceland 2024")).toBeInTheDocument();
+      const albums = within(screen.getByRole("group", { name: "Albums" }));
+      expect(albums.getByLabelText("Family")).toBeInTheDocument();
+      expect(albums.getByLabelText("Road trip by Bob")).toBeInTheDocument();
+    });
+
+    it.each([
+      { label: "own album shows no owner", albums: [album({ name: "Mine" })], want: "Mine" },
+      {
+        label: "shared album shows the owner name",
+        albums: [album({ name: "Theirs", is_owner: false, owner_name: "Carol" })],
+        want: "Theirs by Carol",
+      },
+      {
+        label: "shared album without an owner name",
+        albums: [album({ name: "Theirs", is_owner: false, owner_name: null })],
+        want: "Theirs by another user",
+      },
+    ])("$label", async ({ albums, want }) => {
+      renderPanel({}, 0, vi.fn(), sampleTrips, albums);
+      await openPanel();
+      expect(within(screen.getByRole("group", { name: "Albums" })).getByLabelText(want)).toBeInTheDocument();
+    });
+
+    it("shows the albums group when there are no trips", async () => {
+      renderPanel({}, 0, vi.fn(), []);
+      await openPanel();
+      expect(screen.queryByRole("group", { name: "Trips" })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Unassigned")).not.toBeInTheDocument();
+      expect(within(screen.getByRole("group", { name: "Albums" })).getByLabelText("Family")).toBeInTheDocument();
+    });
+
+    it("hides the albums group when there are no albums", async () => {
+      renderPanel({}, 0, vi.fn(), sampleTrips, []);
+      await openPanel();
+      expect(screen.getByRole("group", { name: "Trips" })).toBeInTheDocument();
+      expect(screen.queryByRole("group", { name: "Albums" })).not.toBeInTheDocument();
+    });
+
+    it("hides Collections when there are neither trips nor albums", async () => {
+      renderPanel({}, 0, vi.fn(), [], []);
+      await openPanel();
+      expect(screen.queryByText("Collections")).not.toBeInTheDocument();
+    });
+
+    it("checking an album adds its id to albumIds and keeps tripIds", async () => {
+      const { onChange } = renderPanel({ tripIds: ["t1"] });
+      await openPanel();
+      await userEvent.click(screen.getByLabelText("Road trip by Bob"));
+      expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ tripIds: ["t1"], albumIds: ["a2"] }));
+    });
+
+    it("unchecking an album removes its id", async () => {
+      const { onChange } = renderPanel({ albumIds: ["a1", "a2"] });
+      await openPanel();
+      expect(screen.getByLabelText("Family")).toBeChecked();
+      await userEvent.click(screen.getByLabelText("Family"));
+      expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ albumIds: ["a2"] }));
+    });
+  });
+
+  describe("owner filter", () => {
+    it("checks All by default", async () => {
+      renderPanel();
+      await openPanel();
+      const group = within(screen.getByRole("group", { name: "Show" }));
+      expect(group.getByRole("radio", { name: "All" })).toBeChecked();
+      expect(group.getByRole("radio", { name: "Mine" })).not.toBeChecked();
+      expect(group.getByRole("radio", { name: "Shared with me" })).not.toBeChecked();
+    });
+
+    it("reflects the current owner value", async () => {
+      renderPanel({ owner: "mine" });
+      await openPanel();
+      expect(screen.getByRole("radio", { name: "Mine" })).toBeChecked();
+      expect(screen.getByRole("radio", { name: "All" })).not.toBeChecked();
+    });
+
+    it.each([
+      { from: "all", click: "Shared with me", want: "shared" },
+      { from: "all", click: "Mine", want: "mine" },
+      { from: "shared", click: "All", want: "all" },
+    ] as const)("$from → $click sets owner=$want", async ({ from, click, want }) => {
+      const { onChange } = renderPanel({ owner: from, tripIds: ["t1"] });
+      await openPanel();
+      await userEvent.click(screen.getByRole("radio", { name: click }));
+      expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ owner: want, tripIds: ["t1"] }));
+    });
+  });
+
+  describe("active count", () => {
+    // The parent computes activeCount with activeFilterCount; the panel shows it as a badge.
+    it.each([
+      { label: "ticked trips and albums count as one", filters: { tripIds: ["t1"], albumIds: ["a1", "a2"] }, want: "1" },
+      { label: "owner other than all counts as one", filters: { owner: "shared" as const }, want: "1" },
+      { label: "collections plus owner", filters: { albumIds: ["a1"], owner: "mine" as const }, want: "2" },
+    ])("$label", async ({ filters, want }) => {
+      const state = { ...emptyFilters, ...filters };
+      renderPanel(state, activeFilterCount(state));
+      expect(screen.getByRole("button", { name: /filters/i })).toHaveTextContent(want);
+      await openPanel();
+      expect(screen.getByRole("button", { name: /reset/i })).toBeInTheDocument();
+    });
   });
 });
