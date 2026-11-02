@@ -7,7 +7,9 @@ import App from "@/App";
 vi.mock("@/api/client", () => ({
   api: { me: vi.fn(), logout: vi.fn() },
 }));
-vi.mock("@/pages/MapPage", () => ({ MapPage: () => null }));
+vi.mock("@/pages/MapPage", () => ({
+  MapPage: ({ active }: { active: boolean }) => <div data-testid="map-page" data-active={String(active)} />,
+}));
 vi.mock("@/pages/TripsPage", () => ({ TripsPage: () => null }));
 vi.mock("@/pages/AlbumsPage", () => ({ AlbumsPage: () => <div data-testid="albums-page" /> }));
 vi.mock("@/pages/GamePage", () => ({ GamePage: () => null }));
@@ -58,5 +60,31 @@ describe("App tabs", () => {
 
     await userEvent.click(within(nav).getByRole("button", { name: "Albums" }));
     expect(screen.getByTestId("albums-page")).toBeInTheDocument();
+  });
+});
+
+describe("App map tab", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockApi.me.mockResolvedValue({ id: "u1", email: "a@b.c", display_name: "Alice", role: "user" });
+  });
+
+  // Unmounting the map would throw away its markers and reload them all on the next visit.
+  it("keeps the map page mounted, hidden, while another tab is open", async () => {
+    render(<App />);
+    const mapPage = await screen.findByTestId("map-page");
+    expect(mapPage).toHaveAttribute("data-active", "true");
+    expect(mapPage.parentElement).not.toHaveClass("hidden");
+
+    const nav = screen.getByRole("navigation");
+    await userEvent.click(within(nav).getByRole("button", { name: "Albums" }));
+    expect(screen.getByTestId("map-page")).toBe(mapPage);
+    expect(mapPage).toHaveAttribute("data-active", "false");
+    expect(mapPage.parentElement).toHaveClass("hidden");
+
+    await userEvent.click(within(nav).getByRole("button", { name: "Map" }));
+    expect(screen.getByTestId("map-page")).toBe(mapPage);
+    expect(mapPage).toHaveAttribute("data-active", "true");
+    expect(mapPage.parentElement).not.toHaveClass("hidden");
   });
 });

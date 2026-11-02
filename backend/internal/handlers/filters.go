@@ -12,7 +12,7 @@ import (
 
 // validateMediaFilters rejects from_date/to_date, trip_id and album_id values that Postgres would
 // fail to cast, so malformed input is a 400 rather than a query error. It also rejects an owner
-// value other than mine or shared.
+// value other than mine or shared, and a has_location value other than true.
 func validateMediaFilters(q url.Values) error {
 	for _, key := range []string{"from_date", "to_date"} {
 		if v := q.Get(key); v != "" {
@@ -38,6 +38,11 @@ func validateMediaFilters(q url.Values) error {
 	case "", "mine", "shared":
 	default:
 		return errors.New("invalid owner: want mine or shared")
+	}
+	switch q.Get("has_location") {
+	case "", "true":
+	default:
+		return errors.New("invalid has_location: want true")
 	}
 	return nil
 }
@@ -110,6 +115,9 @@ func buildMediaFilter(q url.Values, userID string) (conds []string, args []any) 
 		conds = append(conds, "m.owner_id = $1")
 	case "shared":
 		conds = append(conds, "m.owner_id <> $1")
+	}
+	if q.Get("has_location") == "true" {
+		conds = append(conds, "m.location IS NOT NULL")
 	}
 	return conds, args
 }

@@ -26,21 +26,25 @@ vi.mock("../api/client", () => ({
 // The latest props MapPage rendered FilterPanel with.
 const panel = vi.hoisted(() => ({ props: null as ComponentProps<typeof FilterPanel> | null }));
 
-// One button per item stands in for clicking its marker.
+// One button per item stands in for clicking its marker, and "select cluster" for clicking the
+// first marker of a spider holding every item.
 vi.mock("../components/map/MediaMap", () => ({
   MediaMap: ({
     items,
     onSelect,
+    visible,
   }: {
     items: MediaItem[];
     onSelect: (item: MediaItem, peers: MediaItem[]) => void;
+    visible?: boolean;
   }) => (
-    <div data-testid="media-map" data-count={items.length}>
+    <div data-testid="media-map" data-count={items.length} data-visible={String(visible)}>
       {items.map((item) => (
         <button key={item.id} onClick={() => onSelect(item, [])}>
           select {item.id}
         </button>
       ))}
+      <button onClick={() => onSelect(items[0], items)}>select cluster</button>
     </div>
   ),
 }));
@@ -69,12 +73,30 @@ const mockApi = api as unknown as Record<
 
 const me: CurrentUser = { id: "u-me", email: "me@example.test", display_name: "Me", role: "user" };
 
-function renderPage() {
-  return render(
+function page(active?: boolean) {
+  return (
     <AuthContext.Provider value={me}>
-      <MapPage />
+      <MapPage active={active} />
     </AuthContext.Provider>
   );
+}
+
+function renderPage(active?: boolean) {
+  const result = render(page(active));
+  return { ...result, setActive: (a: boolean) => result.rerender(page(a)) };
+}
+
+const PAGE_SIZE = 5000;
+
+// What every /media request carries besides the filters.
+function pageParams(offset: number) {
+  return { has_location: "true", limit: String(PAGE_SIZE), offset: String(offset) };
+}
+
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
 }
 
 function makeItem(id: string): MediaItem {
@@ -156,7 +178,7 @@ describe("MapPage", () => {
     await waitFor(() => {
       const mediaCalls = mockApi.get.mock.calls.filter((c) => c[0] === "/media");
       expect(mediaCalls).toHaveLength(1);
-      expect(mediaCalls[0][1]).toEqual({ offset: "0" });
+      expect(mediaCalls[0][1]).toEqual(pageParams(0));
     });
   });
 
@@ -171,7 +193,7 @@ describe("MapPage", () => {
     await waitFor(() => {
       const mediaCalls = mockApi.get.mock.calls.filter((c) => c[0] === "/media");
       expect(mediaCalls).toHaveLength(2);
-      expect(mediaCalls[1][1]).toEqual({ trip_id: ["t1"], album_id: ["a1"], owner: "shared", offset: "0" });
+      expect(mediaCalls[1][1]).toEqual({ trip_id: ["t1"], album_id: ["a1"], owner: "shared", ...pageParams(0) });
     });
     // Ticked trips and albums count as one, owner ≠ all as another.
     expect(panel.props?.activeCount).toBe(2);
@@ -186,8 +208,8 @@ describe("MapPage", () => {
     });
   });
 
-  it("fetches next page when first page returns 500 items", async () => {
-    const page1 = Array.from({ length: 500 }, (_, i) => makeItem(`p1-${i}`));
+  it("fetches next page when first page is full", async () => {
+    const page1 = Array.from({ length: PAGE_SIZE }, (_, i) => makeItem(`p1-${i}`));
     mockApi.get.mockImplementation((path: string, params?: Record<string, string | string[]>) => {
       if (path === "/trips") return Promise.resolve(sampleTrips);
       const offset = params?.offset ?? "0";
@@ -200,11 +222,11 @@ describe("MapPage", () => {
     await waitFor(() => {
       const mediaCalls = mockApi.get.mock.calls.filter((c) => c[0] === "/media");
       expect(mediaCalls).toHaveLength(2);
-      expect(mediaCalls[1][1]).toMatchObject({ offset: "500" });
+      expect(mediaCalls[1][1]).toEqual(pageParams(PAGE_SIZE));
     });
   });
 
-  it("stops fetching when page returns fewer than 500 items", async () => {
+  it("stops fetching when a page is not full", async () => {
     const partialPage = [makeItem("a"), makeItem("b"), makeItem("c")];
     mockApi.get.mockImplementation((path: string) => {
       if (path === "/trips") return Promise.resolve(sampleTrips);
@@ -220,7 +242,7 @@ describe("MapPage", () => {
   });
 
   it("accumulates items across pages", async () => {
-    const page1 = Array.from({ length: 500 }, (_, i) => makeItem(`p1-${i}`));
+    const page1 = Array.from({ length: PAGE_SIZE }, (_, i) => makeItem(`p1-${i}`));
     const page2 = Array.from({ length: 3 }, (_, i) => makeItem(`p2-${i}`));
     mockApi.get.mockImplementation((path: string, params?: Record<string, string | string[]>) => {
       if (path === "/trips") return Promise.resolve(sampleTrips);
@@ -233,7 +255,7 @@ describe("MapPage", () => {
 
     await waitFor(() => {
       const map = screen.getByTestId("media-map");
-      expect(Number(map.getAttribute("data-count"))).toBe(503);
+      expect(Number(map.getAttribute("data-count"))).toBe(PAGE_SIZE + 3);
     });
   });
 
@@ -331,7 +353,7 @@ describe("MapPage", () => {
 
       expect(mockApi.removeFromAlbum).toHaveBeenCalledWith("a1", { mediaIds: ["own"] });
       await waitFor(() => expect(mediaCalls()).toHaveLength(3));
-      expect(mediaCalls()[2][1]).toEqual({ album_id: ["a1"], offset: "0" });
+      expect(mediaCalls()[2][1]).toEqual({ album_id: ["a1"], ...pageParams(0) });
     });
 
     it("leaves the media alone when the changed album is not filtered on", async () => {
@@ -347,6 +369,132 @@ describe("MapPage", () => {
       await waitFor(() => expect(box).toBeEnabled());
       expect(mockApi.removeFromAlbum).toHaveBeenCalledWith("a1", { mediaIds: ["own"] });
       expect(mediaCalls()).toHaveLength(2);
+    });
+  });
+
+  describe("while another tab is open", () => {
+    const mediaCalls = () => mockApi.get.mock.calls.filter((c) => c[0] === "/media");
+    const tripCalls = () => mockApi.get.mock.calls.filter((c) => c[0] === "/trips");
+    const count = () => screen.getByTestId("media-map").getAttribute("data-count");
+
+    it("keeps the markers, then reloads in the background when shown again", async () => {
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return Promise.resolve([makeItem("x")]);
+      });
+      const { setActive } = renderPage(true);
+      await waitFor(() => expect(count()).toBe("1"));
+      expect(screen.getByTestId("media-map").getAttribute("data-visible")).toBe("true");
+
+      setActive(false);
+      expect(screen.getByTestId("media-map").getAttribute("data-visible")).toBe("false");
+      expect(count()).toBe("1");
+      expect(mediaCalls()).toHaveLength(1);
+
+      const reload = deferred<MediaItem[]>();
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return reload.promise;
+      });
+      setActive(true);
+      await waitFor(() => expect(mediaCalls()).toHaveLength(2));
+      expect(mediaCalls()[1][1]).toEqual(pageParams(0));
+      expect(tripCalls()).toHaveLength(2);
+      expect(mockApi.listAlbums).toHaveBeenCalledTimes(2);
+      // The old markers stay until the reload is complete.
+      expect(count()).toBe("1");
+      expect(screen.getByText("Loading…")).toBeInTheDocument();
+
+      await act(async () => reload.resolve([makeItem("x"), makeItem("y")]));
+      expect(count()).toBe("2");
+      expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+    });
+
+    it("swaps in a multi-page reload only once its last page arrived", async () => {
+      const full = Array.from({ length: PAGE_SIZE }, (_, i) => makeItem(`p-${i}`));
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return Promise.resolve([makeItem("old")]);
+      });
+      const { setActive } = renderPage(true);
+      await waitFor(() => expect(count()).toBe("1"));
+
+      const last = deferred<MediaItem[]>();
+      mockApi.get.mockImplementation((path: string, params?: Record<string, string | string[]>) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return params?.offset === "0" ? Promise.resolve(full) : last.promise;
+      });
+      setActive(false);
+      setActive(true);
+      await waitFor(() => expect(mediaCalls()).toHaveLength(3));
+      expect(count()).toBe("1");
+
+      await act(async () => last.resolve([makeItem("new")]));
+      expect(count()).toBe(String(PAGE_SIZE + 1));
+    });
+
+    it("keeps the markers when the background reload fails", async () => {
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return Promise.resolve([makeItem("x")]);
+      });
+      const { setActive } = renderPage(true);
+      await waitFor(() => expect(count()).toBe("1"));
+
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return Promise.reject(new Error("GET /media failed: 500"));
+      });
+      setActive(false);
+      setActive(true);
+
+      expect(await screen.findByText("GET /media failed: 500")).toBeInTheDocument();
+      expect(count()).toBe("1");
+    });
+
+    it("clears the map when the filters change", async () => {
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return Promise.resolve([makeItem("x")]);
+      });
+      renderPage(true);
+      await waitFor(() => expect(count()).toBe("1"));
+
+      const filtered = deferred<MediaItem[]>();
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return filtered.promise;
+      });
+      act(() => panel.props!.onChange({ ...emptyFilters, owner: "mine" }));
+      expect(count()).toBe("0");
+
+      await act(async () => filtered.resolve([makeItem("y")]));
+      expect(count()).toBe("1");
+    });
+
+    it("does not reload when mounted hidden or when hidden", async () => {
+      const { setActive } = renderPage(false);
+      await waitFor(() => expect(mediaCalls()).toHaveLength(1));
+      setActive(false);
+      await act(async () => {});
+      expect(mediaCalls()).toHaveLength(1);
+    });
+
+    it("leaves the arrow keys alone", async () => {
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return Promise.resolve([makeItem("a"), makeItem("b"), makeItem("c")]);
+      });
+      const { setActive } = renderPage(true);
+      await userEvent.click(await screen.findByRole("button", { name: "select cluster" }));
+      expect(screen.getByText("1 / 3")).toBeInTheDocument();
+
+      await userEvent.keyboard("{ArrowRight}");
+      expect(screen.getByText("2 / 3")).toBeInTheDocument();
+
+      setActive(false);
+      await userEvent.keyboard("{ArrowRight}");
+      expect(screen.getByText("2 / 3")).toBeInTheDocument();
     });
   });
 

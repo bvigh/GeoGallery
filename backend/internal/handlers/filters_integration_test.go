@@ -39,6 +39,8 @@ func TestMediaFilters_ListAndRound(t *testing.T) {
 			[]string{a3, f.mediaAUnlocated}, []string{a3}, 1},
 		{"to_date includes the whole day", f.userA, "to_date=2024-05-02",
 			[]string{f.mediaA}, []string{f.mediaA}, 1},
+		{"has_location", f.userA, "has_location=true",
+			[]string{a3, f.mediaA}, []string{a3, f.mediaA}, budapestViennaKm},
 		{"media_type", f.userA, "media_type=video",
 			[]string{a3}, []string{a3}, 1},
 		{"trip_id", f.userA, "trip_id=" + f.tripA,
@@ -175,4 +177,9 @@ func TestMediaList_OffsetPagesHoldEveryItemOnce(t *testing.T) {
 	assert.Empty(t, twice, "items listed on more than one page")
 	assert.Empty(t, never, "items listed on no page")
 	assert.Len(t, got, len(want))
+
+	// The map asks for large pages: one holds everything, in the same order as the small pages.
+	rec := do(t, f.router, f.userB, http.MethodGet, "/api/media?limit=5000", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, got, decodeIDs(t, rec))
 }

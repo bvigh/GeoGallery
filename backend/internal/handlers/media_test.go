@@ -179,7 +179,7 @@ func TestList_NoParams_ReturnsAll(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Regexp(t, `FROM media m JOIN users u ON u\.id = m\.owner_id\s+WHERE `+
 		regexp.QuoteMeta(readableMediaCond("m", 1))+`\s+ORDER BY`, capturedSQL, "read access is the only condition")
-	assert.Equal(t, []any{testOwnerID, 0}, capturedArgs)
+	assert.Equal(t, []any{testOwnerID, defaultListLimit, 0}, capturedArgs, "owner, limit, offset")
 }
 
 func TestList_OwnerFieldsAndTripIDOnlyForOwnRows(t *testing.T) {
@@ -371,7 +371,44 @@ func TestList_MultipleFilters_Combined(t *testing.T) {
 	assert.Contains(t, capturedSQL, "WHERE "+readableMediaCond("m", 1)+" AND")
 	assert.Equal(t, testOwnerID, capturedArgs[0])
 	assert.Equal(t, "2024-01-01", capturedArgs[1])
-	assert.Len(t, capturedArgs, 5) // owner, from_date, media_type, trip_id, offset
+	assert.Len(t, capturedArgs, 6) // owner, from_date, media_type, trip_id, limit, offset
+}
+
+func TestList_Limit_PassedThrough(t *testing.T) {
+	var capturedSQL string
+	var capturedArgs []any
+
+	db := &mockDB{queryFn: func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+		capturedSQL = sql
+		capturedArgs = args
+		return emptyRows(), nil
+	}}
+
+	h := &MediaHandler{db: db, storage: &mockStorage{}}
+	w := httptest.NewRecorder()
+	h.List(w, listRequest("limit=5000&offset=5000"))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, capturedSQL, "LIMIT $2 OFFSET $3")
+	assert.Equal(t, []any{testOwnerID, 5000, 5000}, capturedArgs)
+}
+
+func TestList_InvalidLimit_Returns400(t *testing.T) {
+	for _, limit := range []string{"0", "-1", "5001", "abc", "1.5"} {
+		t.Run(limit, func(t *testing.T) {
+			db := &mockDB{queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+				t.Fatal("no query for an invalid limit")
+				return nil, nil
+			}}
+
+			h := &MediaHandler{db: db, storage: &mockStorage{}}
+			w := httptest.NewRecorder()
+			h.List(w, listRequest("limit="+limit))
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Contains(t, w.Body.String(), "invalid limit: want 1-5000")
+		})
+	}
 }
 
 func TestList_DBError_Returns500(t *testing.T) {

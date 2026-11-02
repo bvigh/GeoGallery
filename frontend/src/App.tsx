@@ -74,7 +74,11 @@ function Shell() {
       </header>
 
       <main className="flex-1 overflow-hidden">
-        {active === "map" && <MapPage />}
+        {/* Hidden rather than unmounted: rebuilding the map and reloading every marker on each
+            visit is slow. */}
+        <div className={cn("h-full", active !== "map" && "hidden")}>
+          <MapPage active={active === "map"} />
+        </div>
         {active === "trips" && <TripsPage />}
         {active === "albums" && <AlbumsPage />}
         {active === "game" && <GamePage />}
