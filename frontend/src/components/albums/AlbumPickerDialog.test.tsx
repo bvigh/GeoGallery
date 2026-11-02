@@ -30,6 +30,7 @@ function makeAlbum(overrides: Partial<Album>): Album {
     start_date: null,
     end_date: null,
     created_at: "2026-01-01T00:00:00Z",
+    last_added_at: null,
     ...overrides,
   };
 }
@@ -116,6 +117,28 @@ describe("AlbumPickerDialog", () => {
 
     expect(mockApi.createAlbum).toHaveBeenCalledWith("Ring road");
     expect(props.onPick).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists the recently used albums first without preselecting one", async () => {
+    mockApi.listAlbums.mockResolvedValue([
+      shared,
+      family,
+      makeAlbum({ id: "a3", name: "Recent", is_owner: false, last_added_at: "2026-05-01T00:00:00Z" }),
+    ]);
+    renderPicker();
+    const dialog = await loadedDialog();
+
+    const radios = within(dialog).getAllByRole("radio");
+    expect(radios.map((r) => r.closest("label")?.textContent)).toEqual([
+      "Recentby Me",
+      "Family",
+      "Road tripby Bob",
+      "New album",
+    ]);
+    expect(within(dialog).getByRole("radio", { name: "New album" })).toBeChecked();
+    // Choosing does not reorder the list.
+    await userEvent.click(within(dialog).getByRole("radio", { name: "Family" }));
+    expect(within(dialog).getAllByRole("radio")).toEqual(radios);
   });
 
   it("preselects an album that already has the default name", async () => {

@@ -36,6 +36,7 @@ function makeAlbum(overrides: Partial<Album>): Album {
     start_date: null,
     end_date: null,
     created_at: "2026-01-01T00:00:00Z",
+    last_added_at: null,
     ...overrides,
   };
 }

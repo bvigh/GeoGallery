@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { api } from "@/api/client";
 import type { Album } from "@/types";
 import { matchesSearch, SEARCH_MIN_ITEMS } from "@/lib/search";
+import { byRecentUse } from "@/lib/albums";
 import { SearchInput } from "@/components/SearchInput";
 import {
   Dialog,
@@ -69,10 +70,11 @@ export function AlbumPickerDialog({
       .listAlbums()
       .then((list) => {
         if (gen !== generation.current) return;
-        setAlbums(list);
+        setAlbums(byRecentUse(list));
         setStatus("ready");
         // Adding the same trip again is idempotent, so offer the album it went into
-        // last time instead of a duplicate with the same name.
+        // last time instead of a duplicate with the same name. The most recent album is
+        // never preselected: on the Upload page that would silently share the uploads.
         const match =
           list.find((a) => a.id === initialAlbumId) ?? list.find((a) => a.name === defaultName.trim());
         setChoice((prev) => prev ?? (match ? match.id : NEW_ALBUM));

@@ -47,14 +47,18 @@ type albumItem struct {
 	StartDate   *string   `json:"start_date"` // min/max taken_at as YYYY-MM-DD; null without dated media
 	EndDate     *string   `json:"end_date"`
 	CreatedAt   time.Time `json:"created_at"`
+	// LastAddedAt is when the caller last added one of their items, for ordering the album
+	// pickers by recent use; null when none of their items is in the album.
+	LastAddedAt *time.Time `json:"last_added_at"`
 }
 
 // albumSelect yields one albumItem row per album user $1 belongs to. Every member can read every
-// item, so the counts and dates are the same for all members.
+// item, so the counts and dates are the same for all members; last_added_at is the caller's own.
 const albumSelect = `
 	SELECT a.id, a.name, a.owner_id, COALESCE(u.display_name, u.email), a.owner_id = $1,
 	       (SELECT COUNT(*) FROM album_members mm WHERE mm.album_id = a.id),
-	       s.media_count, s.start_date, s.end_date, a.created_at
+	       s.media_count, s.start_date, s.end_date, a.created_at,
+	       (SELECT MAX(am.added_at) FROM album_media am WHERE am.album_id = a.id AND am.owner_id = $1)
 	FROM albums a
 	JOIN album_members me ON me.album_id = a.id AND me.user_id = $1
 	JOIN users u ON u.id = a.owner_id
@@ -67,7 +71,7 @@ const albumSelect = `
 func scanAlbum(row pgx.Row) (albumItem, error) {
 	var a albumItem
 	err := row.Scan(&a.ID, &a.Name, &a.OwnerID, &a.OwnerName, &a.IsOwner,
-		&a.MemberCount, &a.MediaCount, &a.StartDate, &a.EndDate, &a.CreatedAt)
+		&a.MemberCount, &a.MediaCount, &a.StartDate, &a.EndDate, &a.CreatedAt, &a.LastAddedAt)
 	return a, err
 }
 

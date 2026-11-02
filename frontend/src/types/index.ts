@@ -46,6 +46,8 @@ export interface Album {
   start_date: string | null;
   end_date: string | null;
   created_at: string;
+  // When the caller last added one of their items; null when none of them is in the album.
+  last_added_at: string | null;
 }
 
 export interface AlbumMember {

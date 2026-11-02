@@ -65,6 +65,7 @@ const owned: Album = {
   start_date: "2025-06-01T10:00:00Z",
   end_date: "2025-06-14T18:00:00Z",
   created_at: "2025-05-01T00:00:00Z",
+  last_added_at: null,
 };
 
 const shared: Album = {
@@ -78,6 +79,7 @@ const shared: Album = {
   start_date: null,
   end_date: null,
   created_at: "2025-05-02T00:00:00Z",
+  last_added_at: null,
 };
 
 const ownedMembers: AlbumMember[] = [

@@ -3,6 +3,7 @@ import { AlbumIcon } from "lucide-react";
 import { api } from "@/api/client";
 import type { Album, MediaItem } from "@/types";
 import { matchesSearch, SEARCH_MIN_ITEMS } from "@/lib/search";
+import { byRecentUse } from "@/lib/albums";
 import { SearchInput } from "@/components/SearchInput";
 import {
   Dialog,
@@ -61,10 +62,10 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
         api.mediaAlbums(item.id),
       ]);
       if (gen !== generation.current) return;
-      // The albums the item is in come first. Sorted once per load, so ticking
-      // does not move rows under the pointer.
+      // The albums the item is in come first, then the recently used ones. Sorted
+      // once per load, so ticking does not move rows under the pointer.
       const inIds = new Set(inAlbums.map((a) => a.id));
-      setAlbums([...all].sort((a, b) => Number(inIds.has(b.id)) - Number(inIds.has(a.id))));
+      setAlbums(byRecentUse(all).sort((a, b) => Number(inIds.has(b.id)) - Number(inIds.has(a.id))));
       setContaining(inAlbums);
       setStatus("ready");
     } catch (e) {

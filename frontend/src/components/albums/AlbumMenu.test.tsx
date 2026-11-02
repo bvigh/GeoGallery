@@ -50,6 +50,7 @@ function makeAlbum(overrides: Partial<Album>): Album {
     start_date: null,
     end_date: null,
     created_at: "2026-01-01T00:00:00Z",
+    last_added_at: null,
     ...overrides,
   };
 }
@@ -81,6 +82,28 @@ describe("AlbumMenu", () => {
     expect(icelandBox).toBeChecked();
     expect(within(dialog).getByText("by Bob")).toBeInTheDocument();
     expect(mockApi.mediaAlbums).toHaveBeenCalledWith("m1");
+  });
+
+  it("lists the albums the item is in, then the recently used ones", async () => {
+    mockApi.listAlbums.mockResolvedValue([
+      makeAlbum({ id: "a3", name: "Unused", owner_id: "u-bob", owner_name: "Bob", is_owner: false }),
+      family,
+      iceland,
+      makeAlbum({ id: "a4", name: "Recent", is_owner: false, last_added_at: "2026-05-01T00:00:00Z" }),
+    ]);
+    render(<AlbumMenu item={item} isOwn />);
+    const dialog = await openMenu();
+    const names = () =>
+      within(dialog)
+        .getAllByRole("checkbox")
+        .map((c) => c.closest("label")?.textContent);
+
+    await within(dialog).findByRole("checkbox", { name: /Family/ });
+    expect(names()).toEqual(["Icelandby Bob", "Recentby Me", "Family", "Unusedby Bob"]);
+    // Ticking does not reorder the list under the pointer.
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "Family" }));
+    await waitFor(() => expect(mockApi.addToAlbum).toHaveBeenCalled());
+    expect(names()).toEqual(["Icelandby Bob", "Recentby Me", "Family", "Unusedby Bob"]);
   });
 
   it.each([

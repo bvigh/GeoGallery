@@ -42,6 +42,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `frontend/src/components/MediaGalleryOverlay.tsx` | Full-screen gallery for a title + media query params; shared by the Trips and Albums pages (replaces `TripGalleryOverlay`) |
 | `frontend/src/lib/filters.ts` | `emptyFilters`, `filterParams` (`FilterState` → `/api/media` and `/api/game/round` params), `activeFilterCount` |
 | `frontend/src/lib/errors.ts` | `describeError` — album-aware error text from an `ApiError` status (404 / 403) |
+| `frontend/src/lib/albums.ts` | `byRecentUse`: the album pickers' order (`last_added_at`, else `created_at` for own albums, never-used last) |
 | `frontend/src/lib/search.ts` | `matchesSearch` (case- and accent-insensitive, every word must match a field) and `SEARCH_MIN_ITEMS` |
 | `frontend/src/pages/` | One file per tab: MapPage, TripsPage ("Add to album…" per trip), AlbumsPage (album cards, members dialog with a searchable user list and leave, gallery), GamePage, UploadPage (optional "Add to album" through `AlbumPickerDialog`), SettingsPage (API tokens), AdminPage (users, invites) |
 | `frontend/e2e/` | Playwright suite: `playwright.config.ts`, `support.ts` (`E2E_BACKEND_ENV`), `auth.setup.ts`, `*.e2e.ts`; `sharing.e2e.ts` runs in its own `sharing` project after all others |
@@ -106,7 +107,7 @@ Auth column:
 | `GET` | `/api/trips` | user | List the caller's trips with media count + cover key (`[]` when none) |
 | `PATCH` | `/api/trips/{id}` | user | Edit a trip (`{"name"?, "start_date"?, "end_date"?}`, at least one) — sets `user_edited = true` |
 | `DELETE` | `/api/trips/{id}` | session-only | Delete a trip (only `user_edited = true` trips); unassigns media for re-detection |
-| `GET` | `/api/albums` | user | Albums the caller is a member of: `[{id, name, owner_id, owner_name, is_owner, member_count, media_count, start_date, end_date, created_at}]` (dates = min/max `taken_at`, `null` without dated media), newest first |
+| `GET` | `/api/albums` | user | Albums the caller is a member of: `[{id, name, owner_id, owner_name, is_owner, member_count, media_count, start_date, end_date, created_at, last_added_at}]` (dates = min/max `taken_at`, `null` without dated media; `last_added_at` = the caller's latest contribution, `null` without one), newest first |
 | `POST` | `/api/albums` | user | `{"name"}` (trimmed, 1–200 chars) → 201 album; inserts the album and the owner's member row in one transaction |
 | `PATCH` | `/api/albums/{id}` | user | Rename `{"name"}` → 204; owner only (member 403, non-member 404) |
 | `DELETE` | `/api/albums/{id}` | session-only | Delete the album → 204; owner only; members and contributions cascade, the media themselves stay |
@@ -164,6 +165,7 @@ There is no HTTP ingest route. Folder scans are `server scan --user <id>` only.
 - Types shared across pages/components live in `frontend/src/types/index.ts`.
 - Shared media: the UI decides "is mine" by comparing `MediaItem.owner_id` with the `AuthContext` user. A shared item shows "Shared by {owner_name}" and hides delete, edit location and edit view. `AlbumMenu` gives an own item add/remove checkboxes and "New album…", and a shared item only a read-only list of the albums it came through (no re-sharing). This is cosmetic too: the backend returns 404 for writes on shared media.
 - Map and Game filters: `FilterState` (`albumIds`, `owner: "all" | "mine" | "shared"` beside dates, trips and media types) becomes query params only through `filterParams` in `src/lib/filters.ts`. FilterPanel's "Collections" (trips + albums) count as one active filter, and the backend ORs them.
+- `AlbumMenu` and `AlbumPickerDialog` order albums with `byRecentUse` once per load (`AlbumMenu` puts the item's albums first), so rows never move under the pointer. The picker never preselects the most recent album: on the Upload page that would silently share the uploads. The Albums page and the filter panel keep the server order (newest album first).
 - Long lists (filter panel collections, `AlbumMenu`, `AlbumPickerDialog`, the members dialog's user list) get a `SearchInput` once they reach `SEARCH_MIN_ITEMS` and filter with `matchesSearch`. Ticked or chosen items stay listed while searching, so they can always be unticked.
 - Vite dev proxy: `/api` → `process.env.VITE_API_TARGET ?? "http://localhost:8080"` (`vite.config.ts`). Auth relies on same-origin `/api`; the backend sends no CORS headers.
 - Path alias `@` resolves to `src/` — use `@/components/...` not relative paths.
@@ -302,7 +304,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `internal/auth/store_integration_test.go` — invite consumption and claim races, `SetDisabled` (incl. creator's invites), sessions/tokens refused for inactive users, `RebindIssuer`, token SQL
 - `internal/handlers/ownership_integration_test.go` — cross-user isolation on every route, matcher/trip-detection scoping, per-owner dedup, composite FK
 - `internal/handlers/ingest_scan_integration_test.go` — `RunIngestScan` ownership, re-run skip, per-owner dedup, failure count, no orphan objects
-- `internal/handlers/albums_integration_test.go` — every album route: create/list, rename, delete keeps media, members, remove/leave, disabled users keep memberships, album media add/remove, `/api/media/{id}/albums`, `/api/users`
+- `internal/handlers/albums_integration_test.go` — every album route: create/list (incl. the caller's `last_added_at`), rename, delete keeps media, members, remove/leave, disabled users keep memberships, album media add/remove, `/api/media/{id}/albums`, `/api/users`
 - `internal/handlers/sharing_integration_test.go` — read access follows membership, members cannot write shared media, filters on shared rows, owner fields, GPS isolation, trip detection ignores shared media
 - `internal/handlers/filters_integration_test.go` — `/api/media` and `/api/game/round` filters, canonical ID binding, OFFSET pages hold every item once
 - `internal/handlers/upload_album_integration_test.go` — upload `?album_id` refused before the body is read, new files and duplicates added, `registerMedia` returns the existing ID
@@ -317,7 +319,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `src/pages/MapPage.test.tsx`, `TripsPage.test.tsx`, `AlbumsPage.test.tsx`, `GamePage.test.tsx`, `UploadPage.test.tsx`, `SettingsPage.test.tsx`, `AdminPage.test.tsx`
 - `src/components/map/FilterPanel.test.tsx`, `MediaMap.test.tsx`
 - `src/components/MediaGalleryOverlay.test.tsx`, `src/components/albums/AlbumMenu.test.tsx`, `AlbumPickerDialog.test.tsx`
-- `src/lib/filters.test.ts`, `errors.test.ts`, `search.test.ts`, `uploadBatches.test.ts`
+- `src/lib/filters.test.ts`, `errors.test.ts`, `search.test.ts`, `albums.test.ts`, `uploadBatches.test.ts`
 - Vitest + React Testing Library. Run with `npm run test`.
 - Test components that contain logic; pure utility functions in `src/lib/` get unit tests.
 
