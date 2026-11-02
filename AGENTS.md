@@ -44,6 +44,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `frontend/src/lib/errors.ts` | `describeError` — album-aware error text from an `ApiError` status (404 / 403) |
 | `frontend/src/lib/albums.ts` | `byRecentUse`: the album pickers' order (`last_added_at`, else `created_at` for own albums, never-used last) |
 | `frontend/src/lib/search.ts` | `matchesSearch` (case- and accent-insensitive, every word must match a field) and `SEARCH_MIN_ITEMS` |
+| `frontend/src/lib/trips.ts` | `groupTripsByYear`: the filter panel's year groups (newest first, undated last, server order inside) |
 | `frontend/src/pages/` | One file per tab: MapPage, TripsPage ("Add to album…" per trip), AlbumsPage (album cards, members dialog with a searchable user list and leave, gallery), GamePage, UploadPage (optional "Add to album" through `AlbumPickerDialog`), SettingsPage (API tokens), AdminPage (users, invites) |
 | `frontend/e2e/` | Playwright suite: `playwright.config.ts`, `support.ts` (`E2E_BACKEND_ENV`), `auth.setup.ts`, `*.e2e.ts`; `sharing.e2e.ts` runs in its own `sharing` project after all others |
 | `scripts/e2e-reset-db.sh` | Drops and recreates `geogallery_e2e` via `docker compose exec db` |
@@ -167,6 +168,7 @@ There is no HTTP ingest route. Folder scans are `server scan --user <id>` only.
 - Map and Game filters: `FilterState` (`albumIds`, `owner: "all" | "mine" | "shared"` beside dates, trips and media types) becomes query params only through `filterParams` in `src/lib/filters.ts`. FilterPanel's "Collections" (trips + albums) count as one active filter, and the backend ORs them.
 - `AlbumMenu` and `AlbumPickerDialog` order albums with `byRecentUse` once per load (`AlbumMenu` puts the item's albums first), so rows never move under the pointer. The picker never preselects the most recent album: on the Upload page that would silently share the uploads. The Albums page and the filter panel keep the server order (newest album first).
 - Long lists (filter panel collections, `AlbumMenu`, `AlbumPickerDialog`, the members dialog's user list) get a `SearchInput` once they reach `SEARCH_MIN_ITEMS` and filter with `matchesSearch`. Ticked or chosen items stay listed while searching, so they can always be unticked.
+- The filter panel puts trips under collapsible year headers (`groupTripsByYear`) once they span more than one year; "Unassigned" stays above them and albums stay flat. Only the newest year starts open, and the header counts ticked trips. A search opens every year with a visible trip and hides the rest without changing the user's own expansion, which returns when the query is cleared. Both reset when the panel closes.
 - Vite dev proxy: `/api` → `process.env.VITE_API_TARGET ?? "http://localhost:8080"` (`vite.config.ts`). Auth relies on same-origin `/api`; the backend sends no CORS headers.
 - Path alias `@` resolves to `src/` — use `@/components/...` not relative paths.
 - shadcn/ui components in `src/components/ui/`. Add new ones with `npx shadcn@latest add <component>`.
@@ -319,7 +321,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `src/pages/MapPage.test.tsx`, `TripsPage.test.tsx`, `AlbumsPage.test.tsx`, `GamePage.test.tsx`, `UploadPage.test.tsx`, `SettingsPage.test.tsx`, `AdminPage.test.tsx`
 - `src/components/map/FilterPanel.test.tsx`, `MediaMap.test.tsx`
 - `src/components/MediaGalleryOverlay.test.tsx`, `src/components/albums/AlbumMenu.test.tsx`, `AlbumPickerDialog.test.tsx`
-- `src/lib/filters.test.ts`, `errors.test.ts`, `search.test.ts`, `albums.test.ts`, `uploadBatches.test.ts`
+- `src/lib/filters.test.ts`, `errors.test.ts`, `search.test.ts`, `albums.test.ts`, `trips.test.ts`, `uploadBatches.test.ts`
 - Vitest + React Testing Library. Run with `npm run test`.
 - Test components that contain logic; pure utility functions in `src/lib/` get unit tests.
 

@@ -2,6 +2,7 @@ import { useId, useState, type ReactNode } from "react";
 import type { Album, FilterState, MediaItem, Trip } from "@/types";
 import { emptyFilters } from "@/lib/filters";
 import { matchesSearch, SEARCH_MIN_ITEMS } from "@/lib/search";
+import { groupTripsByYear } from "@/lib/trips";
 import { SearchInput } from "@/components/SearchInput";
 
 const ALL_MEDIA_TYPES: MediaItem["media_type"][] = ["photo", "video", "photo_360", "video_360"];
@@ -59,16 +60,30 @@ function toggle<T>(list: T[], value: T): T[] {
 
 // Trips and albums are one filter: the backend matches media in any ticked collection.
 // Ticked collections stay listed while searching, so they can always be unticked.
+// Trips spanning more than one year sit under collapsible year headers, only the newest
+// open by default. A search opens every year with a visible trip and hides the others,
+// without touching the user's own choices, which come back when the query is cleared.
 function Collections({ trips, albums, filters, onChange }: Pick<Props, "trips" | "albums" | "filters" | "onChange">) {
   const [query, setQuery] = useState("");
-  const visibleTrips = trips.filter(
-    (t) => filters.tripIds.includes(t.id) || matchesSearch(query, t.name, t.start_date, t.end_date)
-  );
+  const [expandedByUser, setExpandedByUser] = useState<ReadonlyMap<string, boolean>>(new Map());
+  const searching = query.trim() !== "";
+  const tripVisible = (t: Trip) =>
+    filters.tripIds.includes(t.id) || matchesSearch(query, t.name, t.start_date, t.end_date);
+  const visibleTrips = trips.filter(tripVisible);
+  const yearGroups = groupTripsByYear(trips);
   const showUnassigned = filters.tripIds.includes("unassigned") || matchesSearch(query, "Unassigned");
   const visibleAlbums = albums.filter(
     (a) => filters.albumIds.includes(a.id) || matchesSearch(query, a.name, a.owner_name)
   );
   const tripsShown = trips.length > 0 && (showUnassigned || visibleTrips.length > 0);
+  const tripCheckbox = (trip: Trip) => (
+    <Checkbox
+      key={trip.id}
+      checked={filters.tripIds.includes(trip.id)}
+      onChange={() => onChange({ ...filters, tripIds: toggle(filters.tripIds, trip.id) })}
+      label={trip.name}
+    />
+  );
 
   return (
     <div>
@@ -87,14 +102,36 @@ function Collections({ trips, albums, filters, onChange }: Pick<Props, "trips" |
                 label="Unassigned"
               />
             )}
-            {visibleTrips.map((trip) => (
-              <Checkbox
-                key={trip.id}
-                checked={filters.tripIds.includes(trip.id)}
-                onChange={() => onChange({ ...filters, tripIds: toggle(filters.tripIds, trip.id) })}
-                label={trip.name}
-              />
-            ))}
+            {yearGroups.length > 1
+              ? yearGroups.map((group, i) => {
+                  const key = group.year ?? "none";
+                  const shown = group.trips.filter(tripVisible);
+                  if (searching && shown.length === 0) return null;
+                  const userOpen = expandedByUser.get(key) ?? i === 0;
+                  const open = searching || userOpen;
+                  const selected = group.trips.filter((t) => filters.tripIds.includes(t.id)).length;
+                  return (
+                    <div key={key} className="space-y-1">
+                      <button
+                        type="button"
+                        aria-expanded={open}
+                        disabled={searching}
+                        onClick={() => setExpandedByUser((m) => new Map(m).set(key, !userOpen))}
+                        className="flex w-full items-center gap-1 text-left text-sm hover:text-foreground disabled:cursor-default"
+                      >
+                        <span aria-hidden="true" className="w-3 text-xs text-muted-foreground">
+                          {open ? "▾" : "▸"}
+                        </span>
+                        {group.year ?? "No date"}{" "}
+                        <span className="text-xs text-muted-foreground">
+                          ({group.trips.length}){selected > 0 && ` · ${selected} selected`}
+                        </span>
+                      </button>
+                      {open && <div className="space-y-1 pl-4">{shown.map(tripCheckbox)}</div>}
+                    </div>
+                  );
+                })
+              : visibleTrips.map(tripCheckbox)}
           </div>
         )}
         {visibleAlbums.length > 0 && (
