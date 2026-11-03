@@ -351,6 +351,7 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 			r.Post("/game/guess", h.game.SubmitGuess)
 
 			r.Post("/gps-tracks/import", h.gpsTracks.Import)
+			r.Post("/gps-tracks/upload", h.gpsTracks.Upload)
 			r.Post("/gps-matcher/run", h.gpsMatcher.Run)
 
 			r.Get("/albums", h.albums.List)

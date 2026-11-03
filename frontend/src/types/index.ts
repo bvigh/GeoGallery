@@ -112,10 +112,13 @@ export interface CreatedApiToken extends ApiToken {
   token: string;
 }
 
-export interface GpsImportResult {
+// POST /api/gps-tracks/upload. skipped: points imported before; empty: files without a
+// timestamped point; failed: files that could not be read.
+export interface GpsUploadResult {
   inserted: number;
   skipped: number;
-  errors: { row: number; reason: string }[];
+  empty: string[];
+  failed: { file: string; reason: string }[];
 }
 
 export interface GuessResult {

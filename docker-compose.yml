@@ -2,6 +2,7 @@ services:
   db:
     image: postgis/postgis:16-3.4
     restart: unless-stopped
+    shm_size: 256mb
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-geogallery}
       POSTGRES_USER: ${POSTGRES_USER:-geogallery}

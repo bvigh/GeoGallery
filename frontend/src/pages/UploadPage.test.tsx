@@ -14,7 +14,7 @@ vi.mock("@/api/client", async (importOriginal) => {
       upload: vi.fn(),
       knownHashes: vi.fn(),
       addToAlbum: vi.fn(),
-      importGpsTracks: vi.fn(),
+      uploadGpsTracks: vi.fn(),
       listAlbums: vi.fn(),
       createAlbum: vi.fn(),
     },
@@ -31,7 +31,7 @@ const mockApi = api as unknown as {
   upload: ReturnType<typeof vi.fn>;
   knownHashes: ReturnType<typeof vi.fn>;
   addToAlbum: ReturnType<typeof vi.fn>;
-  importGpsTracks: ReturnType<typeof vi.fn>;
+  uploadGpsTracks: ReturnType<typeof vi.fn>;
   listAlbums: ReturnType<typeof vi.fn>;
   createAlbum: ReturnType<typeof vi.fn>;
 };
@@ -92,7 +92,12 @@ describe("UploadPage", () => {
     mockApi.knownHashes.mockResolvedValue({});
     mockApi.addToAlbum.mockResolvedValue({ added: 0 });
     vi.mocked(canHashFiles).mockReturnValue(true);
-    mockApi.importGpsTracks.mockResolvedValue({ inserted: 5, skipped: 2, errors: [{ row: 3, reason: "bad lat" }] });
+    mockApi.uploadGpsTracks.mockResolvedValue({
+      inserted: 5,
+      skipped: 2,
+      empty: ["route.gpx"],
+      failed: [{ file: "broken.gpx", reason: "gpx: XML syntax error on line 1" }],
+    });
     mockApi.listAlbums.mockResolvedValue([family, iceland]);
   });
 
@@ -506,23 +511,51 @@ describe("UploadPage", () => {
     expect(mockApi.upload).not.toHaveBeenCalled();
   });
 
-  it("imports a GPS JSON file and shows the counts", async () => {
+  it("imports GPS track files and lists empty and failed files", async () => {
     render(<UploadPage />);
-    const file = new File(["[]"], "points.json", { type: "application/json" });
-    await userEvent.upload(screen.getByLabelText("GPS track JSON file"), file);
-    expect(mockApi.importGpsTracks).toHaveBeenCalledWith(file);
-    expect(await screen.findByText("Imported 5 point(s), 2 skipped, 1 invalid")).toBeInTheDocument();
+    const files = [
+      new File(["<gpx/>"], "walk.gpx"),
+      new File(["$GPRMC"], "FILE240615-120000.NMEA"),
+      new File(["{}"], "Zeitachse.json.gz"),
+    ];
+    await userEvent.upload(screen.getByLabelText("GPS track files"), files);
+    expect(mockApi.uploadGpsTracks).toHaveBeenCalledTimes(1);
+    expect(mockApi.uploadGpsTracks).toHaveBeenCalledWith(files);
+    expect(await screen.findByText("Imported 5 point(s), 2 already imported")).toBeInTheDocument();
+    expect(screen.getByText("1 file without timestamped points")).toBeInTheDocument();
+    expect(screen.getByText("route.gpx")).toBeInTheDocument();
+    expect(screen.getByText("1 file failed")).toBeInTheDocument();
+    expect(screen.getByText("broken.gpx: gpx: XML syntax error on line 1")).toBeInTheDocument();
   });
 
-  it("shows the GPS import error", async () => {
-    mockApi.importGpsTracks.mockRejectedValue(new Error("POST /gps-tracks/import failed: 400"));
+  it("sends many track files in batches of at most 500 and adds up the results", async () => {
     render(<UploadPage />);
-    await userEvent.upload(
-      screen.getByLabelText("GPS track JSON file"),
-      new File(["x"], "points.json", { type: "application/json" })
-    );
-    expect(await screen.findByText("POST /gps-tracks/import failed: 400")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Choose JSON file" })).toBeEnabled());
+    const files = Array.from({ length: 501 }, (_, i) => new File(["[]"], `${i}.location_data.json`));
+    await userEvent.upload(screen.getByLabelText("GPS track files"), files);
+    await waitFor(() => expect(mockApi.uploadGpsTracks).toHaveBeenCalledTimes(2));
+    expect(mockApi.uploadGpsTracks.mock.calls[0][0]).toHaveLength(500);
+    expect(mockApi.uploadGpsTracks.mock.calls[1][0]).toHaveLength(1);
+    expect(await screen.findByText("Imported 10 point(s), 4 already imported")).toBeInTheDocument();
+  });
+
+  it("does not send a track file over the size limit", async () => {
+    render(<UploadPage />);
+    const huge = new File(["x"], "Zeitachse.json");
+    Object.defineProperty(huge, "size", { value: 300 * 1024 ** 2 });
+    const small = new File(["<gpx/>"], "walk.gpx");
+    await userEvent.upload(screen.getByLabelText("GPS track files"), [huge, small]);
+    await waitFor(() => expect(mockApi.uploadGpsTracks).toHaveBeenCalledWith([small]));
+    expect(await screen.findByText("Zeitachse.json: larger than 255 MiB")).toBeInTheDocument();
+  });
+
+  it("shows the GPS import error and lists the batch's files as failed", async () => {
+    mockApi.uploadGpsTracks.mockRejectedValue(new Error("POST /gps-tracks/upload failed: 413"));
+    render(<UploadPage />);
+    await userEvent.upload(screen.getByLabelText("GPS track files"), new File(["x"], "walk.gpx"));
+    expect(await screen.findByText("POST /gps-tracks/upload failed: 413")).toBeInTheDocument();
+    expect(screen.getByText("1 file failed")).toBeInTheDocument();
+    expect(screen.getByText("walk.gpx")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Choose track files" })).toBeEnabled());
   });
 
   it("shows the CLI scan note instead of the curl hint", () => {

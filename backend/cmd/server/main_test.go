@@ -126,6 +126,9 @@ func TestRouter_AuthWiring(t *testing.T) {
 		{"token lists media albums", http.MethodGet, "/api/media/" + badID + "/albums", true, "", nil, http.StatusOK},
 		{"token checks known hashes", http.MethodPost, "/api/media/known-hashes", true, "", nil, http.StatusBadRequest},
 		{"anonymous known hashes", http.MethodPost, "/api/media/known-hashes", false, "", nil, http.StatusUnauthorized},
+		// No multipart body: 400 from the handler shows the route is wired and open to tokens.
+		{"token uploads GPS tracks", http.MethodPost, "/api/gps-tracks/upload", true, "", nil, http.StatusBadRequest},
+		{"anonymous GPS track upload", http.MethodPost, "/api/gps-tracks/upload", false, "", nil, http.StatusUnauthorized},
 		{"session deletes album", http.MethodDelete, "/api/albums/" + badID, false, userSession, nil, http.StatusNotFound},
 		{"session adds album member", http.MethodPost, "/api/albums/" + badID + "/members", false, userSession, nil, http.StatusNotFound},
 		{"session removes album member", http.MethodDelete, "/api/albums/" + badID + "/members/" + badID, false, userSession, nil, http.StatusNotFound},

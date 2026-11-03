@@ -22,6 +22,11 @@ describe("planUploadBatches", () => {
     expect(plan.tooLarge).toEqual([]);
   });
 
+  it("caps the number of files per batch", () => {
+    const files = [1, 1, 1, 1, 1].map((s, i) => file(`f${i}`, s));
+    expect(names(planUploadBatches(files, 10, 100, 2).batches)).toEqual([["f0", "f1"], ["f2", "f3"], ["f4"]]);
+  });
+
   it("separates files over the per-file limit", () => {
     const plan = planUploadBatches([file("ok", 5), file("huge", 101), file("ok2", 5)], 10, 100);
     expect(names(plan.batches)).toEqual([["ok", "ok2"]]);

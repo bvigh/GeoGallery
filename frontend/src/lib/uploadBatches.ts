@@ -10,11 +10,15 @@ export interface UploadPlan {
   tooLarge: File[];
 }
 
-/** Groups files into requests of at most targetBytes each; a larger file gets a request of its own. */
+/**
+ * Groups files into requests of at most targetBytes and maxFiles files each; a larger file gets a
+ * request of its own.
+ */
 export function planUploadBatches(
   files: File[],
   targetBytes = TARGET_BATCH_BYTES,
-  maxFileBytes = MAX_FILE_BYTES
+  maxFileBytes = MAX_FILE_BYTES,
+  maxFiles = Infinity
 ): UploadPlan {
   const batches: File[][] = [];
   const tooLarge: File[] = [];
@@ -26,7 +30,7 @@ export function planUploadBatches(
       tooLarge.push(file);
       continue;
     }
-    if (current.length > 0 && currentBytes + file.size > targetBytes) {
+    if (current.length > 0 && (currentBytes + file.size > targetBytes || current.length >= maxFiles)) {
       batches.push(current);
       current = [];
       currentBytes = 0;

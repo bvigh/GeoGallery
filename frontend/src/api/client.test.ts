@@ -81,14 +81,20 @@ describe("api client", () => {
     await expect(api.adminCreateInvite("user")).resolves.toBe("http://localhost:5173/api/auth/login?invite=abc");
   });
 
-  it("importGpsTracks() posts the file as JSON", async () => {
-    fetchMock.mockResolvedValue(response(200, { inserted: 2, skipped: 0, errors: [] }));
-    const file = new File(["[]"], "points.json", { type: "application/json" });
-    await expect(api.importGpsTracks(file)).resolves.toEqual({ inserted: 2, skipped: 0, errors: [] });
+  it("uploadGpsTracks() posts every file as a multipart files part", async () => {
+    const result = { inserted: 2, skipped: 0, empty: [], failed: [] };
+    fetchMock.mockResolvedValue(response(200, result));
+    const files = [new File(["<gpx/>"], "walk.gpx"), new File(["$GPRMC"], "drive.nmea")];
+    await expect(api.uploadGpsTracks(files)).resolves.toEqual(result);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe("/api/gps-tracks/import");
-    expect(init.body).toBe(file);
-    expect(init.headers).toEqual({ "Content-Type": "application/json" });
+    expect(url).toBe("/api/gps-tracks/upload");
+    expect(init.method).toBe("POST");
+    expect((init.body as FormData).getAll("files").map((f) => (f as File).name)).toEqual(["walk.gpx", "drive.nmea"]);
+  });
+
+  it("uploadGpsTracks() throws an ApiError with the status", async () => {
+    fetchMock.mockResolvedValue(response(413, {}));
+    await expect(api.uploadGpsTracks([new File(["x"], "big.json")])).rejects.toMatchObject({ status: 413 });
   });
 
   it("upload() posts the form data and returns uploaded names", async () => {

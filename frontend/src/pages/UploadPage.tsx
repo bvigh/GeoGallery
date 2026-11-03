@@ -3,10 +3,27 @@ import { Upload, X } from "lucide-react";
 import { api, ApiError } from "@/api/client";
 import { MAX_FILE_BYTES, planUploadBatches } from "@/lib/uploadBatches";
 import { canHashFiles, mediaHash } from "@/lib/mediaHash";
-import type { Album, GpsImportResult } from "@/types";
+import type { Album } from "@/types";
 import { AlbumPickerDialog } from "@/components/albums/AlbumPickerDialog";
 
 const GiB = 1024 ** 3;
+const MiB = 1024 ** 2;
+
+// The backend caps one track upload at 256 MiB, and Go refuses a form of more than 1000 parts.
+// Exports come as hundreds of small files (Samsung Health, dashcams), so batches are capped by
+// count as well as size. A batch is inserted and matched before the response, and dense formats
+// hold ~20k points per MB, so batches stay small enough to answer within nginx's 60 s timeout.
+const GPS_BATCH_BYTES = 32 * MiB;
+const GPS_MAX_FILE_BYTES = 255 * MiB;
+const GPS_BATCH_FILES = 500;
+const GPS_ACCEPT = ".gpx,.tcx,.kml,.kmz,.geojson,.json,.nmea,.log,.gz";
+
+interface GpsSummary {
+  inserted: number;
+  skipped: number;
+  empty: string[];
+  failed: string[];
+}
 
 interface UploadResult {
   uploaded: string[];
@@ -107,25 +124,45 @@ export function UploadPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const gpsInputRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
-  const [gpsResult, setGpsResult] = useState<GpsImportResult | null>(null);
+  const [gpsProgress, setGpsProgress] = useState<string | null>(null);
+  const [gpsResult, setGpsResult] = useState<GpsSummary | null>(null);
   const [gpsError, setGpsError] = useState<string | null>(null);
   // null uploads into no album.
   const [album, setAlbum] = useState<Album | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
 
-  const handleGpsImport = async (file: File | undefined) => {
-    if (!file) return;
+  const handleGpsImport = async (selected: File[]) => {
+    if (selected.length === 0) return;
     setImporting(true);
     setGpsError(null);
     setGpsResult(null);
-    try {
-      setGpsResult(await api.importGpsTracks(file));
-    } catch (e: unknown) {
-      setGpsError(e instanceof Error ? e.message : "Import failed");
-    } finally {
-      setImporting(false);
-      if (gpsInputRef.current) gpsInputRef.current.value = "";
+    const { batches, tooLarge } = planUploadBatches(selected, GPS_BATCH_BYTES, GPS_MAX_FILE_BYTES, GPS_BATCH_FILES);
+    const summary: GpsSummary = {
+      inserted: 0,
+      skipped: 0,
+      empty: [],
+      failed: tooLarge.map((f) => `${f.name}: larger than ${GPS_MAX_FILE_BYTES / MiB} MiB`),
+    };
+    const errors: string[] = [];
+    // A failed batch does not stop the others: each one is its own request.
+    for (const [i, batch] of batches.entries()) {
+      if (batches.length > 1) setGpsProgress(`Importing batch ${i + 1} of ${batches.length}`);
+      try {
+        const data = await api.uploadGpsTracks(batch);
+        summary.inserted += data.inserted;
+        summary.skipped += data.skipped;
+        summary.empty.push(...data.empty);
+        summary.failed.push(...data.failed.map((f) => `${f.file}: ${f.reason}`));
+      } catch (e: unknown) {
+        summary.failed.push(...batch.map((f) => f.name));
+        errors.push(e instanceof Error ? e.message : "Import failed");
+      }
     }
+    setGpsResult(summary);
+    setGpsError(errors.length > 0 ? [...new Set(errors)].join("; ") : null);
+    setGpsProgress(null);
+    setImporting(false);
+    if (gpsInputRef.current) gpsInputRef.current.value = "";
   };
 
   // Reloads the album list and says whether the album is still in it (null: unknown).
@@ -349,30 +386,41 @@ export function UploadPage() {
         )}
 
         <div className="mt-8 rounded-lg border p-4 text-sm">
-          <p className="font-medium">GPS track import (JSON)</p>
+          <p className="font-medium">GPS track import</p>
           <p className="mt-1 text-muted-foreground">
-            A JSON array of <code className="rounded bg-muted px-1">{"{recorded_at, lat, lng, source}"}</code> points.
-            Media without EXIF GPS is matched against the imported track.
+            GPX, TCX, KML, KMZ, GeoJSON, NMEA (dashcams), Google Timeline and Samsung Health JSON, esoko
+            .log files, or a JSON array of{" "}
+            <code className="rounded bg-muted px-1">{"{recorded_at, lat, lng, source}"}</code> points; any of them
+            may be gzipped. Media without EXIF GPS is matched against the imported tracks.
           </p>
           <button
             className="mt-2 rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
             onClick={() => gpsInputRef.current?.click()}
             disabled={importing}
           >
-            {importing ? "Importing…" : "Choose JSON file"}
+            {importing ? "Importing…" : "Choose track files"}
           </button>
           <input
             ref={gpsInputRef}
             type="file"
             className="hidden"
-            aria-label="GPS track JSON file"
-            accept=".json,application/json"
-            onChange={(e) => handleGpsImport(e.target.files?.[0])}
+            multiple
+            aria-label="GPS track files"
+            accept={GPS_ACCEPT}
+            onChange={(e) => handleGpsImport(Array.from(e.target.files ?? []))}
           />
+          {gpsProgress && <p className="mt-2 text-muted-foreground">{gpsProgress}</p>}
           {gpsResult && (
-            <p className="mt-2 text-muted-foreground">
-              Imported {gpsResult.inserted} point(s), {gpsResult.skipped} skipped, {gpsResult.errors.length} invalid
-            </p>
+            <>
+              <p className="mt-2 text-muted-foreground">
+                Imported {gpsResult.inserted} point(s), {gpsResult.skipped} already imported
+              </p>
+              <ResultList
+                title={`${plural(gpsResult.empty.length)} without timestamped points`}
+                names={gpsResult.empty}
+              />
+              <ResultList title={`${plural(gpsResult.failed.length)} failed`} names={gpsResult.failed} error />
+            </>
           )}
           {gpsError && <p className="mt-2 text-red-500">{gpsError}</p>}
         </div>
