@@ -340,6 +340,42 @@ func (m *failOnceStorage) Upload(ctx context.Context, key string, body io.Reader
 	return m.mockUploadStorage.Upload(ctx, key, body, size, ct)
 }
 
+func TestUpload_RemovesSpooledParts(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	orig := uploadFormMaxMemory
+	uploadFormMaxMemory = 1 // spool every part to disk
+	t.Cleanup(func() { uploadFormMaxMemory = orig })
+
+	tests := []struct {
+		name       string
+		runMatcher func(context.Context, matcherDB, string, time.Duration, bool) error
+		wantCode   int
+	}{
+		{"success", noopMatcher, http.StatusOK},
+		{"matcher error", func(context.Context, matcherDB, string, time.Duration, bool) error {
+			return errors.New("boom")
+		}, http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &MediaHandler{
+				registrar:     &MediaRegistrar{db: &mockRegistrarDB{}, storage: &mockUploadStorage{}},
+				runMatcher:    tt.runMatcher,
+				runTripDetect: noopTripDetect,
+			}
+
+			w := httptest.NewRecorder()
+			h.Upload(w, uploadFiles("a.jpg", "b.jpg"))
+
+			require.Equal(t, tt.wantCode, w.Code)
+			left, err := os.ReadDir(tmp)
+			require.NoError(t, err)
+			assert.Empty(t, left)
+		})
+	}
+}
+
 func TestUpload_ReportsFailedFiles(t *testing.T) {
 	h := &MediaHandler{
 		registrar:     &MediaRegistrar{db: &mockRegistrarDB{}, storage: &failOnceStorage{failAt: 1}},
