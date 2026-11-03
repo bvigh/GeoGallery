@@ -283,6 +283,30 @@ describe("MediaGalleryOverlay", () => {
     await waitFor(() => expect(props.onClose).toHaveBeenCalledTimes(1));
   });
 
+  it("explains a video whose picture the browser cannot decode, for that item only", async () => {
+    mockApi.get.mockResolvedValue([
+      makeItem("hevc", { media_type: "video", taken_at: "2025-06-01T10:00:00Z" }),
+      makeItem("next", { media_type: "video", taken_at: "2025-06-02T10:00:00Z" }),
+    ]);
+    mockApi.getMediaUrl.mockImplementation((id: string) => Promise.resolve(`https://s3.example/${id}`));
+    const { container } = renderOverlay();
+    await screen.findByText("1 / 2");
+    await waitFor(() => expect(container.querySelector("video")).toHaveAttribute("src", "https://s3.example/hevc"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    // What Chromium on Linux does without an HEVC decoder: audio data, a 0×0 picture.
+    const video = container.querySelector("video")!;
+    Object.defineProperty(video, "readyState", { value: 2 });
+    act(() => {
+      video.dispatchEvent(new Event("loadeddata"));
+    });
+    expect(screen.getByRole("link", { name: "How to enable HEVC playback" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect(container.querySelector("video")).toHaveAttribute("src", "https://s3.example/next"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("does not close an album that was empty from the start", async () => {
     mockApi.get.mockResolvedValue([]);
     const { props } = renderOverlay();

@@ -7,6 +7,8 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import Panorama360 from "@/components/viewer/Panorama360";
 import Video360 from "@/components/viewer/Video360";
+import VideoDecodeNotice from "@/components/viewer/VideoDecodeNotice";
+import { useVideoDecodeCheck } from "@/lib/video";
 import { FilterPanel } from "@/components/map/FilterPanel";
 
 function parseDdMmYyyy(s: string): string {
@@ -85,6 +87,7 @@ export function GamePage() {
   const [state, setState] = useState<GameState>("idle");
   const [round, setRound] = useState<GameRound | null>(null);
   const [roundKeyframes, setRoundKeyframes] = useState<OrientationKeyframe[]>([]);
+  const videoCheck = useVideoDecodeCheck(round?.url ?? "");
   const [guess, setGuess] = useState<{ lat: number; lng: number } | null>(null);
   const [guessDate, setGuessDate] = useState("");
   const [result, setResult] = useState<GuessResult | null>(null);
@@ -221,11 +224,15 @@ export function GamePage() {
               initialFov={round.initial_fov}
             />
           ) : round.media_type.startsWith("video") ? (
-            <video
-              src={round.url}
-              controls
-              className="absolute inset-0 h-full w-full object-cover"
-            />
+            <>
+              <video
+                src={round.url}
+                controls
+                className="absolute inset-0 h-full w-full object-cover"
+                {...videoCheck.handlers}
+              />
+              {videoCheck.unsupported && <VideoDecodeNotice />}
+            </>
           ) : (
             <img
               src={round.url}
