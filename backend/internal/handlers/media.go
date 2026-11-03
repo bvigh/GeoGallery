@@ -156,6 +156,10 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 
 var maxUploadBodyBytes int64 = 4 << 30 // var so tests can lower it
 
+// uploadFormMaxMemory is how much of a multipart form is kept in memory; the rest is spooled to
+// temp files. A var so tests can force spooling.
+var uploadFormMaxMemory int64 = 32 << 20
+
 func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	ownerID := auth.MustUser(r.Context()).ID
 	start := time.Now()
@@ -168,7 +172,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodyBytes)
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
+	if err := r.ParseMultipartForm(uploadFormMaxMemory); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			slog.Warn("upload: request body too large", "owner", ownerID,
@@ -182,6 +186,13 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "parse form", http.StatusBadRequest)
 		return
 	}
+	// net/http removes spooled parts only for the request it created, and RequireUser hands us a
+	// copy (r.WithContext), so without this every upload would stay in the temp dir for good.
+	defer func() {
+		if err := r.MultipartForm.RemoveAll(); err != nil {
+			slog.Error("upload: remove multipart temp files failed", "err", err)
+		}
+	}()
 
 	files := r.MultipartForm.File["files"]
 	if len(files) == 0 {
