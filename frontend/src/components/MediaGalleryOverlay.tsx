@@ -10,6 +10,8 @@ import { AlbumMenu } from "@/components/albums/AlbumMenu";
 import { EditLocationModal } from "@/components/EditLocationModal";
 import Panorama360 from "@/components/viewer/Panorama360";
 import Video360 from "@/components/viewer/Video360";
+import VideoDecodeNotice from "@/components/viewer/VideoDecodeNotice";
+import { useVideoDecodeCheck } from "@/lib/video";
 import "leaflet/dist/leaflet.css";
 
 // ── Leaflet helper components ────────────────────────────────────────────────
@@ -234,6 +236,7 @@ export function MediaGalleryOverlay({
   const mapMouseLeft = useRef(false);
   const urlCache = useRef<Map<string, string>>(new Map());
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoCheck = useVideoDecodeCheck(currentUrl ?? "");
   // Callers pass params inline; refetch only when their content changes.
   const paramsKey = JSON.stringify(params);
   const paramsRef = useRef(params);
@@ -485,14 +488,18 @@ export function MediaGalleryOverlay({
     }
     if (currentItem.media_type === "video") {
       return (
-        <video
-          key={currentItem.id}
-          ref={videoRef}
-          src={currentUrl}
-          controls
-          autoPlay
-          className="absolute inset-0 h-full w-full object-contain"
-        />
+        <>
+          <video
+            key={currentItem.id}
+            ref={videoRef}
+            src={currentUrl}
+            controls
+            autoPlay
+            className="absolute inset-0 h-full w-full object-contain"
+            {...videoCheck.handlers}
+          />
+          {videoCheck.unsupported && <VideoDecodeNotice />}
+        </>
       );
     }
     return (

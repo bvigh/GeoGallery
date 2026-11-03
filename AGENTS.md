@@ -36,7 +36,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `frontend/src/types/index.ts` | Canonical TypeScript types shared across the app |
 | `frontend/src/components/auth/` | `AuthGate`, `LoginScreen`, `AuthContext` |
 | `frontend/src/components/map/` | Leaflet map components. `MediaMap` drives a `leaflet.markercluster` group directly (no `<Marker>` per item): an items change diffs by id and adds/removes only what changed, in bulk |
-| `frontend/src/components/viewer/` | `Panorama360.tsx`, `Video360.tsx` — 360° media viewers |
+| `frontend/src/components/viewer/` | `Panorama360.tsx`, `Video360.tsx` — 360° media viewers; `VideoDecodeNotice` (the "can't decode, most likely HEVC" box linking `/video-playback.html`) |
 | `frontend/src/components/albums/` | `AlbumMenu` (the viewer's per-item album checkboxes + "New album…"), `AlbumPickerDialog` (Trips "Add to album…", the Upload page's album choice) |
 | `frontend/src/components/SearchInput.tsx` | Filter field for long lists (clear button; Enter does nothing, so it never submits a form) |
 | `frontend/src/components/MediaGalleryOverlay.tsx` | Full-screen gallery for a title + media query params; shared by the Trips and Albums pages (replaces `TripGalleryOverlay`) |
@@ -46,8 +46,10 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `frontend/src/lib/search.ts` | `matchesSearch` (case- and accent-insensitive, every word must match a field) and `SEARCH_MIN_ITEMS` |
 | `frontend/src/lib/mediaHash.ts` | `mediaHash`: the backend's `file_hash` computed in the browser (Web Crypto), so the Upload page skips files already in the library; `canHashFiles` |
 | `frontend/src/lib/trips.ts` | `groupTripsByYear`: the filter panel's year groups (newest first, undated last, server order inside) |
+| `frontend/src/lib/video.ts` | `videoDecodeFailed` (data loaded but a 0×0 picture, or a decode/unsupported media error) and `useVideoDecodeCheck` (handlers for a `<video>`, keyed by src) |
 | `frontend/src/pages/` | One file per tab: MapPage, TripsPage ("Add to album…" per trip), AlbumsPage (album cards, members dialog with a searchable user list and leave, gallery), GamePage, UploadPage (duplicate pre-check by hash, optional "Add to album" through `AlbumPickerDialog`), SettingsPage (API tokens), AdminPage (users, invites) |
 | `frontend/public/privacy.html`, `terms.html` | Static privacy policy and terms of service (public, no login; linked from `LoginScreen`, required for Google sign-in). Update them when the data the app stores, its providers or retention change |
+| `frontend/public/video-playback.html` | Static guide for browsers that cannot decode HEVC (Chromium on Linux needs GPU decoding through VA-API, or use Firefox ≥ 137); linked from `VideoDecodeNotice` |
 | `frontend/e2e/` | Playwright suite: `playwright.config.ts`, `support.ts` (`E2E_BACKEND_ENV`), `auth.setup.ts`, `*.e2e.ts`; `sharing.e2e.ts` runs in its own `sharing` project after all others |
 | `scripts/e2e-reset-db.sh` | Drops and recreates `geogallery_e2e` via `docker compose exec db` |
 | `ingest/` | Drop media here, then run `server scan --user <id>` |
@@ -181,6 +183,7 @@ There is no HTTP ingest route. Folder scans are `server scan --user <id>` only.
 - Tailwind CSS variables (colors, radius) defined in `src/index.css`.
 - Map tile layer swap: change `<TileLayer>` URL in `src/components/map/MediaMap.tsx`.
 - 360° media: `photo_360` renders in `Panorama360.tsx` (Photo Sphere Viewer); `video_360` renders in `Video360.tsx`. View settings (`initial_yaw/pitch/fov`) and keyframes are stored per-media on the backend.
+- HEVC is stored as recorded (every `video_360` is HEVC 5760×2880, and so are some flat videos), so browsers without an HEVC decoder play only the audio. Every full-size video player (`Video360`, the gallery overlay, the Map fullscreen view, the Game round) runs `videoDecodeFailed` on `loadeddata`, `timeupdate` and `error`, and shows `VideoDecodeNotice` over the player. `Video360` flags the texture for upload only while `videoWidth > 0`, which also stops the `texImage2D: no video` flood.
 
 ## Media Type Detection
 
@@ -329,7 +332,8 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `src/pages/MapPage.test.tsx`, `TripsPage.test.tsx`, `AlbumsPage.test.tsx`, `GamePage.test.tsx`, `UploadPage.test.tsx`, `SettingsPage.test.tsx`, `AdminPage.test.tsx`
 - `src/components/map/FilterPanel.test.tsx`, `MediaMap.test.tsx` (real Leaflet + markercluster in jsdom; spies on the group's bulk calls, including a removal during a chunked add)
 - `src/components/MediaGalleryOverlay.test.tsx`, `src/components/albums/AlbumMenu.test.tsx`, `AlbumPickerDialog.test.tsx`
-- `src/lib/filters.test.ts`, `errors.test.ts`, `search.test.ts`, `albums.test.ts`, `trips.test.ts`, `uploadBatches.test.ts`, `mediaHash.test.ts` (Node environment; the shared backend vectors)
+- `src/components/viewer/Video360.test.tsx` (three.js with a stub `WebGLRenderer`; the decode notice), `VideoDecodeNotice.test.tsx`
+- `src/lib/video.test.ts`, `filters.test.ts`, `errors.test.ts`, `search.test.ts`, `albums.test.ts`, `trips.test.ts`, `uploadBatches.test.ts`, `mediaHash.test.ts` (Node environment; the shared backend vectors)
 - Vitest + React Testing Library. Run with `npm run test`.
 - Test components that contain logic; pure utility functions in `src/lib/` get unit tests.
 

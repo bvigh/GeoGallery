@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { OrientationKeyframe } from "../../types";
+import { videoDecodeFailed } from "@/lib/video";
+import VideoDecodeNotice from "./VideoDecodeNotice";
 
 // Stable reference — avoids re-running useEffect when no keyframes are passed
 const EMPTY_KEYFRAMES: OrientationKeyframe[] = [];
@@ -49,6 +51,8 @@ export default function Video360({
   const [muted, setMuted] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  // The url whose picture the browser cannot decode; a new url starts unflagged.
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
 
   useEffect(() => {
     const mount = mountRef.current!;
@@ -68,9 +72,14 @@ export default function Video360({
     const onLoadedMetadata = () => setDuration(video.duration);
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
+    const onDecodeCheck = () => {
+      if (videoDecodeFailed(video)) setFailedUrl(url);
+    };
     video.addEventListener("loadedmetadata", onLoadedMetadata);
     video.addEventListener("play", onPlay);
     video.addEventListener("pause", onPause);
+    video.addEventListener("loadeddata", onDecodeCheck);
+    video.addEventListener("error", onDecodeCheck);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(w, h);
@@ -183,6 +192,7 @@ export default function Video360({
 
     function onTimeUpdate() {
       setCurrentTime(video.currentTime);
+      onDecodeCheck();
     }
     video.addEventListener("timeupdate", onTimeUpdate);
 
@@ -251,7 +261,8 @@ export default function Video360({
         }
       }
       controls.update();
-      texture.needsUpdate = true;
+      // Without a decoded picture (videoWidth 0) the upload fails with "texImage2D: no video" every frame.
+      if (video.videoWidth > 0) texture.needsUpdate = true;
       renderer.render(scene, camera);
     };
     animate();
@@ -265,6 +276,8 @@ export default function Video360({
       video.removeEventListener("loadedmetadata", onLoadedMetadata);
       video.removeEventListener("play", onPlay);
       video.removeEventListener("pause", onPause);
+      video.removeEventListener("loadeddata", onDecodeCheck);
+      video.removeEventListener("error", onDecodeCheck);
       video.removeEventListener("timeupdate", onTimeUpdate);
       window.removeEventListener("keydown", onKeyDown);
       canvas.removeEventListener("mousedown", onUserInteract);
@@ -329,10 +342,15 @@ export default function Video360({
     </div>
   );
 
+  const notice = failedUrl === url && <VideoDecodeNotice />;
+
   if (contained) {
     return (
       <div className="absolute inset-0 bg-black flex flex-col">
-        <div ref={mountRef} className="flex-1 outline-none" tabIndex={-1} />
+        <div className="relative flex-1 flex flex-col">
+          <div ref={mountRef} className="flex-1 outline-none" tabIndex={-1} />
+          {notice}
+        </div>
         {controls}
       </div>
     );
@@ -349,7 +367,10 @@ export default function Video360({
           ✕
         </button>
       </div>
-      <div ref={mountRef} className="flex-1 outline-none" tabIndex={-1} />
+      <div className="relative flex-1 flex flex-col">
+        <div ref={mountRef} className="flex-1 outline-none" tabIndex={-1} />
+        {notice}
+      </div>
       {controls}
     </div>
   );

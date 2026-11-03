@@ -10,6 +10,8 @@ import { useCurrentUser } from "@/components/auth/AuthContext";
 import { AlbumMenu } from "@/components/albums/AlbumMenu";
 import Panorama360 from "../components/viewer/Panorama360";
 import Video360 from "../components/viewer/Video360";
+import VideoDecodeNotice from "../components/viewer/VideoDecodeNotice";
+import { useVideoDecodeCheck } from "@/lib/video";
 
 // The backend's maximum page: every page re-runs the whole filtered query, so fewer is faster.
 const PAGE_SIZE = 5000;
@@ -71,6 +73,7 @@ function FullscreenOverlay({
   peerLabel?: string;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoCheck = useVideoDecodeCheck(url);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -153,15 +156,19 @@ function FullscreenOverlay({
           {peerLabel}
         </div>
       )}
-      <div onClick={(e) => e.stopPropagation()}>
+      <div className="relative" onClick={(e) => e.stopPropagation()}>
         {item.media_type === "video" ? (
-          <video
-            ref={videoRef}
-            src={url}
-            controls
-            autoPlay
-            className="max-h-[90vh] max-w-[90vw] rounded object-contain outline-none"
-          />
+          <>
+            <video
+              ref={videoRef}
+              src={url}
+              controls
+              autoPlay
+              className="max-h-[90vh] max-w-[90vw] rounded object-contain outline-none"
+              {...videoCheck.handlers}
+            />
+            {videoCheck.unsupported && <VideoDecodeNotice />}
+          </>
         ) : (
           <img
             src={url}

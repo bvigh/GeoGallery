@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video Playback Help · GeoGallery</title>
+    <style>
+      :root { color-scheme: light dark; --fg: #1f2328; --muted: #59636e; --bg: #fff; --line: #d1d9e0; --link: #0b62d6; --code: #f0f2f4; }
+      @media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --muted: #9198a1; --bg: #0d1117; --line: #3d444d; --link: #4493f8; --code: #1c2128; } }
+      body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+      main { max-width: 46rem; margin: 0 auto; padding: 2rem 1rem 4rem; }
+      h1 { font-size: 1.75rem; margin: 0 0 0.25rem; }
+      h2 { font-size: 1.2rem; margin: 2rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+      h3 { font-size: 1rem; margin: 1.25rem 0 0.25rem; }
+      a { color: var(--link); }
+      .muted { color: var(--muted); }
+      code { background: var(--code); padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.9em; overflow-wrap: anywhere; }
+      pre { background: var(--code); padding: 0.75rem 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.9rem; line-height: 1.45; }
+      pre code { background: none; padding: 0; overflow-wrap: normal; }
+      li { margin: 0.25rem 0; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p><a href="/">← GeoGallery</a></p>
+      <h1>Video plays sound but no picture</h1>
+      <p class="muted">Last updated: 3 November 2026</p>
+
+      <p>
+        Many videos in GeoGallery, including every 360° video, are stored in the <strong>HEVC (H.265)</strong>
+        format, as the camera recorded them. If your browser cannot decode HEVC, the video stays black or empty while
+        its sound plays. GeoGallery then shows a message with a link to this page.
+      </p>
+      <p>There is nothing wrong with the file. Your browser needs a way to decode HEVC.</p>
+
+      <h2>Which browsers can play HEVC</h2>
+      <ul>
+        <li><strong>Safari</strong> on macOS, iPhone and iPad: yes.</li>
+        <li>
+          <strong>Chrome, Edge, Brave and other Chromium browsers</strong> on Windows and macOS: yes, on most
+          graphics hardware from the last several years.
+        </li>
+        <li>
+          <strong>Chrome, Brave, Chromium and Edge on Linux</strong>: only if your graphics card decodes HEVC
+          <em>and</em> the browser can use it (see below). These browsers have no software decoder for HEVC on Linux.
+        </li>
+        <li>
+          <strong>Firefox on Linux</strong> (version 137 or newer): yes. It decodes HEVC through the system's FFmpeg,
+          on the graphics card when it can and on the processor otherwise.
+        </li>
+        <li>
+          <strong>Firefox on Windows</strong>: on graphics hardware that decodes HEVC. On other computers, use
+          Chrome or Edge.
+        </li>
+      </ul>
+
+      <h2>Quickest fix on Linux: use Firefox</h2>
+      <p>
+        Open GeoGallery in Firefox 137 or newer. To check that it can decode HEVC, open <code>about:support</code>,
+        go to the <em>Media</em> section and look for <em>HEVC</em> under codec support.
+      </p>
+      <p>
+        360° videos are 5760 × 2880 pixels. Without the graphics card's help, playing them takes a fast processor
+        and may stutter on older computers.
+      </p>
+
+      <h2>Chrome, Brave or Chromium on Linux</h2>
+
+      <h3>1. Check what the browser can decode</h3>
+      <p>
+        Open <code>brave://gpu</code> in Brave, <code>chrome://gpu</code> in Chrome or Chromium, or
+        <code>edge://gpu</code> in Edge. Under <em>Video Acceleration Information</em>, look for a
+        <code>Decode hevc main</code> line.
+      </p>
+      <ul>
+        <li>
+          If it is there and its maximum size is at least <code>5760x2880</code>, the browser can play every video.
+          Reload GeoGallery.
+        </li>
+        <li>If it is missing, or the maximum is smaller, continue with the steps below.</li>
+      </ul>
+
+      <h3>2. Turn on graphics acceleration</h3>
+      <p>
+        In the browser's settings, open <em>System</em> and turn on <em>Use graphics acceleration when
+        available</em>. Restart the browser.
+      </p>
+
+      <h3>3. Install the video driver for your graphics card</h3>
+      <p>The browser decodes video through VA-API. Install the driver that matches your graphics card:</p>
+      <ul>
+        <li>
+          <strong>Intel</strong> (6th-generation Core, "Skylake", or newer):
+          <pre><code>sudo apt install intel-media-va-driver</code></pre>
+        </li>
+        <li>
+          <strong>AMD</strong>:
+          <pre><code>sudo apt install mesa-va-drivers</code></pre>
+          On Fedora, the standard Mesa drivers have HEVC turned off. Install
+          <code>mesa-va-drivers-freeworld</code> from RPM Fusion instead.
+        </li>
+        <li>
+          <strong>NVIDIA</strong> (proprietary driver): install
+          <a href="https://github.com/elFarto/nvidia-vaapi-driver">nvidia-vaapi-driver</a>, version 0.0.18 or newer
+          for correct HEVC. Chromium support for it is experimental and needs extra settings when you start the
+          browser:
+          <pre><code>LIBVA_DRIVER_NAME=nvidia brave-browser \
+  --enable-features=AcceleratedVideoDecodeLinuxGL,VaapiOnNvidiaGPUs</code></pre>
+          Use <code>google-chrome</code> or <code>chromium</code> instead of <code>brave-browser</code> for those
+          browsers. On Wayland, also add <code>--ozone-platform=wayland</code>.
+        </li>
+      </ul>
+      <p>To check that the driver can decode HEVC, run:</p>
+      <pre><code>sudo apt install vainfo
+vainfo | grep -i hevc</code></pre>
+      <p>
+        The output should contain <code>VAProfileHEVCMain : VAEntrypointVLD</code>. If it does not, your graphics
+        card cannot decode HEVC, and the browser cannot either. Use Firefox instead.
+      </p>
+
+      <h3>4. Restart the browser and check again</h3>
+      <p>
+        Quit every browser window, start the browser again and repeat step 1. Some setups also need the
+        <code>--enable-features=AcceleratedVideoDecodeLinuxGL</code> start-up option shown above. These options are
+        experimental and their names can change between browser versions.
+      </p>
+      <p>
+        If <code>Decode hevc main</code> appears but its maximum is below <code>5760x2880</code>, normal videos will
+        play but 360° videos will not. Use Firefox for those.
+      </p>
+
+      <h2>Still no picture?</h2>
+      <p>
+        Tell the person who runs your GeoGallery which video it is and which browser and computer you use.
+      </p>
+    </main>
+  </body>
+</html>
