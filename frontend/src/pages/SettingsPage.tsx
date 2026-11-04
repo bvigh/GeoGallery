@@ -18,6 +18,12 @@ function formatDate(value: string | null): string {
   return value ? new Date(value).toLocaleDateString() : "-";
 }
 
+// 16px text on touch: iOS zooms the page into a smaller focused field and stays zoomed.
+const TOUCH_INPUT_CLASS = "touch:py-2 touch:text-base";
+
+// The columns a phone has no room for: their values are folded into the name cell there.
+const WIDE_CELL = "hidden py-2 sm:table-cell";
+
 function tokenStatus(t: ApiToken): "active" | "revoked" | "expired" {
   if (t.revoked_at) return "revoked";
   if (new Date(t.expires_at).getTime() <= Date.now()) return "expired";
@@ -119,7 +125,7 @@ function CreateTokenDialog({
                 maxLength={100}
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className="w-full rounded-md border px-2 py-1"
+                className={`w-full rounded-md border px-2 py-1 ${TOUCH_INPUT_CLASS}`}
               />
             </label>
             <label className="block">
@@ -127,7 +133,7 @@ function CreateTokenDialog({
               <select
                 value={expiresInDays}
                 onChange={(e) => setExpiresInDays(Number(e.target.value))}
-                className="w-full rounded-md border px-2 py-1"
+                className={`w-full rounded-md border px-2 py-1 ${TOUCH_INPUT_CLASS}`}
               >
                 {EXPIRY_OPTIONS.map((d) => (
                   <option key={d} value={d}>
@@ -183,14 +189,14 @@ export function SettingsPage() {
   };
 
   return (
-    <div className="mx-auto h-full max-w-4xl overflow-y-auto p-6">
+    <div className="mx-auto h-full max-w-4xl overflow-y-auto p-4 sm:p-6">
       <h1 className="mb-4 text-xl font-semibold">Settings</h1>
       <section>
-        <div className="mb-2 flex items-center justify-between">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-lg font-medium">API tokens</h2>
           <button
             onClick={() => setDialogOpen(true)}
-            className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+            className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground touch:min-h-11"
           >
             Create token
           </button>
@@ -200,45 +206,59 @@ export function SettingsPage() {
           <p className="text-sm text-muted-foreground">No API tokens yet.</p>
         )}
         {tokens && tokens.length > 0 && (
-          <table className="w-full text-left text-sm">
-            <thead className="border-b text-muted-foreground">
-              <tr>
-                <th className="py-2 font-medium">Name</th>
-                <th className="py-2 font-medium">Token</th>
-                <th className="py-2 font-medium">Created</th>
-                <th className="py-2 font-medium">Expires</th>
-                <th className="py-2 font-medium">Last used</th>
-                <th className="py-2 font-medium">Status</th>
-                <th className="py-2" />
-              </tr>
-            </thead>
-            <tbody>
-              {tokens.map((t) => {
-                const status = tokenStatus(t);
-                return (
-                  <tr key={t.id} className="border-b">
-                    <td className="py-2">{t.name}</td>
-                    <td className="py-2 font-mono text-xs">{t.display_hint}…</td>
-                    <td className="py-2">{formatDate(t.created_at)}</td>
-                    <td className="py-2">{formatDate(t.expires_at)}</td>
-                    <td className="py-2">{formatDate(t.last_used_at)}</td>
-                    <td className="py-2">{status}</td>
-                    <td className="py-2 text-right">
-                      {status === "active" && (
-                        <button
-                          onClick={() => revoke(t)}
-                          aria-label={`Revoke ${t.name}`}
-                          className="rounded-md border px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50"
-                        >
-                          Revoke
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          // Scrolls sideways rather than widening the page when the columns do not fit.
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="hidden border-b text-muted-foreground sm:table-header-group">
+                <tr>
+                  <th className="py-2 font-medium">Name</th>
+                  <th className="py-2 font-medium">Token</th>
+                  <th className="py-2 font-medium">Created</th>
+                  <th className="py-2 font-medium">Expires</th>
+                  <th className="py-2 font-medium">Last used</th>
+                  <th className="py-2 font-medium">Status</th>
+                  <th className="py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {tokens.map((t) => {
+                  const status = tokenStatus(t);
+                  return (
+                    <tr key={t.id} className="border-b">
+                      <td className="py-2 [overflow-wrap:anywhere]">
+                        {t.name}
+                        <div className="mt-0.5 space-y-0.5 text-xs text-muted-foreground sm:hidden">
+                          <p>
+                            Token {t.display_hint}… · {status}
+                          </p>
+                          <p>
+                            Created {formatDate(t.created_at)} · Expires {formatDate(t.expires_at)} · Last used{" "}
+                            {formatDate(t.last_used_at)}
+                          </p>
+                        </div>
+                      </td>
+                      <td className={`${WIDE_CELL} font-mono text-xs`}>{t.display_hint}…</td>
+                      <td className={WIDE_CELL}>{formatDate(t.created_at)}</td>
+                      <td className={WIDE_CELL}>{formatDate(t.expires_at)}</td>
+                      <td className={WIDE_CELL}>{formatDate(t.last_used_at)}</td>
+                      <td className={WIDE_CELL}>{status}</td>
+                      <td className="py-2 pl-2 text-right">
+                        {status === "active" && (
+                          <button
+                            onClick={() => revoke(t)}
+                            aria-label={`Revoke ${t.name}`}
+                            className="rounded-md border px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50 touch:min-h-11 touch:px-3 touch:text-sm"
+                          >
+                            Revoke
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
       <CreateTokenDialog

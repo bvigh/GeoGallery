@@ -1,12 +1,13 @@
 import type { ComponentProps } from "react";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { api } from "../api/client";
 import { MapPage, MediaPreview } from "./MapPage";
 import type { FilterPanel } from "@/components/map/FilterPanel";
 import { AuthContext } from "@/components/auth/AuthContext";
 import { emptyFilters } from "@/lib/filters";
+import { BACK_DEPTH_KEY } from "@/lib/useCloseOnBack";
 import type { Album, CurrentUser, MediaItem, Trip } from "../types";
 
 vi.mock("../api/client", () => ({
@@ -56,8 +57,23 @@ vi.mock("../components/map/FilterPanel", () => ({
   },
 }));
 
-vi.mock("../components/viewer/Panorama360", () => ({ default: () => null }));
-vi.mock("../components/viewer/Video360", () => ({ default: () => null }));
+// Stand-ins that show which viewer is open, contained or full screen, and can close it.
+vi.mock("../components/viewer/Panorama360", () => ({
+  default: ({ onClose, contained }: { onClose: () => void; contained?: boolean }) => (
+    <div data-testid="panorama" data-contained={String(Boolean(contained))}>
+      <button onClick={onClose}>Close 360 view</button>
+    </div>
+  ),
+}));
+// data-tap-to-play shows the prop as Video360 resolves it (default true). Video360.test.tsx
+// checks that tapToPlay={false} leaves play and pause alone on a click or tap.
+vi.mock("../components/viewer/Video360", () => ({
+  default: ({ onClose, contained, tapToPlay = true }: { onClose: () => void; contained?: boolean; tapToPlay?: boolean }) => (
+    <div data-testid="video360" data-contained={String(Boolean(contained))} data-tap-to-play={String(tapToPlay)}>
+      <button onClick={onClose}>Close 360 view</button>
+    </div>
+  ),
+}));
 
 const mockApi = api as unknown as Record<
   | "get"
@@ -91,6 +107,29 @@ const PAGE_SIZE = 5000;
 // What every /media request carries besides the filters.
 function pageParams(offset: number) {
   return { has_location: "true", limit: String(PAGE_SIZE), offset: String(offset) };
+}
+
+// How many fullscreen views hold a history entry (useCloseOnBack).
+const depth = () => ((window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY] as number) ?? 0;
+
+// jsdom traverses history in setTimeout(0) steps; this lets every pending step land.
+async function settle() {
+  await act(async () => {
+    for (let round = 0; round < 12; round++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  });
+}
+
+// The phone's back gesture. Only call it over an entry of the view (check depth() first):
+// without one, jsdom never fires popstate.
+async function goBack() {
+  await act(async () => {
+    const popped = new Promise((resolve) => window.addEventListener("popstate", resolve, { once: true }));
+    window.history.back();
+    await popped;
+  });
+  await settle();
 }
 
 function deferred<T>() {
@@ -499,6 +538,362 @@ describe("MapPage", () => {
     });
   });
 
+  describe("on a phone", () => {
+    const cluster = [
+      { ...makeItem("a"), taken_at: "2024-07-02T10:00:00Z", gps_source: "exif" as const, gps_confidence: 1 },
+      makeItem("b"),
+      makeItem("c"),
+    ];
+
+    async function selectCluster() {
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return Promise.resolve(cluster);
+      });
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: "select cluster" }));
+      await screen.findByRole("button", { name: "Open fullscreen" });
+      return screen.getByRole("region", { name: "Selected media" });
+    }
+
+    // The order a flex column shows the children in: by their -order-N class, then source order.
+    function phoneOrder(container: Element): Element[] {
+      const order = (el: Element) => -Number(/(?:^| )-order-(\d+)(?: |$)/.exec(el.getAttribute("class") ?? "")?.[1] ?? 0);
+      return [...container.children]
+        .map((el, i) => ({ el, i }))
+        .sort((x, y) => order(x.el) - order(y.el) || x.i - y.i)
+        .map(({ el }) => el);
+    }
+
+    it("shows the selected item in a sheet across the bottom, and as a card from sm up", async () => {
+      const sheet = await selectCluster();
+
+      expect(sheet).toHaveClass("absolute", "inset-x-2", "bottom-2", "max-h-[55%]", "overflow-y-auto");
+      expect(sheet).toHaveClass("sm:inset-x-auto", "sm:bottom-auto", "sm:right-4", "sm:top-4", "sm:w-72");
+      // A phone held sideways gets the card, which must not run off the bottom either.
+      expect(sheet).toHaveClass("sm:max-h-[calc(100%-2rem)]");
+      expect(sheet.firstElementChild).toHaveClass("flex", "flex-col", "sm:block");
+    });
+
+    it("keeps the title row with Delete and Close stuck to the top while the panel scrolls", async () => {
+      const sheet = await selectCluster();
+      const titleRow = within(sheet).getByText("photo-a.jpg").parentElement!;
+
+      expect(within(titleRow).getByRole("button", { name: "Delete media" })).toBeInTheDocument();
+      expect(within(titleRow).getByRole("button", { name: "Close panel" })).toBeInTheDocument();
+      // Opaque, above the content scrolling under it, and holding the panel's top padding, so
+      // nothing shows above it once stuck.
+      expect(titleRow).toHaveClass("sticky", "top-0", "z-10", "bg-background", "pt-3");
+      expect(sheet).toHaveClass("px-3", "pb-3");
+      expect(sheet).not.toHaveClass("p-3");
+    });
+
+    it("puts the details, preview and peers before the actions on a phone, upright or sideways", async () => {
+      const sheet = await selectCluster();
+      const column = sheet.firstElementChild!;
+      // A sideways phone gets the card, but too short to reach a preview below the actions.
+      expect(column).toHaveClass("sm:block", "short:flex");
+      const title = within(sheet).getByText("photo-a.jpg");
+      const date = within(sheet).getByText(new Date("2024-07-02T10:00:00Z").toLocaleString());
+      const preview = within(sheet).getByRole("button", { name: "Open fullscreen" });
+      const peers = within(sheet).getByText("1 / 3");
+      const streetView = within(sheet).getByRole("link", { name: /Street View/ });
+      const albums = within(sheet).getByRole("button", { name: "Albums" });
+
+      const shown = phoneOrder(column);
+      const at = (el: Element) => shown.findIndex((child) => child.contains(el));
+      expect(at(title)).toBe(0);
+      expect(at(date)).toBeLessThan(at(preview));
+      expect(at(preview)).toBeLessThan(at(peers));
+      expect(at(peers)).toBeLessThan(at(streetView));
+      expect(at(streetView)).toBeLessThan(at(albums));
+
+      // The desktop card is a block: the source order, peers between the actions and the preview.
+      const dom = [...column.children];
+      const inDom = (el: Element) => dom.findIndex((child) => child.contains(el));
+      expect(inDom(albums)).toBeLessThan(inDom(peers));
+      expect(inDom(peers)).toBeLessThan(inDom(preview));
+    });
+
+    it("gives the sheet's buttons 44 px touch targets", async () => {
+      const sheet = await selectCluster();
+
+      for (const name of ["Delete media", "Close panel", "Previous", "Next"]) {
+        expect(within(sheet).getByRole("button", { name })).toHaveClass("touch:min-h-11", "touch:min-w-11");
+      }
+      expect(within(sheet).getByRole("button", { name: "Edit GPS location" })).toHaveClass("touch:min-h-11");
+      expect(within(sheet).getByRole("link", { name: /Street View/ })).toHaveClass("touch:min-h-11");
+    });
+
+    it("keeps the Loading label beside the zoom control", async () => {
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return new Promise(() => {});
+      });
+      renderPage();
+      expect(await screen.findByText("Loading…")).toHaveClass("bottom-2.5", "left-14", "touch:left-[4.25rem]");
+    });
+  });
+
+  describe("fullscreen view", () => {
+    const cluster = [makeItem("a"), makeItem("b"), makeItem("c")];
+
+    beforeEach(() => {
+      mockApi.getMediaUrl.mockImplementation((id: string) => Promise.resolve(`https://s3.example/${id}`));
+    });
+
+    // An overlay left open would pop its history entry after the next test began.
+    afterEach(async () => {
+      cleanup();
+      await settle();
+    });
+
+    async function select(items: MediaItem[], button = "select cluster") {
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return Promise.resolve(items);
+      });
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: button }));
+    }
+
+    async function openFullscreen() {
+      await userEvent.click(await screen.findByRole("button", { name: "Open fullscreen" }));
+      await settle();
+    }
+
+    // jsdom has no layout: a 400 x 300 viewer at the origin holding an 800 x 400 photo, which
+    // leaves letterboxes at y 0..50 and 250..300.
+    function layoutPhoto(dialog: HTMLElement, name: string) {
+      const img = within(dialog).getByRole("img", { name }) as HTMLImageElement;
+      const box = img.parentElement!;
+      box.getBoundingClientRect = () =>
+        ({ left: 0, top: 0, x: 0, y: 0, width: 400, height: 300, right: 400, bottom: 300 }) as DOMRect;
+      Object.defineProperty(img, "naturalWidth", { value: 800, configurable: true });
+      Object.defineProperty(img, "naturalHeight", { value: 400, configurable: true });
+      return box;
+    }
+
+    const touch = (x: number, y: number) => ({ pointerId: 1, pointerType: "touch", button: 0, clientX: x, clientY: y });
+
+    function tap(el: Element, x: number, y: number) {
+      fireEvent.pointerDown(el, touch(x, y));
+      fireEvent.pointerUp(el, touch(x, y));
+      fireEvent.click(el, { clientX: x, clientY: y });
+    }
+
+    function swipe(el: Element, fromX: number, toX: number) {
+      fireEvent.pointerDown(el, touch(fromX, 150));
+      fireEvent.pointerMove(el, touch((fromX + toX) / 2, 150));
+      fireEvent.pointerMove(el, touch(toX, 150));
+      fireEvent.pointerUp(el, touch(toX, 150));
+    }
+
+    it("shows a photo in a zoomable viewer with large controls", async () => {
+      await select(cluster);
+      await openFullscreen();
+      const dialog = screen.getByRole("dialog", { name: "photo-a.jpg" });
+      const img = within(dialog).getByRole("img", { name: "photo-a.jpg" });
+
+      expect(img).toHaveAttribute("src", "https://s3.example/a");
+      expect(img.parentElement).toHaveAttribute("data-zoomed", "false");
+      expect(within(dialog).getByRole("button", { name: "Close fullscreen" })).toHaveClass("h-11", "w-11");
+      expect(within(dialog).getByRole("button", { name: "Previous" })).toHaveClass("h-12", "w-12");
+      expect(within(dialog).getByRole("button", { name: "Next" })).toHaveClass("h-12", "w-12");
+      // Top centre, clear of the close button and of a video's controls.
+      expect(within(dialog).getByText("1 / 3")).toHaveClass("top-4", "left-1/2", "pointer-events-none");
+    });
+
+    it("hides the page behind it completely on touch, and dims it with a mouse", async () => {
+      await select(cluster);
+      await openFullscreen();
+
+      expect(screen.getByRole("dialog", { name: "photo-a.jpg" })).toHaveClass("bg-black/80", "touch:bg-black");
+    });
+
+    it("closes on a tap beside the photo, but not on one on it", async () => {
+      await select(cluster);
+      await openFullscreen();
+      const box = layoutPhoto(screen.getByRole("dialog"), "photo-a.jpg");
+
+      tap(box, 200, 150);
+      // A single tap on the photo waits out the double-tap window, then does nothing.
+      await act(() => new Promise((resolve) => setTimeout(resolve, 350)));
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+      tap(box, 200, 20);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.getByRole("region", { name: "Selected media" })).toBeInTheDocument();
+    });
+
+    it("steps through the cluster with a swipe", async () => {
+      await select(cluster);
+      await openFullscreen();
+      const dialog = screen.getByRole("dialog");
+
+      swipe(layoutPhoto(dialog, "photo-a.jpg"), 300, 100);
+      expect(await within(dialog).findByRole("img", { name: "photo-b.jpg" })).toBeInTheDocument();
+      expect(within(dialog).getByText("2 / 3")).toBeInTheDocument();
+
+      swipe(layoutPhoto(dialog, "photo-b.jpg"), 100, 300);
+      expect(await within(dialog).findByRole("img", { name: "photo-a.jpg" })).toBeInTheDocument();
+      expect(within(dialog).getByText("1 / 3")).toBeInTheDocument();
+    });
+
+    it("stays open while the next item's URL loads, and says when it fails", async () => {
+      await select(cluster);
+      await openFullscreen();
+      const dialog = screen.getByRole("dialog");
+      let resolveB!: (url: string) => void;
+      mockApi.getMediaUrl.mockImplementation((id: string) =>
+        id === "b"
+          ? new Promise<string>((resolve) => { resolveB = resolve; })
+          : Promise.reject(new Error("GET /media/c/url failed: 404")),
+      );
+
+      await userEvent.click(within(dialog).getByRole("button", { name: "Next" }));
+      expect(screen.getByRole("dialog")).toBe(dialog);
+      expect(within(dialog).getByText("Loading media…")).toBeInTheDocument();
+      await act(async () => resolveB("https://s3.example/b"));
+      expect(within(dialog).getByRole("img", { name: "photo-b.jpg" })).toBeInTheDocument();
+
+      await userEvent.click(within(dialog).getByRole("button", { name: "Next" }));
+      expect(await within(dialog).findByText("Failed to load media")).toBeInTheDocument();
+    });
+
+    it("keeps its keyboard shortcuts, stepping once per arrow key", async () => {
+      await select(cluster);
+      await openFullscreen();
+      const calls = mockApi.getMediaUrl.mock.calls.length;
+
+      await userEvent.keyboard("{ArrowRight}");
+      expect(await within(screen.getByRole("dialog")).findByRole("img", { name: "photo-b.jpg" })).toBeInTheDocument();
+      // The page's own arrow keys stand down while the view handles them.
+      expect(mockApi.getMediaUrl.mock.calls.length).toBe(calls + 1);
+
+      await userEvent.keyboard("{ArrowLeft}");
+      expect(await within(screen.getByRole("dialog")).findByRole("img", { name: "photo-a.jpg" })).toBeInTheDocument();
+      expect(mockApi.getMediaUrl.mock.calls.length).toBe(calls + 2);
+
+      await userEvent.keyboard("{Escape}");
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("closes from its close button and takes its history entry along", async () => {
+      await select(cluster);
+      const before = depth();
+      await openFullscreen();
+      expect(depth()).toBe(before + 1);
+
+      await userEvent.click(screen.getByRole("button", { name: "Close fullscreen" }));
+      await settle();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(depth()).toBe(before);
+    });
+
+    it("closes on the back gesture, leaving the item selected", async () => {
+      await select(cluster);
+      const before = depth();
+      await openFullscreen();
+      expect(depth()).toBe(before + 1);
+
+      await goBack();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.getByRole("region", { name: "Selected media" })).toBeInTheDocument();
+    });
+
+    it("fits a video into the visible height and closes on a click beside it", async () => {
+      await select([{ ...makeItem("v"), media_type: "video" }], "select v");
+      await openFullscreen();
+      const dialog = screen.getByRole("dialog");
+      const video = dialog.querySelector("video")!;
+
+      expect(video).toHaveClass("max-h-[90vh]", "supports-[height:100dvh]:max-h-[90dvh]", "max-w-[90vw]");
+      await userEvent.click(video);
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      await userEvent.click(dialog);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it.each([
+      ["photo_360", "panorama"],
+      ["video_360", "video360"],
+    ] as const)("leaves a %s view on the back gesture", async (mediaType, testId) => {
+      await select([{ ...makeItem("s"), media_type: mediaType }], "select s");
+      const before = depth();
+      await openFullscreen();
+      expect(screen.getByTestId(testId)).toHaveAttribute("data-contained", "false");
+      expect(depth()).toBe(before + 1);
+
+      await goBack();
+      expect(screen.queryByTestId(testId)).not.toBeInTheDocument();
+      expect(depth()).toBe(before);
+    });
+  });
+
+  describe("default view editor", () => {
+    afterEach(async () => {
+      cleanup();
+      await settle();
+    });
+
+    async function openEditor(mediaType: "photo_360" | "video_360" = "photo_360") {
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return Promise.resolve([{ ...makeItem("s"), media_type: mediaType }]);
+      });
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: "select s" }));
+      await screen.findByRole("button", { name: "Open fullscreen" });
+      await userEvent.click(screen.getByRole("button", { name: "Edit default view" }));
+      return screen.getByRole("button", { name: "Close view editor" });
+    }
+
+    it("stacks the viewer over the controls below md, side by side from md or sideways", async () => {
+      await openEditor();
+      const controls = screen.getByRole("button", { name: "Set current view as default" }).parentElement!.parentElement!;
+
+      expect(screen.getByTestId("panorama")).toHaveAttribute("data-contained", "true");
+      expect(controls.parentElement).toHaveClass("flex-col", "md:flex-row", "short:flex-row");
+      expect(controls).toHaveClass("max-h-[40%]", "overflow-y-auto", "md:max-h-none", "md:w-64", "short:max-h-none");
+      expect(screen.getByRole("button", { name: "Set current view as default" })).toHaveClass("touch:min-h-11");
+    });
+
+    // In the editor a click, or a 1-4 px nudge of the view, would restart playback and change
+    // the time the next keyframe stores.
+    it("turns off tap-to-play for a 360° video in the editor, but not in the fullscreen view", async () => {
+      await openEditor("video_360");
+      expect(screen.getByTestId("video360")).toHaveAttribute("data-contained", "true");
+      expect(screen.getByTestId("video360")).toHaveAttribute("data-tap-to-play", "false");
+
+      await userEvent.click(screen.getByRole("button", { name: "Close view editor" }));
+      await settle();
+      await userEvent.click(screen.getByRole("button", { name: "Open fullscreen" }));
+      await settle();
+      expect(screen.getByTestId("video360")).toHaveAttribute("data-contained", "false");
+      expect(screen.getByTestId("video360")).toHaveAttribute("data-tap-to-play", "true");
+    });
+
+    it("closes from a 44 px close button", async () => {
+      const close = await openEditor();
+      expect(close).toHaveClass("touch:h-11", "touch:w-11");
+
+      await userEvent.click(close);
+      expect(screen.queryByRole("button", { name: "Close view editor" })).not.toBeInTheDocument();
+    });
+
+    it("closes on the back gesture", async () => {
+      const before = depth();
+      await openEditor();
+      await settle();
+      expect(depth()).toBe(before + 1);
+
+      await goBack();
+      expect(screen.queryByRole("button", { name: "Close view editor" })).not.toBeInTheDocument();
+      expect(depth()).toBe(before);
+    });
+  });
+
   it("re-fetches from offset 0 when filters change (initial load triggers fetch)", async () => {
     renderPage();
 
@@ -526,5 +921,18 @@ describe("MediaPreview", () => {
     const el = container.querySelector(tag);
     expect(el).not.toBeNull();
     expect(el!.getAttribute("crossorigin")).toBe("anonymous");
+  });
+
+  it.each(["photo", "video"] as const)("shows a %s preview taller on a phone, smaller held sideways", (mediaType) => {
+    const { container } = render(
+      <MediaPreview item={{ ...makeItem("p"), media_type: mediaType }} url="https://s3.example/x" onFullscreen={() => {}} />,
+    );
+    expect(container.querySelector(mediaType === "photo" ? "img" : "video")).toHaveClass(
+      // vh first: without dvh support the dvh class alone would leave no cap.
+      "max-h-[30vh]",
+      "supports-[height:100dvh]:max-h-[30dvh]",
+      "sm:max-h-40",
+      "short:max-h-24",
+    );
   });
 });

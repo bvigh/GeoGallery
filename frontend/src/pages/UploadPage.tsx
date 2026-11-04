@@ -108,7 +108,10 @@ function ResultList({ title, names, error }: { title: string; names: string[]; e
       <p className={`font-medium ${error ? "text-red-500" : ""}`}>{title}</p>
       <ul className="mt-1 max-h-48 list-disc overflow-y-auto pl-4 text-muted-foreground">
         {names.map((f, i) => (
-          <li key={i}>{f}</li>
+          // Camera file names have no spaces to break at.
+          <li key={i} className="[overflow-wrap:anywhere]">
+            {f}
+          </li>
         ))}
       </ul>
     </div>
@@ -282,11 +285,11 @@ export function UploadPage() {
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-xl p-6">
+      <div className="mx-auto max-w-xl p-4 sm:p-6">
         <h1 className="mb-4 text-xl font-semibold">Upload Media</h1>
 
         <div
-          className="flex cursor-pointer flex-col items-center rounded-lg border-2 border-dashed p-10 text-muted-foreground hover:border-primary hover:text-primary transition-colors"
+          className="flex cursor-pointer flex-col items-center rounded-lg border-2 border-dashed p-6 text-center text-muted-foreground transition-colors hover:border-primary hover:text-primary sm:p-10"
           onClick={() => inputRef.current?.click()}
         >
           <Upload className="mb-2 h-8 w-8" />
@@ -309,7 +312,7 @@ export function UploadPage() {
             onClick={() => setPickerOpen(true)}
             disabled={uploading}
             aria-label={`Add to album: ${album ? album.name : "None"}`}
-            className="min-w-0 flex-1 truncate rounded-md border bg-background px-2 py-1 text-left hover:bg-muted disabled:opacity-50"
+            className="min-w-0 flex-1 truncate rounded-md border bg-background px-2 py-1 text-left hover:bg-muted disabled:opacity-50 touch:min-h-11"
           >
             {album ? (
               <>
@@ -329,7 +332,7 @@ export function UploadPage() {
               disabled={uploading}
               aria-label="Upload into no album"
               title="Upload into no album"
-              className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+              className="flex shrink-0 items-center justify-center rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50 touch:h-11 touch:w-11"
             >
               <X className="h-4 w-4" />
             </button>
@@ -351,7 +354,7 @@ export function UploadPage() {
               {files.length} file{files.length !== 1 ? "s" : ""} selected
             </p>
             <button
-              className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
+              className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50 touch:min-h-11 touch:px-6"
               onClick={handleUpload}
               disabled={uploading}
             >
@@ -394,7 +397,7 @@ export function UploadPage() {
             may be gzipped. Media without EXIF GPS is matched against the imported tracks.
           </p>
           <button
-            className="mt-2 rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
+            className="mt-2 rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50 touch:min-h-11"
             onClick={() => gpsInputRef.current?.click()}
             disabled={importing}
           >

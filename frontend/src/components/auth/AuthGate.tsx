@@ -30,16 +30,17 @@ export function AuthGate({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // min-h-dvh: 100vh is taller than what a phone browser shows, which would make the page scroll.
   if (state.status === "loading") {
     return (
-      <div className="flex h-screen items-center justify-center" role="status" aria-label="Loading">
+      <div className="flex min-h-dvh items-center justify-center" role="status" aria-label="Loading">
         <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
       </div>
     );
   }
   if (state.status === "error") {
     return (
-      <div className="flex h-screen items-center justify-center text-sm text-red-500">
+      <div className="flex min-h-dvh items-center justify-center p-4 text-center text-sm text-red-500">
         Could not reach the server. Reload the page to try again.
       </div>
     );

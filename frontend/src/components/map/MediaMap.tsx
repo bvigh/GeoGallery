@@ -11,6 +11,13 @@ import "leaflet.markercluster";
 // marker's DOM element.
 const icons = new Map<string, L.DivIcon>();
 
+// A finger needs a bigger target than the dot: on touch, a transparent ::before grows the
+// marker's hit area by 12 px on each side (36 px around a 12 px dot). No more: the dots of a
+// spider sit 25 px apart, and a bigger area would cover its neighbours.
+const MARKER_HIT_AREA = "touch:before:absolute touch:before:-inset-3";
+// Clusters are 36 px: 4 px more on each side makes 44.
+const CLUSTER_HIT_AREA = "touch:before:absolute touch:before:-inset-1";
+
 function markerIcon(item: MediaItem): L.DivIcon {
   const color =
     item.gps_confidence !== null && item.gps_confidence < 0.9 ? "#f97316" : "#3b82f6";
@@ -23,7 +30,7 @@ function markerIcon(item: MediaItem): L.DivIcon {
     const outline = is360 ? "outline:2px solid #a855f7;outline-offset:2px;" : "";
     icon = L.divIcon({
       html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${color};border:2px solid white;box-shadow:0 1px 3px rgba(0,0,0,.4);${outline}"></div>`,
-      className: "",
+      className: MARKER_HIT_AREA,
       iconSize: [size, size],
       iconAnchor: [half, half],
     });
@@ -36,7 +43,7 @@ function createClusterIcon(cluster: { getChildCount(): number }) {
   const count = cluster.getChildCount();
   return L.divIcon({
     html: `<div style="width:36px;height:36px;border-radius:50%;background:#3b82f6;border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;color:white;font-size:13px;font-weight:600;">${count}</div>`,
-    className: "",
+    className: CLUSTER_HIT_AREA,
     iconSize: [36, 36],
     iconAnchor: [18, 18],
   });
@@ -59,6 +66,7 @@ function popupContent(item: MediaItem): HTMLElement {
   return root;
 }
 
+// On touch the buttons are 44 px, as on every map (index.css).
 function ZoomControlBottomLeft() {
   const map = useMap();
   useEffect(() => {
@@ -206,16 +214,19 @@ function ClusterLayer({ items, onSelect }: Omit<Props, "visible">) {
 
 export function MediaMap({ items, onSelect, visible = true }: Props) {
   return (
+    // isolate: Leaflet's panes and controls (z-index up to 1000) stay inside the map, under the
+    // page's panels (z-[800]), instead of painting over the filter panel.
     <MapContainer
       center={[20, 0]}
       zoom={2}
       zoomControl={false}
-      className="h-full w-full"
+      className="isolate h-full w-full"
     >
       <ZoomControlBottomLeft />
       <InvalidateSizeWhenVisible visible={visible} />
+      {/* A new tab: a mis-tap on the credit must not navigate away from the app. */}
       <TileLayer
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
       <ClusterLayer items={items} onSelect={onSelect} />

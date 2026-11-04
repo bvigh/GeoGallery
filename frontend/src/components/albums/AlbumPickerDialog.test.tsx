@@ -294,4 +294,13 @@ describe("AlbumPickerDialog", () => {
     const dialog = await loadedDialog();
     expect(within(dialog).getByRole("radio", { name: "Family" })).toBeChecked();
   });
+
+  it("makes every album row finger-sized on touch", async () => {
+    renderPicker();
+    const dialog = await loadedDialog();
+    for (const radio of within(dialog).getAllByRole("radio")) {
+      expect(radio.closest("label")).toHaveClass("touch:min-h-11");
+    }
+    expect(within(dialog).getByRole("textbox", { name: "New album name" })).toHaveClass("touch:text-base");
+  });
 });

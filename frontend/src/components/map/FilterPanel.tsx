@@ -41,12 +41,12 @@ function Checkbox({
   hint?: string;
 }) {
   return (
-    <label className="flex items-center gap-2 text-sm cursor-pointer">
+    <label className="flex items-center gap-2 text-sm cursor-pointer touch:min-h-11">
       <input
         type="checkbox"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
-        className="rounded"
+        className="shrink-0 rounded touch:h-5 touch:w-5"
       />
       {label}
       {hint && <span className="text-xs text-muted-foreground"> {hint}</span>}
@@ -91,7 +91,9 @@ function Collections({ trips, albums, filters, onChange }: Pick<Props, "trips" |
       {trips.length + albums.length >= SEARCH_MIN_ITEMS && (
         <SearchInput value={query} onChange={setQuery} label="Search collections" className="mb-2" />
       )}
-      <div className="space-y-2 max-h-56 overflow-y-auto">
+      {/* On touch and on short screens the whole panel scrolls instead: a finger on a list nested
+          in a scrolling panel would scroll only the list. */}
+      <div className="space-y-2 max-h-56 overflow-y-auto touch:max-h-none touch:overflow-y-visible short:max-h-none short:overflow-y-visible">
         {tripsShown && (
           <div role="group" aria-label="Trips" className="space-y-1">
             <p className="text-xs text-muted-foreground">Trips</p>
@@ -117,7 +119,7 @@ function Collections({ trips, albums, filters, onChange }: Pick<Props, "trips" |
                         aria-expanded={open}
                         disabled={searching}
                         onClick={() => setExpandedByUser((m) => new Map(m).set(key, !userOpen))}
-                        className="flex w-full items-center gap-1 text-left text-sm hover:text-foreground disabled:cursor-default"
+                        className="flex w-full items-center gap-1 text-left text-sm hover:text-foreground disabled:cursor-default touch:min-h-11"
                       >
                         <span aria-hidden="true" className="w-3 text-xs text-muted-foreground">
                           {open ? "▾" : "▸"}
@@ -156,15 +158,19 @@ function Collections({ trips, albums, filters, onChange }: Pick<Props, "trips" |
   );
 }
 
+// The panel reaches at most 1rem above the bottom of the positioned parent and scrolls inside:
+// a phone held sideways leaves it only ~300 px. The column is as tall as the parent but lets the
+// pointer through beside the toggle and the panel. z-[900]: on a phone, the open panel covers
+// the map page's item sheet (z-[800]) instead of hiding under it.
 export function FilterPanel({ trips, albums, filters, onChange, activeCount }: Props) {
   const [open, setOpen] = useState(false);
   const ownerRadioName = useId();
 
   return (
-    <div className="absolute left-4 top-4 z-[800]">
+    <div className="pointer-events-none absolute bottom-4 left-4 top-4 z-[900] flex flex-col items-start gap-1">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1 rounded-lg border bg-background px-3 py-1.5 text-sm shadow-lg hover:bg-muted"
+        className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-lg border bg-background px-3 py-1.5 text-sm shadow-lg hover:bg-muted touch:min-h-11"
         aria-expanded={open}
       >
         ≡ Filters
@@ -176,73 +182,87 @@ export function FilterPanel({ trips, albums, filters, onChange, activeCount }: P
       </button>
 
       {open && (
-        <div className="mt-1 w-64 rounded-lg border bg-background p-3 shadow-lg space-y-3">
-          <fieldset>
-            <legend className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-              Show
-            </legend>
-            <div className="flex flex-wrap gap-x-3 gap-y-1">
-              {OWNER_OPTIONS.map((option) => (
-                <label key={option.value} className="flex items-center gap-1.5 text-sm cursor-pointer">
-                  <input
-                    type="radio"
-                    name={ownerRadioName}
-                    value={option.value}
-                    checked={filters.owner === option.value}
-                    onChange={() => onChange({ ...filters, owner: option.value })}
-                  />
-                  {option.label}
-                </label>
-              ))}
-            </div>
-          </fieldset>
+        <div className="pointer-events-auto flex min-h-0 w-[min(18rem,calc(100vw-2rem))] flex-col rounded-lg border bg-background shadow-lg sm:w-64">
+          <div className="min-h-0 space-y-3 overflow-y-auto overscroll-contain p-3">
+            <fieldset>
+              <legend className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Show
+              </legend>
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                {OWNER_OPTIONS.map((option) => (
+                  <label key={option.value} className="flex items-center gap-1.5 text-sm cursor-pointer touch:min-h-11">
+                    <input
+                      type="radio"
+                      name={ownerRadioName}
+                      value={option.value}
+                      checked={filters.owner === option.value}
+                      onChange={() => onChange({ ...filters, owner: option.value })}
+                      className="touch:h-5 touch:w-5"
+                    />
+                    {option.label}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
 
-          <div>
-            <SectionTitle>Date range</SectionTitle>
-            <div className="space-y-1">
-              <input
-                type="date"
-                aria-label="From date"
-                value={filters.fromDate}
-                onChange={(e) => onChange({ ...filters, fromDate: e.target.value })}
-                className="w-full rounded border px-2 py-1 text-sm"
-              />
-              <input
-                type="date"
-                aria-label="To date"
-                value={filters.toDate}
-                onChange={(e) => onChange({ ...filters, toDate: e.target.value })}
-                className="w-full rounded border px-2 py-1 text-sm"
-              />
-            </div>
-          </div>
-
-          {(trips.length > 0 || albums.length > 0) && (
-            <Collections trips={trips} albums={albums} filters={filters} onChange={onChange} />
-          )}
-
-          <div>
-            <SectionTitle>Media type</SectionTitle>
-            <div className="space-y-1">
-              {ALL_MEDIA_TYPES.map((type) => (
-                <Checkbox
-                  key={type}
-                  checked={filters.mediaTypes.includes(type)}
-                  onChange={() => onChange({ ...filters, mediaTypes: toggle(filters.mediaTypes, type) })}
-                  label={type}
+            <div>
+              <SectionTitle>Date range</SectionTitle>
+              <div className="space-y-1">
+                <input
+                  type="date"
+                  aria-label="From date"
+                  value={filters.fromDate}
+                  onChange={(e) => onChange({ ...filters, fromDate: e.target.value })}
+                  className="w-full rounded border px-2 py-1 text-sm touch:min-h-11"
                 />
-              ))}
+                <input
+                  type="date"
+                  aria-label="To date"
+                  value={filters.toDate}
+                  onChange={(e) => onChange({ ...filters, toDate: e.target.value })}
+                  className="w-full rounded border px-2 py-1 text-sm touch:min-h-11"
+                />
+              </div>
             </div>
-          </div>
 
-          {activeCount > 0 && (
+            {(trips.length > 0 || albums.length > 0) && (
+              <Collections trips={trips} albums={albums} filters={filters} onChange={onChange} />
+            )}
+
+            <div>
+              <SectionTitle>Media type</SectionTitle>
+              <div className="space-y-1">
+                {ALL_MEDIA_TYPES.map((type) => (
+                  <Checkbox
+                    key={type}
+                    checked={filters.mediaTypes.includes(type)}
+                    onChange={() => onChange({ ...filters, mediaTypes: toggle(filters.mediaTypes, type) })}
+                    label={type}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {activeCount > 0 && (
+              <button
+                onClick={() => onChange(emptyFilters)}
+                className="w-full rounded border px-2 py-1 text-sm hover:bg-muted touch:min-h-11"
+              >
+                Reset filters
+              </button>
+            )}
+          </div>
+          {/* On a phone the panel covers most of the map; this closes it without reaching back
+              up to the toggle. Outside the scrolling part, so it is always in view. */}
+          <div className="hidden shrink-0 border-t p-2 touch:block">
             <button
-              onClick={() => onChange(emptyFilters)}
-              className="w-full rounded border px-2 py-1 text-sm hover:bg-muted"
+              type="button"
+              onClick={() => setOpen(false)}
+              className="w-full rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground touch:min-h-11"
             >
-              Reset filters
+              Done
             </button>
-          )}
+          </div>
         </div>
       )}
     </div>

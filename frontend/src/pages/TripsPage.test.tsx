@@ -220,4 +220,49 @@ describe("TripsPage", () => {
     expect(mockApi.createAlbum).not.toHaveBeenCalled();
     expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
   });
+
+  it("cancels an edit without saving, by button or Escape", async () => {
+    render(<TripsPage />);
+    await screen.findByText("Iceland 2024");
+
+    await userEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await userEvent.clear(screen.getByRole("textbox", { name: "Trip name" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Trip name" }), "Renamed");
+    // A phone has no Escape key, so the button is the way out.
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("textbox", { name: "Trip name" })).not.toBeInTheDocument();
+    expect(screen.getByText("Iceland 2024")).toBeInTheDocument();
+    expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await userEvent.type(screen.getByRole("textbox", { name: "Trip name" }), "{Escape}");
+    expect(screen.queryByRole("textbox", { name: "Trip name" })).not.toBeInTheDocument();
+    expect(mockApi.patch).not.toHaveBeenCalled();
+  });
+
+  it("labels the edit fields and saves them", async () => {
+    render(<TripsPage />);
+    await screen.findByText("Iceland 2024");
+    await userEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+
+    expect(screen.getByLabelText("Start date")).toHaveValue("2024-07-01");
+    expect(screen.getByLabelText("End date")).toHaveValue("2024-07-14");
+    // iOS zooms into a focused field with text under 16px and stays zoomed.
+    expect(screen.getByRole("textbox", { name: "Trip name" })).toHaveClass("touch:text-base");
+
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(mockApi.patch).toHaveBeenCalledWith("/trips/t1", {
+      name: "Iceland 2024",
+      start_date: "2024-07-01",
+      end_date: "2024-07-14",
+    });
+  });
+
+  it("makes the card actions finger-sized on touch", async () => {
+    render(<TripsPage />);
+    await screen.findByText("Iceland 2024");
+    for (const name of ["Add to album…", "Edit"]) {
+      expect(screen.getAllByRole("button", { name })[0]).toHaveClass("touch:min-h-11", "touch:min-w-11");
+    }
+  });
 });

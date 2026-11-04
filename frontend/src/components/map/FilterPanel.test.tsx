@@ -475,4 +475,69 @@ describe("FilterPanel", () => {
       expect(tripLabels()).toEqual(want);
     });
   });
+
+  describe("on a phone", () => {
+    it("closes from the Done button below the options, keeping the filters", async () => {
+      const { onChange } = renderPanel();
+      await openPanel();
+      await userEvent.click(screen.getByRole("button", { name: "Done" }));
+
+      expect(screen.queryByLabelText("From date")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /filters/i })).toHaveAttribute("aria-expanded", "false");
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    // jsdom has no layout: the classes are what keeps the panel inside a phone held sideways.
+    it("stays inside its parent and scrolls its options, with Done always in view", async () => {
+      renderPanel();
+      await openPanel();
+      const toggle = screen.getByRole("button", { name: /filters/i });
+      const column = toggle.parentElement!;
+      const body = screen.getByLabelText("From date").closest(".overflow-y-auto")!;
+      const panel = body.parentElement!;
+      const done = screen.getByRole("button", { name: "Done" });
+
+      // Spans the parent but lets the map have the pointer beside the toggle and the panel.
+      expect(column).toHaveClass("absolute", "top-4", "bottom-4", "flex-col", "pointer-events-none");
+      expect(toggle).toHaveClass("pointer-events-auto", "shrink-0");
+      expect(panel).toHaveClass("pointer-events-auto", "min-h-0", "flex-col", "w-[min(18rem,calc(100vw-2rem))]", "sm:w-64");
+      expect(body).toHaveClass("min-h-0", "overscroll-contain");
+      expect(body).toContainElement(screen.getByLabelText("photo"));
+      expect(body).not.toContainElement(done);
+      expect(panel).toContainElement(done);
+      // Only where a finger is the pointer.
+      expect(done.parentElement).toHaveClass("hidden", "touch:block");
+    });
+
+    it("scrolls the collections with the panel on touch, not in a list of their own", async () => {
+      renderPanel();
+      await openPanel();
+      const list = screen.getByRole("group", { name: "Trips" }).parentElement!;
+
+      expect(list).toHaveClass("max-h-56", "overflow-y-auto");
+      expect(list).toHaveClass("touch:max-h-none", "touch:overflow-y-visible", "short:max-h-none", "short:overflow-y-visible");
+    });
+
+    it("gives every control a finger-sized row", async () => {
+      renderPanel({}, 1, vi.fn(), [
+        { ...sampleTrips[0], id: "y1", name: "Lisbon", start_date: "2026-04-02" },
+        { ...sampleTrips[0], id: "y2", name: "Rome", start_date: "2025-03-01" },
+      ]);
+      await openPanel();
+
+      for (const el of [
+        screen.getByRole("button", { name: /^≡ Filters/ }),
+        screen.getByLabelText("photo").closest("label"),
+        screen.getByLabelText("Family").closest("label"),
+        screen.getByRole("radio", { name: "Mine" }).closest("label"),
+        screen.getByRole("button", { name: /^2025 / }),
+        screen.getByLabelText("From date"),
+        screen.getByRole("button", { name: /reset/i }),
+        screen.getByRole("button", { name: "Done" }),
+      ]) {
+        expect(el).toHaveClass("touch:min-h-11");
+      }
+      expect(screen.getByLabelText("photo")).toHaveClass("touch:h-5", "touch:w-5");
+    });
+  });
 });

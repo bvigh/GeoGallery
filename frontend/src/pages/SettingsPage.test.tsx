@@ -224,4 +224,17 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(screen.getByLabelText("New API token")).toHaveValue("gg_pat_SECRETVALUE");
   });
+
+  it("folds the columns a phone has no room for into the name cell", async () => {
+    render(<SettingsPage />);
+    const row = (await screen.findByText("cron")).closest("tr")!;
+    const [nameCell, hintCell, , , , statusCell, actionCell] = Array.from(row.cells);
+    // Shown below sm only; the wide columns are hidden there.
+    expect(within(nameCell).getByText(/^Token gg_pat_abc123… · active$/)).toBeInTheDocument();
+    expect(within(nameCell).getByText(/^Created .* · Expires .* · Last used -$/)).toBeInTheDocument();
+    expect(nameCell.querySelector("div")).toHaveClass("sm:hidden");
+    for (const cell of [hintCell, statusCell]) expect(cell).toHaveClass("hidden", "sm:table-cell");
+    expect(row.closest("table")!.tHead).toHaveClass("hidden", "sm:table-header-group");
+    expect(within(actionCell).getByRole("button", { name: "Revoke cron" })).toHaveClass("touch:min-h-11");
+  });
 });

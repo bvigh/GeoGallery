@@ -28,14 +28,15 @@ export function SearchInput({ value, onChange, label, placeholder = "Search…",
         onKeyDown={(e) => {
           if (e.key === "Enter") e.preventDefault();
         }}
-        className="w-full rounded-md border bg-background py-1 pl-7 pr-7 text-sm [&::-webkit-search-cancel-button]:hidden"
+        // 16px text on touch: iOS zooms the page into a smaller focused field and stays zoomed.
+        className="w-full rounded-md border bg-background py-1 pl-7 pr-7 text-sm [&::-webkit-search-cancel-button]:hidden touch:py-2 touch:pr-11 touch:text-base"
       />
       {value && (
         <button
           type="button"
           onClick={() => onChange("")}
           aria-label="Clear search"
-          className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-sm p-0.5 text-muted-foreground hover:text-foreground"
+          className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center justify-center rounded-sm p-0.5 text-muted-foreground hover:text-foreground touch:right-0 touch:h-11 touch:w-11"
         >
           <X className="h-3.5 w-3.5" />
         </button>

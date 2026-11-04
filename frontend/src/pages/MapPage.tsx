@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ExternalLink, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, Trash2, X } from "lucide-react";
 import { MediaMap } from "../components/map/MediaMap";
 import { FilterPanel } from "../components/map/FilterPanel";
 import { EditLocationModal } from "../components/EditLocationModal";
@@ -12,6 +12,8 @@ import Panorama360 from "../components/viewer/Panorama360";
 import Video360 from "../components/viewer/Video360";
 import VideoDecodeNotice from "../components/viewer/VideoDecodeNotice";
 import { useVideoDecodeCheck } from "@/lib/video";
+import { useCloseOnBack } from "@/lib/useCloseOnBack";
+import { ZoomableImage } from "@/components/viewer/ZoomableImage";
 
 // The backend's maximum page: every page re-runs the whole filtered query, so fewer is faster.
 const PAGE_SIZE = 5000;
@@ -19,6 +21,8 @@ const PAGE_SIZE = 5000;
 // crossOrigin matters: the fullscreen 360° viewers load this same presigned URL
 // as a CORS request (WebGL texture). A plain no-CORS preview fetch gets cached
 // without Access-Control-Allow-Origin, and the browser would reuse it and fail.
+// Taller on a phone, where the panel spans the screen and the preview is its main content, and
+// smaller on a phone held sideways, where the card has only ~300 px to show it in.
 export function MediaPreview({
   item,
   url,
@@ -29,6 +33,9 @@ export function MediaPreview({
   onFullscreen: () => void;
 }) {
   const isVideo = item.media_type === "video" || item.media_type === "video_360";
+  // The vh value is the fallback for browsers without dvh, where the dvh class alone sets no cap.
+  const size =
+    "max-h-[30vh] supports-[height:100dvh]:max-h-[30dvh] w-full rounded object-cover sm:max-h-40 short:max-h-24";
   return (
     <button
       className="mt-2 w-full overflow-hidden rounded cursor-zoom-in"
@@ -36,44 +43,41 @@ export function MediaPreview({
       aria-label="Open fullscreen"
     >
       {isVideo ? (
-        <video
-          src={url}
-          crossOrigin="anonymous"
-          className="w-full rounded object-cover"
-          style={{ maxHeight: 160 }}
-          muted
-          playsInline
-        />
+        <video src={url} crossOrigin="anonymous" className={size} muted playsInline />
       ) : (
-        <img
-          src={url}
-          crossOrigin="anonymous"
-          alt={item.filename}
-          className="w-full rounded object-cover"
-          style={{ maxHeight: 160 }}
-        />
+        <img src={url} crossOrigin="anonymous" alt={item.filename} className={size} />
       )}
     </button>
   );
 }
 
+// Round, translucent and at least 44 px: readable over any picture and easy to hit with a finger.
+const overlayButton =
+  "absolute flex items-center justify-center rounded-full bg-black/40 text-white hover:bg-black/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70";
+
+// Stays open while a step to a cluster peer loads that peer's URL (url null), so it does not
+// flash the map and keeps its history entry.
 function FullscreenOverlay({
   item,
   url,
+  failed = false,
   onClose,
   onPrev,
   onNext,
   peerLabel,
 }: {
   item: MediaItem;
-  url: string;
+  url: string | null;
+  failed?: boolean;
   onClose: () => void;
   onPrev?: () => void;
   onNext?: () => void;
   peerLabel?: string;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const videoCheck = useVideoDecodeCheck(url);
+  const videoCheck = useVideoDecodeCheck(url ?? "");
+  // The phone's back gesture closes the view instead of leaving the app.
+  useCloseOnBack(onClose);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -96,7 +100,7 @@ function FullscreenOverlay({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, onPrev, onNext, item.media_type]);
 
-  if (item.media_type === "photo_360") {
+  if (url && item.media_type === "photo_360") {
     return (
       <Panorama360
         url={url}
@@ -108,7 +112,7 @@ function FullscreenOverlay({
     );
   }
 
-  if (item.media_type === "video_360") {
+  if (url && item.media_type === "video_360") {
     return (
       <Video360
         url={url}
@@ -121,66 +125,93 @@ function FullscreenOverlay({
     );
   }
 
+  const photo = url !== null && item.media_type === "photo";
+
   return (
     <div
-      className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/80"
-      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={item.filename}
+      // Opaque on touch: on a phone the map, the header and the selected-item panel showing
+      // through around the photo look like part of it.
+      className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/80 touch:bg-black"
+      // A photo closes on a tap beside the picture (ZoomableImage's onTap): the backdrop also
+      // gets a click after every pan and double tap.
+      onClick={photo ? undefined : onClose}
     >
+      {url === null ? (
+        <p className="text-sm text-white/80">{failed ? "Failed to load media" : "Loading media…"}</p>
+      ) : photo ? (
+        // Same request mode as the preview, so the browser can reuse its download.
+        <ZoomableImage
+          src={url}
+          alt={item.filename}
+          crossOrigin="anonymous"
+          onTap={(inside) => {
+            if (!inside) onClose();
+          }}
+          onSwipe={(direction) => (direction === "next" ? onNext?.() : onPrev?.())}
+        />
+      ) : (
+        <div className="relative" onClick={(e) => e.stopPropagation()}>
+          <video
+            ref={videoRef}
+            src={url}
+            controls
+            autoPlay
+            className="max-h-[90vh] supports-[height:100dvh]:max-h-[90dvh] max-w-[90vw] rounded object-contain outline-none"
+            {...videoCheck.handlers}
+          />
+          {videoCheck.unsupported && <VideoDecodeNotice />}
+        </div>
+      )}
+      {/* After the picture, so they paint over it. Top centre: clear of the close button and of
+          a video's controls. */}
+      {peerLabel && (
+        <div className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-black/50 px-3 py-1 text-sm text-white">
+          {peerLabel}
+        </div>
+      )}
       <button
-        className="absolute right-4 top-4 text-white text-2xl leading-none hover:opacity-70"
-        onClick={onClose}
+        className={`${overlayButton} right-2 top-2 h-11 w-11`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
         aria-label="Close fullscreen"
       >
-        ✕
+        <X className="h-6 w-6" aria-hidden="true" />
       </button>
       {onPrev && (
         <button
-          className="absolute left-4 top-1/2 -translate-y-1/2 text-white text-5xl leading-none hover:opacity-70 select-none"
-          onClick={(e) => { e.stopPropagation(); onPrev(); }}
+          className={`${overlayButton} left-2 top-1/2 h-12 w-12 -translate-y-1/2`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onPrev();
+          }}
           aria-label="Previous"
         >
-          ‹
+          <ChevronLeft className="h-8 w-8" aria-hidden="true" />
         </button>
       )}
       {onNext && (
         <button
-          className="absolute right-4 top-1/2 -translate-y-1/2 text-white text-5xl leading-none hover:opacity-70 select-none"
-          onClick={(e) => { e.stopPropagation(); onNext(); }}
+          className={`${overlayButton} right-2 top-1/2 h-12 w-12 -translate-y-1/2`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onNext();
+          }}
           aria-label="Next"
         >
-          ›
+          <ChevronRight className="h-8 w-8" aria-hidden="true" />
         </button>
       )}
-      {peerLabel && (
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white text-sm bg-black/50 px-3 py-1 rounded-full pointer-events-none">
-          {peerLabel}
-        </div>
-      )}
-      <div className="relative" onClick={(e) => e.stopPropagation()}>
-        {item.media_type === "video" ? (
-          <>
-            <video
-              ref={videoRef}
-              src={url}
-              controls
-              autoPlay
-              className="max-h-[90vh] max-w-[90vw] rounded object-contain outline-none"
-              {...videoCheck.handlers}
-            />
-            {videoCheck.unsupported && <VideoDecodeNotice />}
-          </>
-        ) : (
-          <img
-            src={url}
-            alt={item.filename}
-            className="max-h-[100vh] max-w-[100vw] rounded object-contain"
-          />
-        )}
-      </div>
     </div>
   );
 }
 
+// Viewer and controls side by side, or stacked on a phone held upright, where a 16rem sidebar
+// would leave the viewer a sliver.
 function EditViewModal({
   item,
   url,
@@ -197,6 +228,7 @@ function EditViewModal({
   const controlRef = useRef<{ pause: () => void; seek: (t: number) => void; seekAndApply: (t: number) => void } | null>(null);
   const [keyframes, setKeyframes] = useState<OrientationKeyframe[]>(item.keyframes ?? []);
   const [saving, setSaving] = useState(false);
+  useCloseOnBack(onClose);
 
   async function handleSetDefaultView() {
     if (!captureRef.current) return;
@@ -237,18 +269,27 @@ function EditViewModal({
 
   return (
     <div className="fixed inset-0 z-[1100] flex flex-col bg-black">
-      <div className="flex items-center justify-between px-4 py-2 bg-black/80 text-white text-sm shrink-0">
-        <span className="font-medium">Edit default view — {item.filename}</span>
-        <button onClick={onClose} className="text-white hover:text-gray-300 text-xl leading-none">✕</button>
+      <div className="flex shrink-0 items-center justify-between gap-2 bg-black/80 py-1 pl-4 pr-1 text-sm text-white">
+        <span className="min-w-0 truncate font-medium">Edit default view — {item.filename}</span>
+        <button
+          onClick={onClose}
+          aria-label="Close view editor"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 touch:h-11 touch:w-11"
+        >
+          <X className="h-5 w-5" aria-hidden="true" />
+        </button>
       </div>
 
-      <div className="flex flex-1 overflow-hidden">
-        <div className="flex-1 relative">
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row short:flex-row">
+        <div className="relative min-h-0 flex-1">
           {isVideo ? (
             <Video360
               url={url}
               onClose={() => {}}
               contained
+              // A click or a small nudge of the view must not restart playback and move the
+              // time the next keyframe stores.
+              tapToPlay={false}
               initialYaw={item.initial_yaw}
               initialPitch={item.initial_pitch}
               initialFov={item.initial_fov}
@@ -270,13 +311,13 @@ function EditViewModal({
           )}
         </div>
 
-        <div className="w-64 shrink-0 bg-black/90 text-white flex flex-col gap-3 p-4 overflow-y-auto">
+        <div className="flex max-h-[40%] shrink-0 flex-col gap-3 overflow-y-auto overscroll-contain bg-black/90 p-4 text-white md:max-h-none md:w-64 short:max-h-none short:w-56">
           <div>
             <p className="text-xs text-white/60 mb-1">Default view (yaw / pitch / zoom)</p>
             <button
               onClick={handleSetDefaultView}
               disabled={saving}
-              className="w-full rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+              className="w-full rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50 touch:min-h-11"
             >
               Set current view as default
             </button>
@@ -287,18 +328,18 @@ function EditViewModal({
               <p className="text-xs text-white/60 mb-1">Keyframes</p>
               <button
                 onClick={handleAddKeyframe}
-                className="w-full rounded bg-white/10 px-3 py-1.5 text-sm hover:bg-white/20"
+                className="w-full rounded bg-white/10 px-3 py-1.5 text-sm hover:bg-white/20 touch:min-h-11"
               >
                 + Add keyframe at current time
               </button>
               {keyframes.length > 0 && (
                 <ul className="mt-2 space-y-1 text-xs">
                   {keyframes.map((kf) => (
-                    <li key={kf.time} className="rounded bg-white/5 px-2 py-1">
+                    <li key={kf.time} className="rounded bg-white/5 px-2 py-1 touch:py-0">
                       <div className="flex items-center justify-between">
                         <button
                           onClick={() => handleSeekToKeyframe(kf.time)}
-                          className="tabular-nums text-left hover:text-primary"
+                          className="tabular-nums text-left hover:text-primary touch:min-h-11"
                           title="Jump to this keyframe"
                         >
                           {kf.time.toFixed(1)}s &nbsp;·&nbsp;
@@ -309,7 +350,7 @@ function EditViewModal({
                         <div className="flex items-center gap-1 ml-2 shrink-0">
                           <button
                             onClick={() => handleAddKeyframe()}
-                            className="text-white/40 hover:text-white text-xs px-1"
+                            className="text-white/40 hover:text-white text-xs px-1 touch:flex touch:min-h-11 touch:min-w-11 touch:items-center touch:justify-center"
                             title="Update this keyframe with current view"
                             aria-label="Update keyframe"
                           >
@@ -317,7 +358,7 @@ function EditViewModal({
                           </button>
                           <button
                             onClick={() => handleDeleteKeyframe(kf.time)}
-                            className="text-white/40 hover:text-white"
+                            className="text-white/40 hover:text-white touch:flex touch:min-h-11 touch:min-w-11 touch:items-center touch:justify-center"
                             aria-label="Delete keyframe"
                           >
                             ✕
@@ -332,7 +373,7 @@ function EditViewModal({
                 <button
                   onClick={handleSaveKeyframes}
                   disabled={saving}
-                  className="mt-2 w-full rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+                  className="mt-2 w-full rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50 touch:min-h-11"
                 >
                   Save keyframes
                 </button>
@@ -344,6 +385,11 @@ function EditViewModal({
     </div>
   );
 }
+
+// Icon buttons: small on a desktop, 44 px for a finger.
+const touchIcon = "touch:flex touch:min-h-11 touch:min-w-11 touch:items-center touch:justify-center";
+// Full-width actions: as tall as a fingertip needs, with text to match.
+const touchRow = "touch:min-h-11 touch:text-sm";
 
 // App keeps this page mounted while another tab is open (active false), so the map and its
 // markers survive tab switches.
@@ -501,15 +547,17 @@ export function MapPage({ active = true }: { active?: boolean }) {
   }
 
   useEffect(() => {
-    // Hidden behind another tab, the arrow keys are not ours.
-    if (!active || clusterPeers.length <= 1) return;
+    // Hidden behind another tab, the arrow keys are not ours. The fullscreen view handles them
+    // itself, and behind an editor they would switch the item being edited.
+    const covered = fullscreen || editingView || editingLocation;
+    if (!active || covered || clusterPeers.length <= 1) return;
     function onKey(e: KeyboardEvent) {
       if (e.key === "ArrowLeft") navigatePeer(-1);
       if (e.key === "ArrowRight") navigatePeer(1);
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, clusterPeers, clusterIndex]);
+  }, [active, fullscreen, editingView, editingLocation, clusterPeers, clusterIndex]);
 
   return (
     <div className="relative h-full w-full">
@@ -527,144 +575,161 @@ export function MapPage({ active = true }: { active?: boolean }) {
         </div>
       )}
 
+      {/* Beside the zoom control, not over it: the control ends 44 px from the left, 58 px with
+          its touch-sized buttons. */}
       {loadingMedia && (
-        <div className="absolute bottom-4 left-4 z-[800] rounded bg-background/80 px-2 py-1 text-xs text-muted-foreground">
+        <div className="absolute bottom-2.5 left-14 z-[800] rounded bg-background/80 px-2 py-1 text-xs text-muted-foreground touch:left-[4.25rem]">
           Loading…
         </div>
       )}
 
       <MediaMap items={items} visible={active} onSelect={(item, peers) => handleSelect(item, peers)} />
 
+      {/* A sheet across the bottom of a phone, a card at the top right otherwise; both scroll
+          within the map. They show only their top before scrolling, so on a phone (upright or
+          sideways) the details, the preview and the peer navigation come first (negative order)
+          and the actions after; on a desktop the card is a plain block and keeps the source
+          order. The title row sticks to the top, so Delete and Close stay in reach; it carries
+          the top padding itself, so nothing scrolls past above it. */}
       {selected && (
-        <div className="absolute right-4 top-4 z-[800] w-72 rounded-lg border bg-background p-3 shadow-lg">
-          <div className="flex items-start justify-between gap-2 mb-1">
-            <p className="font-medium truncate">{selected.filename}</p>
-            <div className="flex items-center gap-1 shrink-0">
-              {isOwn && (
+        <div
+          aria-label="Selected media"
+          role="region"
+          className="absolute inset-x-2 bottom-2 z-[800] max-h-[55%] overflow-y-auto overscroll-contain rounded-lg border bg-background px-3 pb-3 shadow-lg sm:inset-x-auto sm:bottom-auto sm:right-4 sm:top-4 sm:max-h-[calc(100%-2rem)] sm:w-72"
+        >
+          <div className="flex flex-col sm:block short:flex">
+            <div className="sticky top-0 z-10 -order-3 flex items-start justify-between gap-2 bg-background pb-1 pt-3">
+              <p className="min-w-0 font-medium truncate touch:self-center">{selected.filename}</p>
+              <div className="flex items-center gap-1 shrink-0">
+                {isOwn && (
+                  <button
+                    className={`text-muted-foreground hover:text-destructive ${touchIcon}`}
+                    onClick={() => handleDeleteMedia(selected)}
+                    aria-label="Delete media"
+                    title="Delete media"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                )}
                 <button
-                  className="text-muted-foreground hover:text-destructive"
-                  onClick={() => handleDeleteMedia(selected)}
-                  aria-label="Delete media"
-                  title="Delete media"
+                  className={`text-muted-foreground hover:text-foreground ${touchIcon}`}
+                  onClick={() => handleSelect(null)}
+                  aria-label="Close panel"
                 >
-                  <Trash2 className="h-4 w-4" />
+                  ✕
                 </button>
-              )}
-              <button
-                className="text-muted-foreground hover:text-foreground"
-                onClick={() => handleSelect(null)}
-                aria-label="Close panel"
+              </div>
+            </div>
+
+            {!isOwn && (
+              <p className="-order-3 text-xs text-muted-foreground">
+                Shared by {selected.owner_name ?? "another user"}
+              </p>
+            )}
+
+            {selected.taken_at && (
+              <p className="-order-3 text-sm text-muted-foreground">
+                {new Date(selected.taken_at).toLocaleString()}
+              </p>
+            )}
+
+            {selected.gps_source && (
+              <p className="-order-3 mt-1 text-xs text-muted-foreground">
+                GPS: {selected.gps_source}
+                {selected.gps_confidence !== null &&
+                  ` (${Math.round(selected.gps_confidence * 100)}%)`}
+              </p>
+            )}
+
+            {selected.lat !== null && selected.lng !== null && (
+              <a
+                href={`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${selected.lat},${selected.lng}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`mt-1 flex items-center justify-center gap-1 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted ${touchRow}`}
               >
-                ✕
+                <ExternalLink className="h-3 w-3" />
+                Open in Street View
+              </a>
+            )}
+
+            {isOwn && (
+              <button
+                className={`mt-1 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted ${touchRow}`}
+                onClick={() => setEditingLocation(true)}
+              >
+                Edit GPS location
               </button>
+            )}
+
+            <AlbumMenu
+              item={selected}
+              isOwn={isOwn}
+              onChange={handleAlbumChange}
+              onAlbumCreated={handleAlbumCreated}
+            />
+
+            {isOwn && (selected.media_type === "photo_360" || selected.media_type === "video_360") && (
+              <button
+                className={`mt-2 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted ${touchRow}`}
+                onClick={() => setEditingView(true)}
+              >
+                Edit default view
+              </button>
+            )}
+
+            {clusterPeers.length > 1 && (
+              <div className="-order-1 mt-2 flex items-center justify-between">
+                <button
+                  onClick={() => navigatePeer(-1)}
+                  className={`px-2 py-1 rounded text-lg leading-none hover:bg-muted ${touchIcon}`}
+                  aria-label="Previous"
+                >
+                  ‹
+                </button>
+                <span className="text-xs text-muted-foreground">
+                  {clusterIndex + 1} / {clusterPeers.length}
+                </span>
+                <button
+                  onClick={() => navigatePeer(1)}
+                  className={`px-2 py-1 rounded text-lg leading-none hover:bg-muted ${touchIcon}`}
+                  aria-label="Next"
+                >
+                  ›
+                </button>
+              </div>
+            )}
+
+            <div className="-order-2">
+              {loading && (
+                <p className="mt-2 text-xs text-muted-foreground animate-pulse">
+                  Loading preview…
+                </p>
+              )}
+
+              {urlError && (
+                <p className="mt-2 text-xs text-destructive">
+                  Failed to load preview
+                </p>
+              )}
+
+              {mediaUrl && !loading && (
+                <MediaPreview
+                  item={selected}
+                  url={mediaUrl}
+                  onFullscreen={() => setFullscreen(true)}
+                />
+              )}
             </div>
           </div>
-
-          {!isOwn && (
-            <p className="text-xs text-muted-foreground">
-              Shared by {selected.owner_name ?? "another user"}
-            </p>
-          )}
-
-          {selected.taken_at && (
-            <p className="text-sm text-muted-foreground">
-              {new Date(selected.taken_at).toLocaleString()}
-            </p>
-          )}
-
-          {selected.gps_source && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              GPS: {selected.gps_source}
-              {selected.gps_confidence !== null &&
-                ` (${Math.round(selected.gps_confidence * 100)}%)`}
-            </p>
-          )}
-
-          {selected.lat !== null && selected.lng !== null && (
-            <a
-              href={`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${selected.lat},${selected.lng}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-1 flex items-center justify-center gap-1 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted"
-            >
-              <ExternalLink className="h-3 w-3" />
-              Open in Street View
-            </a>
-          )}
-
-          {isOwn && (
-            <button
-              className="mt-1 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted"
-              onClick={() => setEditingLocation(true)}
-            >
-              Edit GPS location
-            </button>
-          )}
-
-          <AlbumMenu
-            item={selected}
-            isOwn={isOwn}
-            onChange={handleAlbumChange}
-            onAlbumCreated={handleAlbumCreated}
-          />
-
-          {isOwn && (selected.media_type === "photo_360" || selected.media_type === "video_360") && (
-            <button
-              className="mt-2 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted"
-              onClick={() => setEditingView(true)}
-            >
-              Edit default view
-            </button>
-          )}
-
-          {clusterPeers.length > 1 && (
-            <div className="mt-2 flex items-center justify-between">
-              <button
-                onClick={() => navigatePeer(-1)}
-                className="px-2 py-1 rounded text-lg leading-none hover:bg-muted"
-                aria-label="Previous"
-              >
-                ‹
-              </button>
-              <span className="text-xs text-muted-foreground">
-                {clusterIndex + 1} / {clusterPeers.length}
-              </span>
-              <button
-                onClick={() => navigatePeer(1)}
-                className="px-2 py-1 rounded text-lg leading-none hover:bg-muted"
-                aria-label="Next"
-              >
-                ›
-              </button>
-            </div>
-          )}
-
-          {loading && (
-            <p className="mt-2 text-xs text-muted-foreground animate-pulse">
-              Loading preview…
-            </p>
-          )}
-
-          {urlError && (
-            <p className="mt-2 text-xs text-destructive">
-              Failed to load preview
-            </p>
-          )}
-
-          {mediaUrl && !loading && (
-            <MediaPreview
-              item={selected}
-              url={mediaUrl}
-              onFullscreen={() => setFullscreen(true)}
-            />
-          )}
         </div>
       )}
 
-      {fullscreen && selected && mediaUrl && (
+      {fullscreen && selected && (
         <FullscreenOverlay
           item={selected}
           url={mediaUrl}
+          failed={urlError !== null}
           onClose={() => setFullscreen(false)}
           onPrev={clusterPeers.length > 1 ? () => navigatePeer(-1) : undefined}
           onNext={clusterPeers.length > 1 ? () => navigatePeer(1) : undefined}

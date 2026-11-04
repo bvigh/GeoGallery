@@ -196,6 +196,50 @@ describe("MediaMap", () => {
     expect(second).toHaveBeenCalledWith(items[0], [items[0]]);
   });
 
+  // Without isolation Leaflet's controls (z-index 1000) painted over the page's filter panel.
+  it("keeps Leaflet's panes and controls in the map's own stacking context", () => {
+    const { container } = render(<MediaMap items={[]} />);
+    expect(container.querySelector(".leaflet-container")).toHaveClass("isolate");
+  });
+
+  it("opens the map credit in a new tab, so a mis-tap does not leave the app", () => {
+    const { container } = render(<MediaMap items={[]} />);
+    const credit = container.querySelector<HTMLAnchorElement>('.leaflet-control-attribution a[href*="openstreetmap.org"]');
+    expect(credit).not.toBeNull();
+    expect(credit).toHaveAttribute("target", "_blank");
+    expect(credit).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  it("gives markers a bigger touch target without growing the dot", () => {
+    render(<MediaMap items={[makeItem("1"), makeItem("2", { media_type: "video_360" })]} />);
+
+    for (const [id, size] of [["1", 12], ["2", 16]] as const) {
+      const icon = markerFor(id).options.icon as L.DivIcon;
+      expect(icon.options.className).toBe("touch:before:absolute touch:before:-inset-3");
+      expect(icon.options.iconSize).toEqual([size, size]);
+      expect(icon.options.html).toContain(`width:${size}px;height:${size}px`);
+    }
+  });
+
+  it("gives clusters a 44 px touch target", () => {
+    render(<MediaMap items={[]} />);
+    const options = createGroup.mock.calls[0][0] as L.MarkerClusterGroupOptions;
+    const icon = options.iconCreateFunction!({ getChildCount: () => 7 } as L.MarkerCluster) as L.DivIcon;
+
+    expect(icon.options.className).toBe("touch:before:absolute touch:before:-inset-1");
+    expect(icon.options.iconSize).toEqual([36, 36]);
+    expect(icon.options.html).toContain(">7</div>");
+  });
+
+  // Their 44 px touch size comes from index.css (tailwind.config.test.ts checks the rule).
+  it("puts the zoom buttons at the bottom left", () => {
+    const { container } = render(<MediaMap items={[]} />);
+    const zoom = container.querySelector(".leaflet-bottom.leaflet-left .leaflet-control-zoom");
+
+    expect(zoom).not.toBeNull();
+    expect(zoom!.querySelectorAll("a.leaflet-control-zoom-in, a.leaflet-control-zoom-out")).toHaveLength(2);
+  });
+
   // removeLayers skips markers that a chunked addLayers has not reached yet, and the batch then
   // adds them anyway: MediaMap must take them out again.
   it.each([

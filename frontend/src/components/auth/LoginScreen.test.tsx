@@ -45,4 +45,11 @@ describe("LoginScreen", () => {
       "/api/auth/login?prompt=login&invite=abc123"
     );
   });
+
+  // 100vh is taller than what a phone browser shows, so h-screen made the page scroll.
+  it("fills the visible height of the screen, not 100vh", () => {
+    const { container } = render(<LoginScreen />);
+    expect(container.firstElementChild).toHaveClass("min-h-dvh");
+    expect(container.firstElementChild).not.toHaveClass("h-screen");
+  });
 });
