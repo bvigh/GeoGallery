@@ -36,8 +36,10 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `frontend/src/api/client.ts` | Typed fetch wrapper — all backend calls go here; a 401 redirects to login |
 | `frontend/src/types/index.ts` | Canonical TypeScript types shared across the app |
 | `frontend/src/components/auth/` | `AuthGate`, `LoginScreen`, `AuthContext` |
-| `frontend/src/components/map/` | Leaflet map components. `MediaMap` drives a `leaflet.markercluster` group directly (no `<Marker>` per item): an items change diffs by id and adds/removes only what changed, in bulk |
-| `frontend/src/components/viewer/` | `Panorama360.tsx`, `Video360.tsx` — 360° media viewers; `VideoDecodeNotice` (the "can't decode, most likely HEVC" box linking `/video-playback.html`) |
+| `frontend/src/components/map/` | Leaflet map components. `MediaMap` drives a `leaflet.markercluster` group directly (no `<Marker>` per item): an items change diffs by id and adds/removes only what changed, in bulk. `MiniMapOverlay`: the hidden/small/large corner map of the Game and the gallery (a mouse enlarges it on hover) |
+| `frontend/src/components/viewer/` | `Panorama360.tsx`, `Video360.tsx` — 360° media viewers (three.js); `sphereControls.ts` (`createSphereView`: renderer, controls, context loss; returns `null` without WebGL), `sphereMath.ts` (FOV across the viewport's shorter side), `gestures.ts` (pinch and tap detection; `tapSlop` shared with `ZoomableImage`), `ViewerHeader.tsx`, `WebGLNotice.tsx` (WebGL unavailable or context lost); `ZoomableImage.tsx` (pinch, double-tap and wheel zoom, swipe and tap callbacks; maths in `src/lib/zoom.ts`); `VideoDecodeNotice` (the "can't decode, most likely HEVC" box linking `/video-playback.html`) |
+| `frontend/src/components/ErrorBoundary.tsx` | Fallback with "Try again" instead of a blank app when rendering throws; `App` wraps the map page, the other tab pages (keyed by tab) and the whole app |
+| `frontend/src/lib/useCloseOnBack.ts` | The system back button closes the innermost fullscreen view (one history entry per open view) |
 | `frontend/src/components/albums/` | `AlbumMenu` (the viewer's per-item album checkboxes + "New album…"), `AlbumPickerDialog` (Trips "Add to album…", the Upload page's album choice) |
 | `frontend/src/components/SearchInput.tsx` | Filter field for long lists (clear button; Enter does nothing, so it never submits a form) |
 | `frontend/src/components/MediaGalleryOverlay.tsx` | Full-screen gallery for a title + media query params; shared by the Trips and Albums pages (replaces `TripGalleryOverlay`) |
@@ -183,9 +185,14 @@ There is no HTTP ingest route. Folder scans are `server scan --user <id>` only.
 - Path alias `@` resolves to `src/` — use `@/components/...` not relative paths.
 - shadcn/ui components in `src/components/ui/`. Add new ones with `npx shadcn@latest add <component>`.
 - Tailwind CSS variables (colors, radius) defined in `src/index.css`.
-- Map tile layer swap: change `<TileLayer>` URL in `src/components/map/MediaMap.tsx`.
-- 360° media: `photo_360` renders in `Panorama360.tsx` (Photo Sphere Viewer); `video_360` renders in `Video360.tsx`. View settings (`initial_yaw/pitch/fov`) and keyframes are stored per-media on the backend.
-- HEVC is stored as recorded (every `video_360` is HEVC 5760×2880, and so are some flat videos), so browsers without an HEVC decoder play only the audio. Every full-size video player (`Video360`, the gallery overlay, the Map fullscreen view, the Game round) runs `videoDecodeFailed` on `loadeddata`, `timeupdate` and `error`, and shows `VideoDecodeNotice` over the player. `Video360` flags the texture for upload only while `videoWidth > 0`, which also stops the `texImage2D: no video` flood.
+- Custom Tailwind variants (`tailwind.config.js`): `touch:` = `(pointer: coarse)`, `mouse:` = `(hover: hover) and (pointer: fine)`, `short:` = a raw screen for phones held sideways (`(max-height: 500px) and (min-width: 560px)`). A raw screen turns off Tailwind's `max-*`, `min-[…]` and `max-[…]` screen variants for the whole project (`max-sm:` etc. produce no CSS and no warning): use the default + `sm:…` pattern. `short` must stay a screen, because a plugin variant sorts before `sm:`/`md:`/`lg:`. Use `overflow-clip-safe` (`index.css`: `overflow: hidden`, then `clip`) instead of `overflow-hidden` where script must not scroll a box, and give such a box `min-h-0` / `min-w-0` as a flex item.
+- Phones: the document never scrolls (`index.css`). The shell is one viewport tall and each page scrolls inside `<main>`, so the header stays put and fixed overlays open in place. On a coarse pointer every control is at least 44 px (`touch:min-h-11 touch:min-w-11`); Leaflet's zoom and popup close buttons get theirs from one `(pointer: coarse)` rule in `index.css`, on every map. Branch on the input with `touch:`/`mouse:` or `PointerEvent.pointerType`, never on the user agent.
+- Every `MapContainer` gets `isolate`, so Leaflet's z-index 1000 panes and controls stay inside the map. App layers: the Map page's item panel and status line `z-[800]`, overlays above them (filter panel, mini map, the Game's score card, the Trips page's status bar) `z-[900]`, fullscreen views and 360° viewers `z-[1000]`, the view editor `z-[1100]`, `EditLocationModal` `z-[1200]`, dialogs `z-[1300]`. Each fullscreen view calls `useCloseOnBack`, so the phone's back gesture closes it instead of leaving the app.
+- `dvh` sizes need a `vh` fallback, or they set nothing in browsers without `dvh`: `max-h-[90vh] supports-[height:100dvh]:max-h-[90dvh]`. The `supports-` variant keeps the CSS order fixed (before `sm:` and `short:`); two plain arbitrary classes have no guaranteed order.
+- Map tile layer swap: change `<TileLayer>` URL in `src/components/map/MediaMap.tsx`. Every OSM credit link opens in a new tab (`target="_blank" rel="noopener noreferrer"`), so a mis-tap never navigates the app away.
+- 360° media: `photo_360` renders in `Panorama360.tsx`, `video_360` in `Video360.tsx`, both three.js through `createSphereView`. View settings (`initial_yaw/pitch/fov`, the FOV measured across the viewport's shorter side) and keyframes are stored per-media on the backend. When WebGL is unavailable, the viewers show `WebGLNotice` instead of throwing; the same notice appears while the context is lost. A tap or click on `Video360` plays or pauses unless `tapToPlay` is `false` (the view and keyframe editor, where it would move the time the next keyframe stores).
+- HEVC is stored as recorded (every `video_360` is HEVC 5760×2880, and so are some flat videos), so browsers without an HEVC decoder play only the audio. Every full-size video player (`Video360`, the gallery overlay, the Map fullscreen view, the Game round) runs `videoDecodeFailed` on `loadeddata`, `timeupdate` and `error`, and shows `VideoDecodeNotice` over the player. `Video360` never sets `texture.needsUpdate` itself: `VideoTexture` uploads each presented frame through `requestVideoFrameCallback`, so a paused or undecodable video uploads nothing.
+- The gallery keeps each media URL together with its item id and renders a viewer only with the current item's URL: a URL left over from the previous item for one commit would make a 360° viewer build a renderer and load the old texture again.
 
 ## Media Type Detection
 
@@ -330,13 +337,14 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - SQL behaviour must be tested against a real test DB (PostGIS) via `testdb`, not mocks. Mock/prod divergence has caused issues here before.
 
 **Frontend — unit tests**
-- `src/App.test.tsx`, `src/api/client.test.ts` (401 redirect; `me()` does not redirect)
+- `src/App.test.tsx` (incl. the error boundaries), `src/api/client.test.ts` (401 redirect; `me()` does not redirect)
+- `tailwind.config.test.ts` (variant order, the `max-*` limitation, `overflow-clip-safe`, the 44 px Leaflet buttons on touch), `tailwind.screens.test.ts` (the `short` query against real phone sizes)
 - `src/components/auth/AuthGate.test.tsx`, `LoginScreen.test.tsx`
 - `src/pages/MapPage.test.tsx`, `TripsPage.test.tsx`, `AlbumsPage.test.tsx`, `GamePage.test.tsx`, `UploadPage.test.tsx`, `SettingsPage.test.tsx`, `AdminPage.test.tsx`
-- `src/components/map/FilterPanel.test.tsx`, `MediaMap.test.tsx` (real Leaflet + markercluster in jsdom; spies on the group's bulk calls, including a removal during a chunked add)
-- `src/components/MediaGalleryOverlay.test.tsx`, `src/components/albums/AlbumMenu.test.tsx`, `AlbumPickerDialog.test.tsx`
-- `src/components/viewer/Video360.test.tsx` (three.js with a stub `WebGLRenderer`; the decode notice), `VideoDecodeNotice.test.tsx`
-- `src/lib/video.test.ts`, `filters.test.ts`, `errors.test.ts`, `search.test.ts`, `albums.test.ts`, `trips.test.ts`, `uploadBatches.test.ts`, `mediaHash.test.ts` (Node environment; the shared backend vectors)
+- `src/components/map/FilterPanel.test.tsx`, `MediaMap.test.tsx` (real Leaflet + markercluster in jsdom; spies on the group's bulk calls, including a removal during a chunked add), `MiniMapOverlay.test.tsx` (real Leaflet)
+- `src/components/MediaGalleryOverlay.test.tsx`, `EditLocationModal.test.tsx`, `CopyField.test.tsx`, `SearchInput.test.tsx`, `src/components/ui/dialog.test.tsx`, `src/components/albums/AlbumMenu.test.tsx`, `AlbumPickerDialog.test.tsx`
+- `src/components/viewer/Video360.test.tsx` (three.js with a stub `WebGLRenderer`; the decode notice, `tapToPlay`), `Panorama360.test.tsx`, `sphereControls.test.ts` (dispose order, WebGL failure, context loss), `gestures.test.ts`, `sphereMath.test.ts`, `ZoomableImage.test.tsx`, `VideoDecodeNotice.test.tsx`; shared fakes in `viewerTestUtils.ts`
+- `src/lib/video.test.ts`, `filters.test.ts`, `errors.test.ts`, `search.test.ts`, `albums.test.ts`, `trips.test.ts`, `uploadBatches.test.ts`, `zoom.test.ts`, `useCloseOnBack.test.tsx`, `mediaHash.test.ts` (Node environment; the shared backend vectors)
 - Vitest + React Testing Library. Run with `npm run test`.
 - Test components that contain logic; pure utility functions in `src/lib/` get unit tests.
 

@@ -1,15 +1,20 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { createSphereView } from "./sphereControls";
+import { DEFAULT_FOV } from "./sphereMath";
+import ViewerHeader from "./ViewerHeader";
+import WebGLNotice, { type SphereFailure } from "./WebGLNotice";
 
 interface Props {
   url: string;
   onClose: () => void;
   initialYaw?: number | null;
   initialPitch?: number | null;
+  /** Degrees across the shorter side of the viewport (see sphereMath.ts). */
   initialFov?: number | null;
   /** When true: fills parent container (no fixed overlay, no close bar). Used in GamePage. */
   contained?: boolean;
+  /** Returns the view on screen; fov in the same short-side convention as initialFov. */
   captureRef?: React.MutableRefObject<(() => { yaw: number; pitch: number; fov: number }) | null>;
 }
 
@@ -24,110 +29,62 @@ export default function Panorama360({
 }: Props) {
   const yaw = initialYaw ?? 0;
   const pitch = initialPitch ?? 0;
-  const fov = initialFov ?? 75;
+  const fov = initialFov ?? DEFAULT_FOV;
   const mountRef = useRef<HTMLDivElement>(null);
+  const [glFailure, setGlFailure] = useState<SphereFailure | null>(null);
 
   useEffect(() => {
-    const mount = mountRef.current!;
-    const w = mount.clientWidth;
-    const h = mount.clientHeight;
-
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(w, h);
-    mount.appendChild(renderer.domElement);
-
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(fov, w / h, 0.1, 1000);
-    camera.position.set(0, 0, 0.001);
-
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableZoom = false; // position zoom is wrong inside a sphere; FOV zoom used instead
-    controls.enablePan = false;
-    controls.rotateSpeed = -0.3;
-
-    if (yaw !== 0 || pitch !== 0) {
-      const euler = new THREE.Euler(pitch, yaw, 0, "YXZ");
-      camera.quaternion.setFromEuler(euler);
-      controls.target
-        .copy(camera.position)
-        .add(new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion));
-      controls.update();
-    }
-
-    if (captureRef) {
-      captureRef.current = () => {
-        const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "YXZ");
-        return { yaw: euler.y, pitch: euler.x, fov: camera.fov };
-      };
-    }
-
-    const MIN_FOV = 30;
-    const MAX_FOV = 100;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      camera.fov = Math.min(MAX_FOV, Math.max(MIN_FOV, camera.fov + e.deltaY * 0.05));
-      camera.updateProjectionMatrix();
-    };
-    renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
-
-    const geometry = new THREE.SphereGeometry(500, 60, 40);
-    geometry.scale(-1, 1, 1);
-
     const loader = new THREE.TextureLoader();
     loader.crossOrigin = "anonymous";
     const texture = loader.load(url);
     texture.colorSpace = THREE.SRGBColorSpace;
-    const material = new THREE.MeshBasicMaterial({ map: texture });
-    const mesh = new THREE.Mesh(geometry, material);
-    scene.add(mesh);
 
-    const onResize = () => {
-      const w2 = mount.clientWidth;
-      const h2 = mount.clientHeight;
-      camera.aspect = w2 / h2;
-      camera.updateProjectionMatrix();
-      renderer.setSize(w2, h2);
-    };
-    window.addEventListener("resize", onResize);
+    const view = createSphereView(
+      mountRef.current!,
+      texture,
+      { yaw, pitch, fov },
+      { onContextLost: () => setGlFailure("lost"), onContextRestored: () => setGlFailure(null) }
+    );
+    if (!view) {
+      setGlFailure("unavailable");
+      return;
+    }
+    setGlFailure(null);
+    if (captureRef) captureRef.current = view.getView;
 
     let rafId: number;
     const animate = () => {
       rafId = requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
+      view.render();
     };
     animate();
 
     return () => {
       if (captureRef) captureRef.current = null;
       cancelAnimationFrame(rafId);
-      window.removeEventListener("resize", onResize);
-      renderer.domElement.removeEventListener("wheel", onWheel);
-      controls.dispose();
-      renderer.dispose();
-      geometry.dispose();
-      material.dispose();
-      texture.dispose();
-      mount.removeChild(renderer.domElement);
+      view.dispose();
     };
   }, [url, yaw, pitch, fov, captureRef]);
 
+  const notice = glFailure && <WebGLNotice failure={glFailure} />;
+
   if (contained) {
-    return <div ref={mountRef} className="absolute inset-0 bg-black" />;
+    // The notice fills the same positioned parent as the mount.
+    return (
+      <>
+        <div ref={mountRef} className="absolute inset-0 overflow-hidden bg-black" />
+        {notice}
+      </>
+    );
   }
 
   return (
-    <div className="fixed inset-0 z-[1000] bg-black flex flex-col">
-      <div className="flex justify-between items-center px-4 py-2 text-white text-sm shrink-0 bg-black/60">
-        <span>360° Photo — drag to look around · scroll to zoom</span>
-        <button
-          onClick={onClose}
-          className="text-white hover:text-gray-300 text-xl leading-none"
-        >
-          ✕
-        </button>
+    <div className="fixed inset-0 z-[1000] flex flex-col bg-black">
+      <ViewerHeader title="360° photo" onClose={onClose} />
+      <div className="relative min-h-0 flex-1">
+        <div ref={mountRef} className="absolute inset-0 overflow-hidden" />
+        {notice}
       </div>
-      <div ref={mountRef} className="flex-1" />
     </div>
   );
 }

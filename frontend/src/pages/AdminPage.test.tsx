@@ -119,4 +119,21 @@ describe("AdminPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Copy" }));
     expect(await screen.findByText("Press Ctrl/Cmd+C to copy")).toBeInTheDocument();
   });
+
+  it("folds the columns a phone has no room for into the name cell", async () => {
+    renderPage();
+    const row = (await screen.findByText("bob@example.test")).closest("tr")!;
+    const [nameCell, emailCell, roleCell, loginCell, statusCell, actionCell] = Array.from(row.cells);
+    // Shown below sm only; the wide columns are hidden there.
+    expect(within(nameCell).getByText("bob@example.test · user · active")).toBeInTheDocument();
+    expect(within(nameCell).getByText("Last login -")).toBeInTheDocument();
+    expect(nameCell.querySelector("div")).toHaveClass("sm:hidden");
+    for (const cell of [emailCell, roleCell, loginCell, statusCell]) expect(cell).toHaveClass("hidden", "sm:table-cell");
+    expect(emailCell).toHaveClass("[overflow-wrap:anywhere]");
+    expect(row.closest("table")!.tHead).toHaveClass("hidden", "sm:table-header-group");
+    expect(within(actionCell).getByRole("button", { name: "Disable bob@example.test" })).toHaveClass("touch:min-h-11");
+
+    const carolRow = screen.getByText("Carol").closest("tr")!;
+    expect(within(carolRow.cells[0]).getByText("No email · user · disabled")).toBeInTheDocument();
+  });
 });

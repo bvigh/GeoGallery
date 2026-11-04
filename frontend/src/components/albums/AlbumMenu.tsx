@@ -126,8 +126,9 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
 
   const trigger =
     variant === "overlay" ? (
+      // The icon stays small beside the toolbar's other icons; on touch the button around it does not.
       <button
-        className="text-white/60 hover:text-white"
+        className="flex items-center justify-center text-white/60 hover:text-white touch:min-h-11 touch:min-w-11"
         onClick={() => handleOpenChange(true)}
         aria-label="Albums"
         title="Albums"
@@ -136,7 +137,7 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
       </button>
     ) : (
       <button
-        className="mt-1 flex w-full items-center justify-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-muted"
+        className="mt-1 flex w-full items-center justify-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-muted touch:min-h-11 touch:text-sm"
         onClick={() => handleOpenChange(true)}
       >
         <AlbumIcon className="h-3 w-3" />
@@ -173,19 +174,20 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
               ) : visibleAlbums.length === 0 ? (
                 <p className="text-muted-foreground">No matching albums.</p>
               ) : (
-                <div role="group" aria-label="Your albums" className="max-h-64 space-y-1 overflow-y-auto">
+                // Phones held sideways scroll the whole dialog instead of a list nested inside it.
+                <div role="group" aria-label="Your albums" className="max-h-64 space-y-1 overflow-y-auto short:max-h-none">
                   {visibleAlbums.map((album) => (
-                    <label key={album.id} className="flex items-center gap-2 cursor-pointer">
+                    <label key={album.id} className="flex cursor-pointer items-center gap-2 touch:min-h-11">
                       <input
                         type="checkbox"
-                        className="rounded"
+                        className="shrink-0 rounded touch:h-5 touch:w-5"
                         checked={isIn(album)}
                         disabled={pending.includes(album.id)}
                         onChange={(e) => toggle(album, e.target.checked)}
                       />
-                      {album.name}
+                      <span className="min-w-0 break-words">{album.name}</span>
                       {!album.is_owner && (
-                        <span className="text-xs text-muted-foreground">
+                        <span className="shrink-0 text-xs text-muted-foreground">
                           by {album.owner_name ?? "another user"}
                         </span>
                       )}
@@ -197,7 +199,7 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
               {newName === null ? (
                 <button
                   type="button"
-                  className="text-primary hover:underline"
+                  className="text-primary hover:underline touch:min-h-11"
                   onClick={() => setNewName(query.trim().slice(0, 200))}
                 >
                   New album…
@@ -212,12 +214,12 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
                     placeholder="Album name"
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
-                    className="min-w-0 flex-1 rounded-md border px-2 py-1"
+                    className="min-w-0 flex-1 rounded-md border px-2 py-1 touch:text-base"
                   />
                   <button
                     type="submit"
                     disabled={creating || newName.trim() === ""}
-                    className="rounded-md bg-primary px-3 py-1 font-medium text-primary-foreground disabled:opacity-50"
+                    className="shrink-0 rounded-md bg-primary px-3 py-1 font-medium text-primary-foreground disabled:opacity-50 touch:min-h-11"
                   >
                     Create
                   </button>
@@ -227,9 +229,11 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
           ) : containing.length === 0 ? (
             <p className="text-sm text-muted-foreground">Not in any of your albums.</p>
           ) : (
-            <ul aria-label="Shared through" className="max-h-64 space-y-1 overflow-y-auto text-sm">
+            <ul aria-label="Shared through" className="max-h-64 space-y-1 overflow-y-auto text-sm short:max-h-none">
               {containing.map((album) => (
-                <li key={album.id}>{album.name}</li>
+                <li key={album.id} className="break-words">
+                  {album.name}
+                </li>
               ))}
             </ul>
           )}

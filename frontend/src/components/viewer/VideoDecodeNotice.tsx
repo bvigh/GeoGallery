@@ -15,7 +15,7 @@ export default function VideoDecodeNotice() {
           href={VIDEO_HELP_URL}
           target="_blank"
           rel="noreferrer"
-          className="mt-2 inline-block font-medium underline"
+          className="mt-2 inline-block font-medium underline touch:mt-0 touch:py-3"
         >
           How to enable HEVC playback
         </a>

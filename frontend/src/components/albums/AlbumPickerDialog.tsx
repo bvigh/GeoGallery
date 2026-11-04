@@ -146,11 +146,13 @@ export function AlbumPickerDialog({
                     <SearchInput value={query} onChange={setQuery} label="Search albums" />
                   )}
                   {visibleAlbums.length === 0 && <p className="text-muted-foreground">No matching albums</p>}
-                  <div className="max-h-64 space-y-1 overflow-y-auto">
+                  {/* Phones held sideways scroll the whole dialog instead of a list nested inside it. */}
+                  <div className="max-h-64 space-y-1 overflow-y-auto short:max-h-none">
                     {visibleAlbums.map((album) => (
-                      <label key={album.id} className="flex cursor-pointer items-center gap-2">
+                      <label key={album.id} className="flex cursor-pointer items-center gap-2 touch:min-h-11">
                         <input
                           type="radio"
+                          className="shrink-0 touch:h-5 touch:w-5"
                           name={radioName}
                           value={album.id}
                           checked={choice === album.id}
@@ -168,9 +170,10 @@ export function AlbumPickerDialog({
                 </>
               )
             )}
-            <label className="flex cursor-pointer items-center gap-2">
+            <label className="flex cursor-pointer items-center gap-2 touch:min-h-11">
               <input
                 type="radio"
+                className="shrink-0 touch:h-5 touch:w-5"
                 name={radioName}
                 value={NEW_ALBUM}
                 checked={choice === NEW_ALBUM}
@@ -188,7 +191,7 @@ export function AlbumPickerDialog({
                 setChoice(NEW_ALBUM);
                 setNewName(e.target.value);
               }}
-              className="w-full rounded-md border px-2 py-1"
+              className="w-full rounded-md border px-2 py-1 touch:py-2 touch:text-base"
             />
           </fieldset>
           {error && <p className="text-red-500">{error}</p>}

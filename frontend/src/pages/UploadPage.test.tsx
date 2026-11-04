@@ -564,4 +564,20 @@ describe("UploadPage", () => {
     expect(screen.queryByText(/curl/)).not.toBeInTheDocument();
     expect(screen.queryByText(/ingest\/scan/)).not.toBeInTheDocument();
   });
+
+  it("breaks long file names in the result lists instead of widening the page", async () => {
+    const name = "PXL_20240701_101112345.NIGHT.MOTION-01.COVER.jpg";
+    mockApi.upload.mockResolvedValue({ uploaded: [name] });
+    const { container } = render(<UploadPage />);
+    await userEvent.upload(mediaInput(container), [new File(["a"], name, { type: "image/jpeg" })]);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    expect(await screen.findByText(name)).toHaveClass("[overflow-wrap:anywhere]");
+  });
+
+  it("makes the album choice finger-sized on touch", async () => {
+    render(<UploadPage />);
+    expect(albumButton()).toHaveClass("touch:min-h-11");
+    await chooseAlbum("Family");
+    expect(screen.getByRole("button", { name: "Upload into no album" })).toHaveClass("touch:h-11", "touch:w-11");
+  });
 });

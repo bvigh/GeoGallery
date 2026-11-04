@@ -19,6 +19,13 @@ interface Notice {
   text: string;
 }
 
+// Small text buttons on a mouse; finger-sized, with readable text, on touch.
+const TEXT_BUTTON_CLASS =
+  "text-xs text-muted-foreground hover:text-foreground touch:min-h-11 touch:min-w-11 touch:px-2 touch:text-sm";
+
+// 16px text on touch: iOS zooms the page into a smaller focused field and stays zoomed.
+const INPUT_CLASS = "min-w-0 flex-1 rounded border px-2 py-1 text-sm touch:py-2 touch:text-base";
+
 function items(n: number): string {
   return `${n} item${n !== 1 ? "s" : ""}`;
 }
@@ -106,7 +113,7 @@ export function TripsPage() {
   };
 
   return (
-    <div className="h-full overflow-y-auto p-6">
+    <div className="h-full overflow-y-auto p-4 sm:p-6">
       <h1 className="mb-4 text-xl font-semibold">Trips</h1>
       {trips.length === 0 && (
         <p className="text-muted-foreground">No trips yet. Upload some media to get started.</p>
@@ -122,40 +129,51 @@ export function TripsPage() {
               <div className="flex flex-col gap-2">
                 <div className="flex gap-2">
                   <input
-                    className="flex-1 rounded border px-2 py-1 text-sm"
+                    aria-label="Trip name"
+                    className={INPUT_CLASS}
                     value={editName}
                     onChange={(e) => setEditName(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && saveUpdate(trip.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") saveUpdate(trip.id);
+                      else if (e.key === "Escape") setEditing(null);
+                    }}
                     autoFocus
                   />
                   <button
-                    className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground"
+                    className="shrink-0 rounded bg-primary px-2 py-1 text-xs text-primary-foreground touch:min-h-11 touch:px-3 touch:text-sm"
                     onClick={() => saveUpdate(trip.id)}
                   >
                     Save
                   </button>
+                  {/* Escape cancels too, but a phone has no Escape key. */}
+                  <button className={`shrink-0 ${TEXT_BUTTON_CLASS}`} onClick={() => setEditing(null)}>
+                    Cancel
+                  </button>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <input
                     type="date"
-                    className="flex-1 rounded border px-2 py-1 text-sm"
+                    aria-label="Start date"
+                    className={`basis-32 ${INPUT_CLASS}`}
                     value={editStartDate}
                     onChange={(e) => setEditStartDate(e.target.value)}
                   />
                   <input
                     type="date"
-                    className="flex-1 rounded border px-2 py-1 text-sm"
+                    aria-label="End date"
+                    className={`basis-32 ${INPUT_CLASS}`}
                     value={editEndDate}
                     onChange={(e) => setEditEndDate(e.target.value)}
                   />
                 </div>
               </div>
             ) : (
-              <div className="flex items-center justify-between">
-                <h2 className="font-medium">{trip.name}</h2>
-                <div className="flex gap-2">
+              // A long name takes the whole line and pushes the actions below it.
+              <div className="flex flex-wrap items-center justify-between gap-x-2">
+                <h2 className="min-w-0 font-medium [overflow-wrap:anywhere]">{trip.name}</h2>
+                <div className="ml-auto flex shrink-0 gap-2 touch:gap-0">
                   <button
-                    className="text-xs text-muted-foreground hover:text-foreground"
+                    className={TEXT_BUTTON_CLASS}
                     onClick={(e) => {
                       e.stopPropagation();
                       setPickerTrip(trip);
@@ -164,7 +182,7 @@ export function TripsPage() {
                     Add to album…
                   </button>
                   <button
-                    className="text-xs text-muted-foreground hover:text-foreground"
+                    className={TEXT_BUTTON_CLASS}
                     onClick={(e) => {
                       e.stopPropagation();
                       setEditing(trip.id);
@@ -177,7 +195,7 @@ export function TripsPage() {
                   </button>
                   {trip.user_edited && (
                     <button
-                      className="text-xs text-destructive hover:text-destructive/80"
+                      className="text-xs text-destructive hover:text-destructive/80 touch:min-h-11 touch:min-w-11 touch:px-2 touch:text-sm"
                       onClick={(e) => {
                         e.stopPropagation();
                         deleteTrip(trip.id);
@@ -224,7 +242,8 @@ export function TripsPage() {
                 <button
                   onClick={() => dismissNotice(n.id)}
                   aria-label="Dismiss"
-                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                  // The negative margins keep the notice one line high around a finger-sized button.
+                  className="flex shrink-0 items-center justify-center text-muted-foreground hover:text-foreground touch:-my-2 touch:-mr-2 touch:h-11 touch:w-11"
                 >
                   <X className="h-4 w-4" />
                 </button>

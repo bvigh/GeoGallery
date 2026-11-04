@@ -1,39 +1,23 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ExternalLink, FolderMinus, MapPin, Trash2 } from "lucide-react";
-import { MapContainer, TileLayer, Marker, useMap, useMapEvents } from "react-leaflet";
+import { ChevronLeft, ChevronRight, ExternalLink, FolderMinus, MapPin, Trash2 } from "lucide-react";
+import { Marker, useMap } from "react-leaflet";
 import L from "leaflet";
 import type { MediaItem } from "@/types";
 import { api, ApiError } from "@/api/client";
 import { describeError } from "@/lib/errors";
+import { useCloseOnBack } from "@/lib/useCloseOnBack";
+import { cn } from "@/lib/utils";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { AlbumMenu } from "@/components/albums/AlbumMenu";
 import { EditLocationModal } from "@/components/EditLocationModal";
+import { MiniMapOverlay, type MiniMapSize } from "@/components/map/MiniMapOverlay";
 import Panorama360 from "@/components/viewer/Panorama360";
 import Video360 from "@/components/viewer/Video360";
 import VideoDecodeNotice from "@/components/viewer/VideoDecodeNotice";
+import { ZoomableImage } from "@/components/viewer/ZoomableImage";
 import { useVideoDecodeCheck } from "@/lib/video";
-import "leaflet/dist/leaflet.css";
 
-// ── Leaflet helper components ────────────────────────────────────────────────
-
-function MapResizer({
-  expanded,
-  onDragChange,
-}: {
-  expanded: boolean;
-  onDragChange: (dragging: boolean) => void;
-}) {
-  const map = useMap();
-  useEffect(() => {
-    const id = setTimeout(() => map.invalidateSize(), 310);
-    return () => clearTimeout(id);
-  }, [expanded, map]);
-  useMapEvents({
-    movestart: () => onDragChange(true),
-    moveend: () => onDragChange(false),
-  });
-  return null;
-}
+// ── Map helpers ──────────────────────────────────────────────────────────────
 
 function GalleryMapController({
   items,
@@ -44,12 +28,37 @@ function GalleryMapController({
 }) {
   const map = useMap();
   useEffect(() => {
-    if (currentItem.lat !== null && currentItem.lng !== null) {
-      map.flyTo([currentItem.lat, currentItem.lng], 13, { animate: true, duration: 0.8 });
-    } else if (items.length > 0) {
-      const bounds = L.latLngBounds(items.map((m) => [m.lat!, m.lng!] as [number, number]));
-      map.fitBounds(bounds, { padding: [40, 40] });
+    function show(animate: boolean) {
+      if (currentItem.lat !== null && currentItem.lng !== null) {
+        if (animate) map.flyTo([currentItem.lat, currentItem.lng], 13, { animate: true, duration: 0.8 });
+        else map.setView([currentItem.lat, currentItem.lng], 13, { animate: false });
+      } else if (items.length > 0) {
+        const bounds = L.latLngBounds(items.map((m) => [m.lat!, m.lng!] as [number, number]));
+        // animate: true would force an animation Leaflet otherwise skips for a far jump.
+        map.fitBounds(bounds, animate ? { padding: [40, 40] } : { padding: [40, 40], animate: false });
+      }
     }
+    // Leaflet's cached size, which flyTo and fitBounds use: a window resize while the map is hidden
+    // (display: none) caches 0×0. flyTo then throws on NaN maths and fitBounds sets zoom to Infinity.
+    const sized = () => {
+      const size = map.getSize();
+      return size.x > 0 && size.y > 0;
+    };
+    if (sized()) {
+      show(true);
+      return;
+    }
+    // Hidden, or mounted hidden: invalidateSize fires 'resize' once the map is shown and measured.
+    // Moving to another item replaces the listener, so only the latest target applies.
+    const onResize = () => {
+      if (!sized()) return;
+      map.off("resize", onResize);
+      show(false);
+    };
+    map.on("resize", onResize);
+    return () => {
+      map.off("resize", onResize);
+    };
   }, [currentItem.id]); // eslint-disable-line react-hooks/exhaustive-deps
   return null;
 }
@@ -74,93 +83,64 @@ function markerIcon(item: MediaItem) {
   });
 }
 
-// ── Map overlay sub-component ────────────────────────────────────────────────
+// ── Controls ─────────────────────────────────────────────────────────────────
 
-interface GalleryMapOverlayProps {
-  itemsWithGps: MediaItem[];
-  currentItem: MediaItem;
-  minimized: boolean;
-  mapHovered: boolean;
-  mapDragging: boolean;
-  mapMouseLeft: React.MutableRefObject<boolean>;
-  onMinimize: () => void;
-  onExpand: () => void;
-  onHoverChange: (hovered: boolean) => void;
-  onDragChange: (dragging: boolean) => void;
-  onMarkerClick: (item: MediaItem) => void;
-}
+// Room kept beside the position label for the map in the corner (its chosen width, from sm; the
+// large map from lg) plus the gap, so the label never moves while the map hover-enlarges. Both
+// sides where it still leaves the label enough room, so it sits in the middle of the screen. On a
+// short screen the map is back in the row and needs none.
+const LABEL_CLEARANCE: Record<MiniMapSize, string> = {
+  // The "Map" pill.
+  hidden: "sm:px-[5.5rem] short:px-0",
+  small: "sm:pr-[18.5rem] xl:pl-[18.5rem] short:px-0",
+  large: "lg:pr-[36.5rem] short:px-0",
+};
 
-function GalleryMapOverlay({
-  itemsWithGps,
-  currentItem,
-  minimized,
-  mapHovered,
-  mapDragging,
-  mapMouseLeft,
-  onMinimize,
-  onExpand,
-  onHoverChange,
-  onDragChange,
-  onMarkerClick,
-}: GalleryMapOverlayProps) {
-  if (minimized) {
+// The visible icon stays small; on touch the target grows to 44px.
+const toolButton =
+  "flex items-center justify-center text-white/60 hover:text-white disabled:opacity-40 touch:min-h-11 touch:min-w-11";
+
+function NavButton({
+  direction,
+  placement,
+  disabled = false,
+  onClick,
+}: {
+  direction: "prev" | "next";
+  // side: at the screen edge, vertically centred; row: beside the position label, used while
+  // the map is large and would cover the right edge.
+  placement: "side" | "row";
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const label = direction === "prev" ? "Previous" : "Next";
+  const Icon = direction === "prev" ? ChevronLeft : ChevronRight;
+  if (placement === "row") {
     return (
       <button
-        className="absolute bottom-4 right-4 z-[900] rounded-xl bg-black/70 px-3 py-2 text-white text-sm backdrop-blur-sm hover:bg-black/90"
-        onClick={onExpand}
+        type="button"
+        className="pointer-events-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-black/50 text-white hover:bg-black/70 disabled:opacity-30 touch:h-11 touch:w-11"
+        onClick={onClick}
+        disabled={disabled}
+        aria-label={label}
       >
-        🗺 Map
+        <Icon className="h-6 w-6" aria-hidden="true" />
       </button>
     );
   }
-
   return (
-    <div
-      className="absolute bottom-4 right-4 z-[900] transition-all duration-300"
-      style={{ width: mapHovered ? "576px" : "288px" }}
-      onMouseEnter={() => {
-        mapMouseLeft.current = false;
-        onHoverChange(true);
-      }}
-      onMouseLeave={() => {
-        mapMouseLeft.current = true;
-        if (!mapDragging) onHoverChange(false);
-      }}
+    <button
+      type="button"
+      className={cn(
+        // A dark disc keeps the arrow visible on a light photo; at least 44px everywhere.
+        "pointer-events-auto absolute top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-black/40 text-white hover:bg-black/60 sm:h-12 sm:w-12",
+        direction === "prev" ? "left-0 sm:left-4 short:left-0" : "right-0 sm:right-4 short:right-0",
+      )}
+      onClick={onClick}
+      aria-label={label}
     >
-      <div
-        className="relative overflow-hidden rounded-xl shadow-2xl ring-1 ring-white/20 transition-all duration-300"
-        style={{ height: mapHovered ? "384px" : "192px" }}
-      >
-        <button
-          className="absolute right-2 top-2 z-[1000] rounded bg-black/70 px-2 py-0.5 text-xs text-white/70 hover:text-white backdrop-blur-sm"
-          onClick={onMinimize}
-        >
-          minimize
-        </button>
-        <MapContainer center={[20, 0]} zoom={2} className="h-full w-full">
-          <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
-          <MapResizer
-            expanded={mapHovered}
-            onDragChange={(dragging) => {
-              onDragChange(dragging);
-              if (!dragging && mapMouseLeft.current) onHoverChange(false);
-            }}
-          />
-          <GalleryMapController items={itemsWithGps} currentItem={currentItem} />
-          {itemsWithGps.map((m) => (
-            <Marker
-              key={m.id}
-              position={[m.lat!, m.lng!]}
-              icon={m.id === currentItem.id ? currentMarkerIcon : markerIcon(m)}
-              eventHandlers={{ click: () => onMarkerClick(m) }}
-            />
-          ))}
-        </MapContainer>
-      </div>
-    </div>
+      <Icon className="h-8 w-8" aria-hidden="true" />
+    </button>
   );
 }
 
@@ -220,27 +200,40 @@ export function MediaGalleryOverlay({
   const [items, setItems] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [currentUrl, setCurrentUrl] = useState<string | null>(null);
-  const [urlLoading, setUrlLoading] = useState(false);
-  const [urlError, setUrlError] = useState<string | null>(null);
+  // The URL (or why it failed) together with the item it belongs to. A separate URL state would
+  // still hold the previous item's URL for the commit after a step, and a 360° viewer would
+  // build a renderer and load that old texture again before the effect below replaced it.
+  const [urlState, setUrlState] = useState<{ id: string; url: string | null; error: string | null } | null>(null);
   // Why the last delete or remove failed. The page behind the overlay cannot show it.
   const [actionError, setActionError] = useState<string | null>(null);
   // Items with a delete or remove request in flight.
   const [busyIds, setBusyIds] = useState<string[]>([]);
   // Set once an item was dropped, so only emptying the list by hand closes the gallery.
   const dropped = useRef(false);
-  const [editingLocation, setEditingLocation] = useState(false);
-  const [mapMinimized, setMapMinimized] = useState(false);
-  const [mapHovered, setMapHovered] = useState(false);
-  const [mapDragging, setMapDragging] = useState(false);
-  const mapMouseLeft = useRef(false);
+  // The item whose location editor is open. Tied to the item, so a change of item under the
+  // editor (a removal finishing) closes it instead of showing the next one with the old
+  // coordinates, and coming back to the item does not reopen it.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  // The size chosen with the map's buttons; it outlives the map, which unmounts while loading.
+  const [mapSize, setMapSize] = useState<MiniMapSize>("small");
   const urlCache = useRef<Map<string, string>>(new Map());
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Clamped like the layout effect below does, so the commit before it runs keeps the
+  // item's menu and modals mounted.
+  const currentItem = items[Math.min(currentIndex, items.length - 1)] ?? null;
+  // Only a URL of the current item: its state, else the cache (a prefetched neighbour shows at
+  // once, without a placeholder for the commit before the effect below runs).
+  const urlEntry = currentItem && urlState?.id === currentItem.id ? urlState : null;
+  const currentUrl = currentItem ? (urlEntry?.url ?? urlCache.current.get(currentItem.id) ?? null) : null;
+  const urlError = urlEntry?.error ?? null;
+  const urlLoading = !currentUrl && (urlEntry === null || (urlEntry.url === null && urlEntry.error === null));
   const videoCheck = useVideoDecodeCheck(currentUrl ?? "");
   // Callers pass params inline; refetch only when their content changes.
   const paramsKey = JSON.stringify(params);
   const paramsRef = useRef(params);
   paramsRef.current = params;
+  // The phone's back gesture closes the gallery instead of leaving the app.
+  useCloseOnBack(onClose);
 
   // Fetch all matching media, sorted chronologically
   useEffect(() => {
@@ -277,24 +270,25 @@ export function MediaGalleryOverlay({
       return url;
     }
 
-    setCurrentUrl(urlCache.current.get(item.id) ?? null);
-    setUrlLoading(!urlCache.current.has(item.id));
-    setUrlError(null);
+    setUrlState({ id: item.id, url: urlCache.current.get(item.id) ?? null, error: null });
 
     loadUrl(item)
       .then((url) => {
         if (cancelled) return;
-        setCurrentUrl(url);
-        setUrlLoading(false);
+        setUrlState((prev) =>
+          prev?.id === item.id && prev.url === url && prev.error === null ? prev : { id: item.id, url, error: null }
+        );
       })
       .catch((e) => {
         if (cancelled) return;
         console.error("Failed to load media URL:", e);
-        setUrlLoading(false);
         // A shared item stops being readable when its album or membership goes.
-        setUrlError(
-          e instanceof ApiError && e.status === 404 ? "You no longer have access to this item" : "Could not load media"
-        );
+        setUrlState({
+          id: item.id,
+          url: null,
+          error:
+            e instanceof ApiError && e.status === 404 ? "You no longer have access to this item" : "Could not load media",
+        });
       });
 
     // Fetch keyframes for video_360 if not already loaded
@@ -336,27 +330,6 @@ export function MediaGalleryOverlay({
   function goPrev() { goTo(currentIndex - 1); }
   function goNext() { goTo(currentIndex + 1); }
 
-  // Keyboard navigation
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      const tag = (e.target as HTMLElement)?.tagName;
-      const editable = (e.target as HTMLElement)?.isContentEditable;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || editable) return;
-      if (e.key === "Escape") onClose();
-      if (e.key === "ArrowLeft") goPrev();
-      if (e.key === "ArrowRight") goNext();
-      if (e.code === "Space") {
-        const v = videoRef.current;
-        if (v) {
-          e.preventDefault();
-          v.paused ? v.play() : v.pause();
-        }
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, currentIndex, items.length]); // eslint-disable-line react-hooks/exhaustive-deps
-
   function handleMarkerClick(item: MediaItem) {
     const index = items.findIndex((m) => m.id === item.id);
     if (index !== -1) goTo(index);
@@ -372,7 +345,7 @@ export function MediaGalleryOverlay({
           : m
       )
     );
-    setEditingLocation(false);
+    setEditingId(null);
     // Re-fetch all media so GPS-matched neighbours get their updated coordinates
     fetchAllMedia(paramsRef.current)
       .then((data) => {
@@ -444,13 +417,60 @@ export function MediaGalleryOverlay({
   }
 
   const itemsWithGps = items.filter((m) => m.lat !== null && m.lng !== null);
-  // Clamped like the layout effect above does, so the commit before it runs keeps the
-  // item's menu and modals mounted.
-  const currentItem = items[Math.min(currentIndex, items.length - 1)] ?? null;
   // Shared items are read-only: the backend 404s their writes, so hide the controls.
   const isOwn = currentItem?.owner_id === user.id;
   const canRemove = !!currentItem && !!onRemoveFromAlbum && !!canRemoveFromAlbum?.(currentItem);
   const busy = !!currentItem && busyIds.includes(currentItem.id);
+  const showItems = !loading && !!currentItem;
+  const hasPrev = currentIndex > 0;
+  const hasNext = currentIndex < items.length - 1;
+  const hasMap = showItems && itemsWithGps.length > 0;
+  // A large map covers the right edge (all of the bottom on a phone), so the arrows move into
+  // the bottom row beside the position label.
+  const mapLarge = hasMap && mapSize === "large";
+  const isVideo = currentItem?.media_type === "video" || currentItem?.media_type === "video_360";
+  const takenAt = currentItem?.taken_at
+    ? new Date(currentItem.taken_at).toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
+  // Only while its item is current; the effect below forgets an editor whose item went away.
+  const editingLocation = editingId !== null && editingId === currentItem?.id;
+
+  useEffect(() => {
+    if (editingId !== null && editingId !== currentItem?.id) setEditingId(null);
+  }, [editingId, currentItem?.id]);
+
+  // Keyboard navigation
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement)?.tagName;
+      const editable = (e.target as HTMLElement)?.isContentEditable;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || editable) return;
+      // The location editor covers the gallery: Escape closes only the editor, as back does, and
+      // the other keys must not change or play the item under it.
+      if (editingLocation) {
+        if (e.key === "Escape") setEditingId(null);
+        return;
+      }
+      if (e.key === "Escape") onClose();
+      if (e.key === "ArrowLeft") goPrev();
+      if (e.key === "ArrowRight") goNext();
+      if (e.code === "Space") {
+        const v = videoRef.current;
+        if (v) {
+          e.preventDefault();
+          v.paused ? v.play() : v.pause();
+        }
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, currentIndex, items.length, editingLocation]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function renderMedia() {
     if (!currentItem) return null;
@@ -461,9 +481,11 @@ export function MediaGalleryOverlay({
         </div>
       );
     }
+    // currentUrl always belongs to currentItem; the key also gives each item a fresh viewer state.
     if (currentItem.media_type === "photo_360") {
       return (
         <Panorama360
+          key={currentItem.id}
           url={currentUrl}
           onClose={onClose}
           contained
@@ -476,6 +498,7 @@ export function MediaGalleryOverlay({
     if (currentItem.media_type === "video_360") {
       return (
         <Video360
+          key={currentItem.id}
           url={currentUrl}
           onClose={onClose}
           contained
@@ -503,108 +526,19 @@ export function MediaGalleryOverlay({
       );
     }
     return (
-      <img
+      <ZoomableImage
         key={currentItem.id}
         src={currentUrl}
         alt={currentItem.filename}
-        className="absolute inset-0 h-full w-full object-contain"
+        onSwipe={(direction) => (direction === "next" ? goNext() : goPrev())}
       />
     );
   }
 
   return (
-    <div className="fixed inset-0 z-[1000] flex flex-col bg-black">
-      {/* Header controls */}
-      <div className="absolute right-4 top-4 z-10 flex items-center gap-2 rounded-xl bg-black/40 px-2 py-1.5 backdrop-blur-sm">
-        {currentItem?.lat !== null && currentItem?.lng !== null && currentItem && (
-          <a
-            href={`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${currentItem.lat},${currentItem.lng}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-white/60 hover:text-white"
-            aria-label="Open in Street View"
-            title="Open in Street View"
-          >
-            <ExternalLink className="h-5 w-5" />
-          </a>
-        )}
-        {currentItem && (
-          <AlbumMenu
-            item={currentItem}
-            isOwn={isOwn}
-            variant="overlay"
-            onChange={(albumId, added) => handleAlbumChange(currentItem, albumId, added)}
-          />
-        )}
-        {currentItem && isOwn && (
-          <button
-            className="text-white/60 hover:text-white"
-            onClick={() => setEditingLocation(true)}
-            aria-label="Edit GPS location"
-            title="Edit GPS location"
-          >
-            <MapPin className="h-5 w-5" />
-          </button>
-        )}
-        {canRemove && (
-          <button
-            className="text-white/60 hover:text-white disabled:opacity-40"
-            onClick={handleRemoveFromAlbum}
-            disabled={busy}
-            aria-label="Remove from album"
-            title="Remove from album"
-          >
-            <FolderMinus className="h-5 w-5" />
-          </button>
-        )}
-        {currentItem && isOwn && (
-          <button
-            className="text-white/60 hover:text-red-400 disabled:opacity-40"
-            onClick={handleDeleteMedia}
-            disabled={busy}
-            aria-label="Delete media"
-            title="Delete media"
-          >
-            <Trash2 className="h-5 w-5" />
-          </button>
-        )}
-        <button
-          className="text-white text-2xl leading-none hover:opacity-70"
-          onClick={onClose}
-          aria-label="Close gallery"
-        >
-          ✕
-        </button>
-      </div>
-
-      {/* Title, and who shared the current item */}
-      <div className="absolute left-4 top-4 z-10 flex flex-col items-start gap-1 pointer-events-none">
-        <div className="text-white text-sm font-medium bg-black/50 px-3 py-1 rounded-full">
-          {title}
-          {subtitle && <span className="ml-2 font-normal text-white/60">{subtitle}</span>}
-        </div>
-        {currentItem && !isOwn && (
-          <div className="text-white/80 text-xs bg-black/50 px-3 py-1 rounded-full">
-            Shared by {currentItem.owner_name ?? "another user"}
-          </div>
-        )}
-        {actionError && (
-          <div role="alert" className="max-w-sm text-white text-xs bg-red-600/80 px-3 py-1 rounded-lg">
-            {actionError}
-          </div>
-        )}
-      </div>
-
-      {editingLocation && currentItem && isOwn && (
-        <EditLocationModal
-          item={currentItem}
-          onClose={() => setEditingLocation(false)}
-          onSaved={handleLocationSaved}
-        />
-      )}
-
-      {/* Media area */}
-      <div className="relative flex-1">
+    <div className="fixed inset-0 z-[1000] overflow-hidden bg-black">
+      {/* The media fills the screen; the controls float above it. */}
+      <div className="absolute inset-0">
         {loading && (
           <div className="flex h-full items-center justify-center text-white/40">
             Loading…
@@ -615,67 +549,193 @@ export function MediaGalleryOverlay({
             No media here
           </div>
         )}
-        {!loading && items.length > 0 && (
-          <>
-            {renderMedia()}
+        {showItems && renderMedia()}
+      </div>
 
-            {/* Left arrow */}
-            {currentIndex > 0 && (
-              <button
-                className="absolute left-4 top-1/2 -translate-y-1/2 z-10 text-white text-5xl leading-none hover:opacity-70 select-none"
-                onClick={(e) => { e.stopPropagation(); goPrev(); }}
-                aria-label="Previous"
+      {/* One column: the header, a free middle for the side arrows, and the bottom row, so on a
+          phone none of them can cover another. Only the controls take pointer events; the rest
+          passes through to the media (pan, zoom, swipe, 360 drag). */}
+      <div className="pointer-events-none absolute inset-0 z-10 flex flex-col p-2 sm:p-4 short:p-2">
+        {/* Title on the left, truncated; the toolbar keeps its size on the right. */}
+        <div className="relative z-20 flex shrink-0 items-start gap-2 touch:items-center">
+          <div className="min-w-0 truncate rounded-full bg-black/50 px-3 py-1 text-sm font-medium text-white">
+            {title}
+            {subtitle && <span className="ml-2 font-normal text-white/60">{subtitle}</span>}
+          </div>
+
+          <div className="pointer-events-auto ml-auto flex shrink-0 items-center gap-2 rounded-xl bg-black/40 px-2 py-1.5 backdrop-blur-sm touch:gap-0 touch:px-0.5 touch:py-0">
+            {currentItem?.lat !== null && currentItem?.lng !== null && currentItem && (
+              <a
+                href={`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${currentItem.lat},${currentItem.lng}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={toolButton}
+                aria-label="Open in Street View"
+                title="Open in Street View"
               >
-                ‹
-              </button>
+                <ExternalLink className="h-5 w-5" />
+              </a>
             )}
-
-            {/* Right arrow */}
-            {currentIndex < items.length - 1 && (
-              <button
-                className="absolute right-4 top-1/2 -translate-y-1/2 z-10 text-white text-5xl leading-none hover:opacity-70 select-none"
-                onClick={(e) => { e.stopPropagation(); goNext(); }}
-                aria-label="Next"
-              >
-                ›
-              </button>
-            )}
-
-            {/* Position label */}
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 text-white text-sm bg-black/50 px-3 py-1 rounded-full pointer-events-none">
-              {currentIndex + 1} / {items.length}
-              {currentItem?.filename && (
-                <span className="ml-2 text-white/80">· {currentItem.filename}</span>
-              )}
-              {currentItem?.taken_at && (
-                <span className="ml-2 text-white/60">
-                  · {new Date(currentItem.taken_at).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                </span>
-              )}
-            </div>
-
-            {/* Map overlay */}
-            {itemsWithGps.length > 0 && currentItem && (
-              <GalleryMapOverlay
-                itemsWithGps={itemsWithGps}
-                currentItem={currentItem}
-                minimized={mapMinimized}
-                mapHovered={mapHovered}
-                mapDragging={mapDragging}
-                mapMouseLeft={mapMouseLeft}
-                onMinimize={() => setMapMinimized(true)}
-                onExpand={() => setMapMinimized(false)}
-                onHoverChange={setMapHovered}
-                onDragChange={(d) => {
-                  setMapDragging(d);
-                  if (!d && mapMouseLeft.current) setMapHovered(false);
-                }}
-                onMarkerClick={handleMarkerClick}
+            {currentItem && (
+              <AlbumMenu
+                item={currentItem}
+                isOwn={isOwn}
+                variant="overlay"
+                onChange={(albumId, added) => handleAlbumChange(currentItem, albumId, added)}
               />
             )}
-          </>
+            {currentItem && isOwn && (
+              <button
+                className={toolButton}
+                onClick={() => setEditingId(currentItem.id)}
+                aria-label="Edit GPS location"
+                title="Edit GPS location"
+              >
+                <MapPin className="h-5 w-5" />
+              </button>
+            )}
+            {canRemove && (
+              <button
+                className={toolButton}
+                onClick={handleRemoveFromAlbum}
+                disabled={busy}
+                aria-label="Remove from album"
+                title="Remove from album"
+              >
+                <FolderMinus className="h-5 w-5" />
+              </button>
+            )}
+            {currentItem && isOwn && (
+              <button
+                className={cn(toolButton, "hover:text-red-400")}
+                onClick={handleDeleteMedia}
+                disabled={busy}
+                aria-label="Delete media"
+                title="Delete media"
+              >
+                <Trash2 className="h-5 w-5" />
+              </button>
+            )}
+            <button
+              className="flex items-center justify-center text-2xl leading-none text-white hover:opacity-70 touch:min-h-11 touch:min-w-11"
+              onClick={onClose}
+              aria-label="Close gallery"
+            >
+              ✕
+            </button>
+          </div>
+
+          {/* Below the header row, so on a phone they get the full width, not the strip left
+              of the toolbar. */}
+          {((currentItem && !isOwn) || actionError) && (
+            <div className="absolute left-0 top-full mt-1 flex max-w-full flex-col items-start gap-1">
+              {currentItem && !isOwn && (
+                <div className="max-w-full truncate rounded-full bg-black/50 px-3 py-1 text-xs text-white/80">
+                  Shared by {currentItem.owner_name ?? "another user"}
+                </div>
+              )}
+              {actionError && (
+                <div role="alert" className="max-w-full rounded-lg bg-red-600/80 px-3 py-1 text-xs text-white sm:max-w-sm">
+                  {actionError}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* The side arrows centre in the space between the header and the bottom row on a phone,
+            and on the whole screen (static: positioned by the column) on a larger one. */}
+        <div className="relative min-h-0 flex-1 sm:static short:relative">
+          {showItems && !mapLarge && hasPrev && <NavButton direction="prev" placement="side" onClick={goPrev} />}
+          {showItems && !mapLarge && hasNext && <NavButton direction="next" placement="side" onClick={goNext} />}
+        </div>
+
+        {showItems && currentItem && (
+          <div
+            className={cn(
+              // min-h-0, not shrink-0: on a short column the row gives up height, so the mini
+              // map's max-h-full caps it at the space below the header instead of letting it run
+              // off the bottom. The middle spacer has no basis, so this only happens when space
+              // runs out.
+              "flex min-h-0 gap-2",
+              // Below lg the large map leaves no room beside it (it spans a phone's width), so the
+              // label goes under it. A short screen has no height for that: it stays beside.
+              mapLarge
+                ? "flex-col-reverse lg:flex-row lg:items-end short:flex-row short:items-end"
+                : "flex-row items-end",
+              // Clear of the video's controls bar. A large map on a phone held sideways would
+              // then reach the toolbar; it covers most of the video anyway.
+              isVideo && (mapLarge ? "mb-11 sm:mb-10 short:mb-0" : "mb-11 sm:mb-10 short:mb-11"),
+            )}
+          >
+            <div
+              className={cn(
+                "flex min-w-0 items-center gap-2",
+                mapLarge ? "lg:flex-1 short:flex-1" : "flex-1",
+                hasMap ? "justify-start sm:justify-center" : "justify-center",
+                hasMap && LABEL_CLEARANCE[mapSize],
+              )}
+            >
+              {mapLarge && <NavButton direction="prev" placement="row" disabled={!hasPrev} onClick={goPrev} />}
+
+              {/* Position label. A portrait phone has room for two short lines beside the map:
+                  the date, then the position and the truncated file name. */}
+              <div className="min-w-0 rounded-xl bg-black/50 px-3 py-1 text-sm text-white sm:flex sm:items-baseline sm:gap-2 sm:rounded-full">
+                {takenAt && (
+                  <div className="truncate text-white/60 sm:order-last sm:shrink-0">
+                    <span className="hidden sm:inline">· </span>
+                    {takenAt}
+                  </div>
+                )}
+                <div className="flex min-w-0 items-baseline gap-2 sm:contents">
+                  <span className="shrink-0 tabular-nums">
+                    {currentIndex + 1} / {items.length}
+                  </span>
+                  {currentItem.filename && (
+                    <span className="min-w-0 truncate text-white/80">· {currentItem.filename}</span>
+                  )}
+                </div>
+              </div>
+
+              {mapLarge && <NavButton direction="next" placement="row" disabled={!hasNext} onClick={goNext} />}
+            </div>
+
+            {hasMap && (
+              <MiniMapOverlay
+                // In the row on a phone, so the label stays beside it. From sm (lg for the large
+                // map) out of the flow, in the column's corner as in the game, so a hover
+                // enlargement covers the label for a moment rather than sliding it. top-16 keeps
+                // it under the toolbar; bottom-14 matches the row's margin over a video's controls.
+                className={cn(
+                  "static ml-auto short:static",
+                  mapLarge ? "lg:absolute lg:top-16" : "sm:absolute sm:top-16",
+                  isVideo && (mapLarge ? "lg:bottom-14" : "sm:bottom-14"),
+                )}
+                defaultSize={mapSize}
+                onSizeChange={setMapSize}
+              >
+                <GalleryMapController items={itemsWithGps} currentItem={currentItem} />
+                {itemsWithGps.map((m) => (
+                  <Marker
+                    key={m.id}
+                    position={[m.lat!, m.lng!]}
+                    icon={m.id === currentItem.id ? currentMarkerIcon : markerIcon(m)}
+                    eventHandlers={{ click: () => handleMarkerClick(m) }}
+                  />
+                ))}
+              </MiniMapOverlay>
+            )}
+          </div>
         )}
       </div>
+
+      {editingLocation && currentItem && isOwn && (
+        <EditLocationModal
+          item={currentItem}
+          onClose={() => setEditingId(null)}
+          onSaved={handleLocationSaved}
+        />
+      )}
     </div>
   );
 }

@@ -67,6 +67,23 @@ describe("AuthGate", () => {
     );
     expect(await screen.findByText(/Could not reach the server/)).toBeInTheDocument();
   });
+
+  // 100vh is taller than what a phone browser shows, so h-screen made the page scroll.
+  it("fills the visible height of the screen while loading and on an error, not 100vh", async () => {
+    mockApi.me.mockRejectedValue(new Error("boom"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <AuthGate>
+        <WhoAmI />
+      </AuthGate>
+    );
+    const loading = screen.getByRole("status");
+    expect(loading).toHaveClass("min-h-dvh");
+    expect(loading).not.toHaveClass("h-screen");
+    const error = await screen.findByText(/Could not reach the server/);
+    expect(error).toHaveClass("min-h-dvh");
+    expect(error).not.toHaveClass("h-screen");
+  });
 });
 
 describe("App shell", () => {

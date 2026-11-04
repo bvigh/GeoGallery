@@ -596,4 +596,17 @@ describe("AlbumsPage", () => {
       ).toBeInTheDocument();
     });
   });
+
+  it("makes the card actions and the members dialog's rows finger-sized on touch", async () => {
+    renderPage();
+    await screen.findByRole("button", { name: owned.name });
+    for (const name of [`Members of ${owned.name}`, `Rename ${owned.name}`, `Delete ${owned.name}`]) {
+      expect(screen.getByRole("button", { name })).toHaveClass("touch:min-h-11", "touch:min-w-11");
+    }
+    expect(screen.getByRole("button", { name: "New album" })).toHaveClass("touch:min-h-11");
+
+    const dialog = await openMembers(owned);
+    expect(await within(dialog).findByRole("button", { name: "Remove Bob" })).toHaveClass("touch:min-h-11");
+    expect(await within(dialog).findByRole("button", { name: "Add Dave" })).toHaveClass("touch:min-h-11");
+  });
 });

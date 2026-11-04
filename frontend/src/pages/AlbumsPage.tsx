@@ -19,6 +19,14 @@ import {
 // GET /api/media returns at most this many rows per request.
 const MEDIA_PAGE_SIZE = 500;
 
+// Small text buttons on a mouse; finger-sized, with readable text, on touch.
+const TEXT_BUTTON_CLASS = "text-xs touch:min-h-11 touch:min-w-11 touch:px-2 touch:text-sm";
+// Bordered row actions (Add, Remove) in the members dialog.
+const ROW_BUTTON_CLASS =
+  "shrink-0 rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50 touch:min-h-11 touch:px-3 touch:text-sm";
+// 16px text on touch: iOS zooms the page into a smaller focused field and stays zoomed.
+const TOUCH_INPUT_CLASS = "touch:py-2 touch:text-base";
+
 function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
@@ -117,7 +125,7 @@ function NewAlbumDialog({
               maxLength={200}
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="w-full rounded-md border px-2 py-1"
+              className={`w-full rounded-md border px-2 py-1 ${TOUCH_INPUT_CLASS}`}
             />
           </label>
           {error && <p className="text-red-500">{error}</p>}
@@ -269,12 +277,13 @@ function MembersPanel({
       {members === null ? (
         !error && <p className="text-sm text-muted-foreground">Loading…</p>
       ) : (
-        <ul aria-label="Members" className="max-h-64 space-y-1 overflow-y-auto text-sm">
+        // Phones held sideways scroll the whole dialog instead of lists nested inside it.
+        <ul aria-label="Members" className="max-h-64 space-y-1 overflow-y-auto text-sm short:max-h-none">
           {members.map((m) => {
             const name = userLabel(m, "Unknown user");
             return (
               <li key={m.user_id} className="flex items-center justify-between gap-2">
-                <span className="min-w-0 break-words">
+                <span className="min-w-0 [overflow-wrap:anywhere]">
                   {name}
                   {m.user_id === me.id && <span className="text-muted-foreground"> (you)</span>}
                   {m.is_owner && <span className="ml-2 text-xs text-muted-foreground">Owner</span>}
@@ -284,7 +293,7 @@ function MembersPanel({
                     onClick={() => removeMember(m)}
                     disabled={busy}
                     aria-label={`Remove ${name}`}
-                    className="rounded-md border px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+                    className={`${ROW_BUTTON_CLASS} text-red-600 hover:bg-red-50`}
                   >
                     Remove
                   </button>
@@ -312,12 +321,12 @@ function MembersPanel({
             {visibleCandidates.length === 0 ? (
               <p className="text-muted-foreground">No matching users.</p>
             ) : (
-              <ul aria-label="Users to add" className="max-h-48 space-y-1 overflow-y-auto">
+              <ul aria-label="Users to add" className="max-h-48 space-y-1 overflow-y-auto short:max-h-none">
                 {visibleCandidates.map((u) => {
                   const name = userLabel(u, u.id);
                   return (
                     <li key={u.id} className="flex items-center justify-between gap-2">
-                      <span className="min-w-0 break-words">
+                      <span className="min-w-0 [overflow-wrap:anywhere]">
                         {name}
                         {u.display_name && u.email && (
                           <span className="ml-2 text-xs text-muted-foreground">{u.email}</span>
@@ -327,7 +336,7 @@ function MembersPanel({
                         onClick={() => addMember(u)}
                         disabled={busy}
                         aria-label={`Add ${name}`}
-                        className="shrink-0 rounded-md border px-2 py-1 text-xs font-medium hover:bg-muted disabled:opacity-50"
+                        className={`${ROW_BUTTON_CLASS} hover:bg-muted`}
                       >
                         Add
                       </button>
@@ -430,12 +439,12 @@ export function AlbumsPage() {
   };
 
   return (
-    <div className="h-full overflow-y-auto p-6">
-      <div className="mb-4 flex items-center justify-between">
+    <div className="h-full overflow-y-auto p-4 sm:p-6">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-semibold">Albums</h1>
         <button
           onClick={() => setCreating(true)}
-          className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+          className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground touch:min-h-11"
         >
           <Plus className="h-4 w-4" />
           New album
@@ -472,30 +481,34 @@ export function AlbumsPage() {
                   value={renameValue}
                   onChange={(e) => setRenameValue(e.target.value)}
                   onKeyDown={(e) => e.key === "Escape" && setRenaming(null)}
-                  className="min-w-0 flex-1 rounded border px-2 py-1 text-sm"
+                  className={`min-w-0 flex-1 rounded border px-2 py-1 text-sm ${TOUCH_INPUT_CLASS}`}
                 />
-                <button type="submit" className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground">
+                <button
+                  type="submit"
+                  className="shrink-0 rounded bg-primary px-2 py-1 text-xs text-primary-foreground touch:min-h-11 touch:px-3 touch:text-sm"
+                >
                   Save
                 </button>
                 <button
                   type="button"
                   onClick={() => setRenaming(null)}
-                  className="text-xs text-muted-foreground hover:text-foreground"
+                  className={`shrink-0 text-muted-foreground hover:text-foreground ${TEXT_BUTTON_CLASS}`}
                 >
                   Cancel
                 </button>
               </form>
             ) : (
-              <div className="flex items-start justify-between gap-2">
-                <h2 className="min-w-0 font-medium">
+              // A long name takes the whole line and pushes the actions below it.
+              <div className="flex flex-wrap items-start justify-between gap-x-2">
+                <h2 className="min-w-0 font-medium touch:py-2.5">
                   {/* No handler: its click bubbles to the card, so keyboard users can open it too. */}
-                  <button type="button" className="break-words text-left hover:underline">
+                  <button type="button" className="text-left [overflow-wrap:anywhere] hover:underline">
                     {album.name}
                   </button>
                 </h2>
-                <div className="flex shrink-0 gap-2">
+                <div className="ml-auto flex shrink-0 gap-2 touch:gap-0">
                   <button
-                    className="text-xs text-muted-foreground hover:text-foreground"
+                    className={`text-muted-foreground hover:text-foreground ${TEXT_BUTTON_CLASS}`}
                     aria-label={`Members of ${album.name}`}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -507,7 +520,7 @@ export function AlbumsPage() {
                   {album.is_owner && (
                     <>
                       <button
-                        className="text-xs text-muted-foreground hover:text-foreground"
+                        className={`text-muted-foreground hover:text-foreground ${TEXT_BUTTON_CLASS}`}
                         aria-label={`Rename ${album.name}`}
                         onClick={(e) => {
                           e.stopPropagation();
@@ -517,7 +530,7 @@ export function AlbumsPage() {
                         Rename
                       </button>
                       <button
-                        className="text-xs text-destructive hover:text-destructive/80"
+                        className={`text-destructive hover:text-destructive/80 ${TEXT_BUTTON_CLASS}`}
                         aria-label={`Delete ${album.name}`}
                         onClick={(e) => {
                           e.stopPropagation();

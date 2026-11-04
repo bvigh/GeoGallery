@@ -14,6 +14,10 @@
     --muted-foreground: 215.4 16.3% 46.9%;
     --accent: 210 40% 96.1%;
     --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
     --border: 214.3 31.8% 91.4%;
     --input: 214.3 31.8% 91.4%;
     --ring: 221.2 83.2% 53.3%;
@@ -31,6 +35,10 @@
     --muted-foreground: 215 20.2% 65.1%;
     --accent: 217.2 32.6% 17.5%;
     --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
     --border: 217.2 32.6% 17.5%;
     --input: 217.2 32.6% 17.5%;
     --ring: 224.3 76.3% 48%;
@@ -41,8 +49,41 @@
   * {
     @apply border-border;
   }
+
+  /* The document never scrolls: the shell is one viewport tall and pages scroll inside <main>.
+     A scrolling page let the header slide away on phones and opened fixed overlays offset.
+     No pull-to-refresh or rubber band while panning a map. */
+  html,
+  body {
+    height: 100%;
+    height: 100dvh;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  /* Scrolls only when a screen outside the shell (sign-in, errors) is taller than a sideways
+     phone; the shell clips its own overflow, so it never scrolls the app. */
+  #root {
+    height: 100%;
+    height: 100dvh;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: none;
+  }
   body {
     @apply bg-background text-foreground;
+    /* No double-tap zoom, so taps react at once; pinch zoom stays. */
+    touch-action: manipulation;
+  }
+}
+
+@layer utilities {
+  /* Tailwind's overflow-clip with an overflow: hidden fallback: without clip support (iOS Safari
+     < 16) the declaration is dropped and the box would overflow visibly. Unlike hidden, a clipped
+     box is no scroll container, so focus() and scrollIntoView() cannot scroll it. It is no scroll
+     container for flex sizing either: a clipped flex item needs min-h-0 / min-w-0 to shrink. */
+  .overflow-clip-safe {
+    overflow: hidden;
+    overflow: clip;
   }
 }
 
@@ -50,4 +91,46 @@
 .leaflet-container {
   width: 100%;
   height: 100%;
+}
+
+/* Leaflet's zoom buttons (30 px on touch) and popup close button (24 px) are too small for a
+   finger: 44 px on every map. One class more than leaflet.css's selectors, because which
+   stylesheet comes last is not fixed. The popup text keeps clear of the larger close button. */
+@media (pointer: coarse) {
+  .leaflet-container .leaflet-bar a.leaflet-control-zoom-in,
+  .leaflet-container .leaflet-bar a.leaflet-control-zoom-out {
+    width: 44px;
+    height: 44px;
+    line-height: 44px;
+  }
+  .leaflet-container .leaflet-popup a.leaflet-popup-close-button {
+    width: 44px;
+    height: 44px;
+    font: 24px/44px Tahoma, Verdana, sans-serif;
+  }
+  .leaflet-container .leaflet-popup .leaflet-popup-content {
+    margin-right: 44px;
+  }
+}
+
+/* iOS Safari zooms the page in when a form control under 16px is focused, and stays zoomed.
+   Outside any layer and more specific than one class, so it wins over text-sm / text-xs. */
+@media (pointer: coarse) {
+  :is(
+      input:not(
+          [type="checkbox"],
+          [type="radio"],
+          [type="range"],
+          [type="color"],
+          [type="file"],
+          [type="button"],
+          [type="submit"],
+          [type="reset"],
+          [type="image"]
+        ),
+      select,
+      textarea
+    ) {
+    font-size: max(16px, 1em);
+  }
 }

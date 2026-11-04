@@ -30,12 +30,13 @@ export function CopyField({ value, label }: { value: string; label: string }) {
           spellCheck={false}
           value={value}
           onFocus={(e) => e.currentTarget.select()}
-          className="min-w-0 flex-1 rounded-md border bg-muted px-2 py-1 font-mono text-xs"
+          // 16px on touch: iOS zooms into a smaller field when it gets focus.
+          className="min-w-0 flex-1 rounded-md border bg-muted px-2 py-1 font-mono text-xs touch:text-base"
         />
         <button
           type="button"
           onClick={copy}
-          className="shrink-0 rounded-md border px-3 py-1 text-sm font-medium hover:bg-accent"
+          className="shrink-0 rounded-md border px-3 py-1 text-sm font-medium hover:bg-accent touch:min-h-11 touch:px-4"
         >
           Copy
         </button>

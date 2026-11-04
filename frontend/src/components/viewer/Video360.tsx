@@ -1,9 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { OrientationKeyframe } from "../../types";
+import { Pause, Play, Volume2, VolumeX } from "lucide-react";
+import type { OrientationKeyframe } from "@/types";
 import { videoDecodeFailed } from "@/lib/video";
 import VideoDecodeNotice from "./VideoDecodeNotice";
+import ViewerHeader from "./ViewerHeader";
+import { createTapDetector } from "./gestures";
+import { createSphereView } from "./sphereControls";
+import { DEFAULT_FOV } from "./sphereMath";
+import WebGLNotice, { type SphereFailure } from "./WebGLNotice";
 
 // Stable reference — avoids re-running useEffect when no keyframes are passed
 const EMPTY_KEYFRAMES: OrientationKeyframe[] = [];
@@ -11,15 +16,24 @@ const EMPTY_KEYFRAMES: OrientationKeyframe[] = [];
 interface Props {
   url: string;
   onClose: () => void;
+  /** Keyframe fov is in the same short-side convention as initialFov. */
   keyframes?: OrientationKeyframe[];
   initialYaw?: number | null;
   initialPitch?: number | null;
+  /** Degrees across the shorter side of the viewport (see sphereMath.ts). */
   initialFov?: number | null;
   /** When true: fills parent container (no fixed overlay). Used in GamePage. */
   contained?: boolean;
+  /** Returns the view on screen; fov in the same short-side convention as initialFov. */
   captureRef?: React.MutableRefObject<(() => { yaw: number; pitch: number; fov: number }) | null>;
   captureTimeRef?: React.MutableRefObject<(() => number) | null>;
   controlRef?: React.MutableRefObject<{ pause: () => void; seek: (t: number) => void; seekAndApply: (t: number) => void } | null>;
+  /**
+   * A tap or click on the picture plays or pauses (default true). The view editor turns it off:
+   * there a click or a small nudge of the view would restart playback and change the time the
+   * next keyframe stores. The play button and Space still work.
+   */
+  tapToPlay?: boolean;
 }
 
 function fmt(s: number) {
@@ -27,6 +41,60 @@ function fmt(s: number) {
   const sec = Math.floor(s % 60);
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
+
+function lerpAngle(a: number, b: number, t: number): number {
+  const delta = ((b - a) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI;
+  return a + delta * t;
+}
+
+function interpolateKeyframes(
+  kfs: OrientationKeyframe[],
+  t: number
+): { yaw: number; pitch: number; fov: number } | null {
+  if (kfs.length === 0) return null;
+  const first = kfs[0];
+  if (t <= first.time) return { yaw: first.yaw, pitch: first.pitch, fov: first.fov };
+  const last = kfs[kfs.length - 1];
+  if (t >= last.time) return { yaw: last.yaw, pitch: last.pitch, fov: last.fov };
+
+  for (let i = 0; i < kfs.length - 1; i++) {
+    const a = kfs[i];
+    const b = kfs[i + 1];
+    if (t >= a.time && t < b.time) {
+      const alpha = (t - a.time) / (b.time - a.time);
+      return {
+        yaw: lerpAngle(a.yaw, b.yaw, alpha),
+        pitch: lerpAngle(a.pitch, b.pitch, alpha),
+        fov: a.fov + (b.fov - a.fov) * alpha,
+      };
+    }
+  }
+  return null;
+}
+
+function orientation(yaw: number, pitch: number): THREE.Quaternion {
+  return new THREE.Quaternion().setFromEuler(new THREE.Euler(pitch, yaw, 0, "YXZ"));
+}
+
+type Flash = { kind: "play" | "pause"; n: number };
+const FLASH_MS = 800;
+
+// A big play or pause icon that pops up in the middle and fades, so a tap on the video shows
+// what it did. `n` remounts it, which restarts the animation on a quick second tap.
+function usePlaybackFlash() {
+  const [flash, setFlash] = useState<Flash | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const show = useCallback((kind: Flash["kind"]) => {
+    clearTimeout(timer.current);
+    setFlash((prev) => ({ kind, n: (prev?.n ?? 0) + 1 }));
+    timer.current = setTimeout(() => setFlash(null), FLASH_MS);
+  }, []);
+  return [flash, show] as const;
+}
+
+const iconButton =
+  "flex h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 touch:h-11 touch:w-11";
 
 export default function Video360({
   url,
@@ -39,12 +107,15 @@ export default function Video360({
   captureRef,
   captureTimeRef,
   controlRef,
+  tapToPlay = true,
 }: Props) {
   const yaw = initialYaw ?? 0;
   const pitch = initialPitch ?? 0;
-  const fov = initialFov ?? 75;
+  const fov = initialFov ?? DEFAULT_FOV;
   const keyframesRef = useRef(keyframes);
   useEffect(() => { keyframesRef.current = keyframes; }, [keyframes]);
+  const tapToPlayRef = useRef(tapToPlay);
+  useEffect(() => { tapToPlayRef.current = tapToPlay; }, [tapToPlay]);
   const mountRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [playing, setPlaying] = useState(true);
@@ -53,17 +124,69 @@ export default function Video360({
   const [duration, setDuration] = useState(0);
   // The url whose picture the browser cannot decode; a new url starts unflagged.
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const [glFailure, setGlFailure] = useState<SphereFailure | null>(null);
+  const [flash, showFlash] = usePlaybackFlash();
 
   useEffect(() => {
     const mount = mountRef.current!;
-    const w = mount.clientWidth;
-    const h = mount.clientHeight;
 
     // Off-DOM video element — required for Three.js VideoTexture
     const video = document.createElement("video");
+    const texture = new THREE.VideoTexture(video);
+    texture.colorSpace = THREE.SRGBColorSpace;
+
+    // --- Keyframe automation ---
+    let userOverride = false;
+    let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
+    const COOLDOWN_MS = 5000;
+    const BLEND_MS = 1000;
+    let blendStartTime: number | null = null;
+    const blendFromQuat = new THREE.Quaternion();
+    let blendFromFov = fov;
+
+    // Back on the keyframe path, blending over BLEND_MS from wherever the view is now.
+    function resumeAutomation() {
+      if (cooldownTimer) clearTimeout(cooldownTimer);
+      cooldownTimer = null;
+      blendFromQuat.copy(view.camera.quaternion);
+      blendFromFov = view.getFov();
+      blendStartTime = performance.now();
+      userOverride = false;
+    }
+
+    // --- User override: disable automation on interaction, resume with blend after 5s inactivity ---
+    function onUserInteract() {
+      userOverride = true;
+      blendStartTime = null;
+      if (cooldownTimer) clearTimeout(cooldownTimer);
+      cooldownTimer = setTimeout(resumeAutomation, COOLDOWN_MS);
+    }
+
+    const created = createSphereView(
+      mount,
+      texture,
+      { yaw, pitch, fov },
+      {
+        onInteract: onUserInteract,
+        onContextLost: () => {
+          // No picture: stop the sound too rather than play on behind the notice.
+          video.pause();
+          setGlFailure("lost");
+        },
+        onContextRestored: () => setGlFailure(null),
+      }
+    );
+    if (!created) {
+      // Nothing loaded yet (no src), so nothing to undo; the texture is already disposed.
+      setGlFailure("unavailable");
+      return;
+    }
+    setGlFailure(null);
+    const view = created;
+
     videoRef.current = video;
-    video.src = url;
     video.crossOrigin = "anonymous";
+    video.src = url;
     video.loop = true;
     video.muted = true; // start muted for autoplay
     video.playsInline = true;
@@ -81,33 +204,8 @@ export default function Video360({
     video.addEventListener("loadeddata", onDecodeCheck);
     video.addEventListener("error", onDecodeCheck);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(w, h);
-    mount.appendChild(renderer.domElement);
-
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(fov, w / h, 0.1, 1000);
-    camera.position.set(0, 0, 0.001);
-
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableZoom = false; // position zoom is wrong inside a sphere; FOV zoom used instead
-    controls.enablePan = false;
-    controls.rotateSpeed = -0.3;
-
-    if (yaw !== 0 || pitch !== 0) {
-      const euler = new THREE.Euler(pitch, yaw, 0, "YXZ");
-      camera.quaternion.setFromEuler(euler);
-      controls.target
-        .copy(camera.position)
-        .add(new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion));
-      controls.update();
-    }
-
     if (captureRef) {
-      captureRef.current = () => {
-        const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "YXZ");
-        return { yaw: euler.y, pitch: euler.x, fov: camera.fov };
-      };
+      captureRef.current = view.getView;
     }
     if (captureTimeRef) {
       captureTimeRef.current = () => video.currentTime;
@@ -119,75 +217,13 @@ export default function Video360({
         seekAndApply: (t: number) => {
           video.currentTime = t;
           video.pause();
-          const orientation = interpolateKeyframes(t);
-          if (orientation) {
-            const euler = new THREE.Euler(orientation.pitch, orientation.yaw, 0, "YXZ");
-            camera.quaternion.setFromEuler(euler);
-            controls.target
-              .copy(camera.position)
-              .add(new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion));
-            camera.fov = orientation.fov;
-            camera.updateProjectionMatrix();
+          const o = interpolateKeyframes(keyframesRef.current, t);
+          if (o) {
+            view.setOrientation(orientation(o.yaw, o.pitch));
+            view.setFov(o.fov);
           }
         },
       };
-    }
-
-    const MIN_FOV = 30;
-    const MAX_FOV = 100;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      camera.fov = Math.min(MAX_FOV, Math.max(MIN_FOV, camera.fov + e.deltaY * 0.05));
-      camera.updateProjectionMatrix();
-    };
-    renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
-
-    const geometry = new THREE.SphereGeometry(500, 60, 40);
-    geometry.scale(-1, 1, 1);
-
-    const texture = new THREE.VideoTexture(video);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    const material = new THREE.MeshBasicMaterial({ map: texture });
-    const mesh = new THREE.Mesh(geometry, material);
-    scene.add(mesh);
-
-    // --- Keyframe automation ---
-    let userOverride = false;
-    let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
-    const COOLDOWN_MS = 5000;
-    const BLEND_MS = 1000;
-    let blendStartTime: number | null = null;
-    let blendFromQuat = new THREE.Quaternion();
-    let blendFromFov = fov;
-
-    function lerpAngle(a: number, b: number, t: number): number {
-      let delta = ((b - a) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI;
-      return a + delta * t;
-    }
-
-    function interpolateKeyframes(
-      t: number
-    ): { yaw: number; pitch: number; fov: number } | null {
-      const kfs = keyframesRef.current;
-      if (kfs.length === 0) return null;
-      const first = kfs[0];
-      if (t <= first.time) return { yaw: first.yaw, pitch: first.pitch, fov: first.fov };
-      const last = kfs[kfs.length - 1];
-      if (t >= last.time) return { yaw: last.yaw, pitch: last.pitch, fov: last.fov };
-
-      for (let i = 0; i < kfs.length - 1; i++) {
-        const a = kfs[i];
-        const b = kfs[i + 1];
-        if (t >= a.time && t < b.time) {
-          const alpha = (t - a.time) / (b.time - a.time);
-          return {
-            yaw: lerpAngle(a.yaw, b.yaw, alpha),
-            pitch: lerpAngle(a.pitch, b.pitch, alpha),
-            fov: a.fov + (b.fov - a.fov) * alpha,
-          };
-        }
-      }
-      return null;
     }
 
     function onTimeUpdate() {
@@ -196,53 +232,52 @@ export default function Video360({
     }
     video.addEventListener("timeupdate", onTimeUpdate);
 
-    // --- User override: disable automation on interaction, resume with blend after 5s inactivity ---
-    function onUserInteract() {
-      userOverride = true;
-      blendStartTime = null;
-      if (cooldownTimer) clearTimeout(cooldownTimer);
-      cooldownTimer = setTimeout(() => {
-        blendFromQuat.copy(camera.quaternion);
-        blendFromFov = camera.fov;
-        blendStartTime = performance.now();
-        userOverride = false;
-      }, COOLDOWN_MS);
-    }
+    const togglePlayback = () => {
+      if (video.paused) {
+        video.play().catch(() => {});
+        showFlash("play");
+      } else {
+        video.pause();
+        showFlash("pause");
+      }
+    };
 
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       const editable = (e.target as HTMLElement)?.isContentEditable;
       if (e.code === "Space" && tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT" && !editable) {
         e.preventDefault();
-        if (video.paused) video.play(); else video.pause();
+        togglePlayback();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     mount.focus();
 
-    const canvas = renderer.domElement;
-    canvas.addEventListener("mousedown", onUserInteract);
-    canvas.addEventListener("pointerdown", onUserInteract);
-    canvas.addEventListener("touchstart", onUserInteract, { passive: true });
-
-    const onResize = () => {
-      const w2 = mount.clientWidth;
-      const h2 = mount.clientHeight;
-      camera.aspect = w2 / h2;
-      camera.updateProjectionMatrix();
-      renderer.setSize(w2, h2);
+    // A tap or click on the picture plays or pauses; drags and pinches only move the view.
+    const canvas = view.canvas;
+    const tap = createTapDetector();
+    const onTapDown = (e: PointerEvent) =>
+      tap.down(e.pointerId, e.clientX, e.clientY, e.timeStamp, e.button === 0, e.pointerType);
+    const onTapMove = (e: PointerEvent) => tap.move(e.pointerId, e.clientX, e.clientY);
+    const onTapUp = (e: PointerEvent) => {
+      if (!tap.up(e.pointerId, e.clientX, e.clientY, e.timeStamp) || !tapToPlayRef.current) return;
+      // A tap does not look around. Its pointerdown paused the keyframe path like a drag does,
+      // which would leave the camera frozen for the cooldown once the video plays.
+      resumeAutomation();
+      togglePlayback();
     };
-    window.addEventListener("resize", onResize);
+    const onTapCancel = (e: PointerEvent) => tap.cancel(e.pointerId);
+    canvas.addEventListener("pointerdown", onTapDown);
+    canvas.addEventListener("pointermove", onTapMove);
+    canvas.addEventListener("pointerup", onTapUp);
+    canvas.addEventListener("pointercancel", onTapCancel);
 
     let rafId: number;
     const animate = () => {
       rafId = requestAnimationFrame(animate);
       if (!userOverride && !video.paused) {
-        const orientation = interpolateKeyframes(video.currentTime);
-        if (orientation) {
-          const targetEuler = new THREE.Euler(orientation.pitch, orientation.yaw, 0, "YXZ");
-          const targetQuat = new THREE.Quaternion().setFromEuler(targetEuler);
-
+        const o = interpolateKeyframes(keyframesRef.current, video.currentTime);
+        if (o) {
           let alpha = 1;
           if (blendStartTime !== null) {
             const elapsed = performance.now() - blendStartTime;
@@ -252,18 +287,16 @@ export default function Video360({
             if (elapsed >= BLEND_MS) blendStartTime = null;
           }
 
-          camera.quaternion.slerpQuaternions(blendFromQuat, targetQuat, alpha);
-          camera.fov = blendFromFov + (orientation.fov - blendFromFov) * alpha;
-          controls.target
-            .copy(camera.position)
-            .add(new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion));
-          camera.updateProjectionMatrix();
+          view.setOrientation(
+            new THREE.Quaternion().slerpQuaternions(blendFromQuat, orientation(o.yaw, o.pitch), alpha)
+          );
+          view.setFov(blendFromFov + (o.fov - blendFromFov) * alpha);
         }
       }
-      controls.update();
-      // Without a decoded picture (videoWidth 0) the upload fails with "texImage2D: no video" every frame.
-      if (video.videoWidth > 0) texture.needsUpdate = true;
-      renderer.render(scene, camera);
+      // No texture.needsUpdate here: VideoTexture flags each newly presented frame itself
+      // (requestVideoFrameCallback), so a paused or undecodable video uploads nothing. Flagging it
+      // every tick re-sent the whole 5760×2880 frame to the GPU 60 times a second.
+      view.render();
     };
     animate();
 
@@ -280,28 +313,22 @@ export default function Video360({
       video.removeEventListener("error", onDecodeCheck);
       video.removeEventListener("timeupdate", onTimeUpdate);
       window.removeEventListener("keydown", onKeyDown);
-      canvas.removeEventListener("mousedown", onUserInteract);
-      canvas.removeEventListener("pointerdown", onUserInteract);
-      canvas.removeEventListener("touchstart", onUserInteract);
-      canvas.removeEventListener("wheel", onWheel);
-      window.removeEventListener("resize", onResize);
+      canvas.removeEventListener("pointerdown", onTapDown);
+      canvas.removeEventListener("pointermove", onTapMove);
+      canvas.removeEventListener("pointerup", onTapUp);
+      canvas.removeEventListener("pointercancel", onTapCancel);
       video.pause();
       video.src = "";
       videoRef.current = null;
-      controls.dispose();
-      renderer.dispose();
-      geometry.dispose();
-      material.dispose();
-      texture.dispose();
-      mount.removeChild(renderer.domElement);
+      view.dispose();
     };
-  }, [url, yaw, pitch, fov, captureRef, captureTimeRef, controlRef]);
+  }, [url, yaw, pitch, fov, captureRef, captureTimeRef, controlRef, showFlash]);
 
   const togglePlay = () => {
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
-      video.play();
+      video.play().catch(() => {});
     } else {
       video.pause();
     }
@@ -321,57 +348,78 @@ export default function Video360({
   };
 
   const controls = (
-    <div className="flex items-center gap-2 px-3 py-1.5 bg-black/70 text-white text-sm shrink-0 backdrop-blur-sm">
-      <button onClick={togglePlay} className="w-5 text-center text-base leading-none" aria-label={playing ? "Pause" : "Play"}>
-        {playing ? "⏸" : "▶"}
+    <div className="flex shrink-0 items-center gap-1 bg-black/70 px-2 py-1 text-sm text-white backdrop-blur-sm touch:py-0">
+      <button type="button" onClick={togglePlay} className={iconButton} aria-label={playing ? "Pause" : "Play"}>
+        {playing ? (
+          <Pause className="h-4 w-4" fill="currentColor" aria-hidden="true" />
+        ) : (
+          <Play className="h-4 w-4" fill="currentColor" aria-hidden="true" />
+        )}
       </button>
-      <button onClick={toggleMute} className="w-5 text-center text-base leading-none" aria-label={muted ? "Unmute" : "Mute"}>
-        {muted ? "🔇" : "🔊"}
+      <button type="button" onClick={toggleMute} className={iconButton} aria-label={muted ? "Unmute" : "Mute"}>
+        {muted ? <VolumeX className="h-4 w-4" aria-hidden="true" /> : <Volume2 className="h-4 w-4" aria-hidden="true" />}
       </button>
-      <span className="text-xs tabular-nums w-9 shrink-0">{fmt(currentTime)}</span>
+      <span className="w-9 shrink-0 text-xs tabular-nums">{fmt(currentTime)}</span>
+      {/* A tall box: tapping anywhere near the track seeks or grabs it. */}
       <input
         type="range"
+        aria-label="Seek"
+        aria-valuetext={`${fmt(currentTime)} of ${fmt(duration)}`}
         min={0}
         max={duration || 1}
         step={0.1}
         value={currentTime}
         onChange={(e) => seek(Number(e.target.value))}
-        className="flex-1 h-1 accent-white cursor-pointer"
+        className="h-4 min-w-0 flex-1 cursor-pointer accent-white touch:h-11"
       />
-      <span className="text-xs tabular-nums w-9 shrink-0 text-right">{fmt(duration)}</span>
+      <span className="w-9 shrink-0 text-right text-xs tabular-nums">{fmt(duration)}</span>
     </div>
   );
 
-  const notice = failedUrl === url && <VideoDecodeNotice />;
+  const flashIcon = flash && (
+    <div
+      key={flash.n}
+      aria-hidden="true"
+      data-testid="playback-flash"
+      data-kind={flash.kind}
+      className="pointer-events-none absolute inset-0 flex items-center justify-center"
+    >
+      <div className="rounded-full bg-black/50 p-4 text-white motion-safe:animate-[ping_0.8s_cubic-bezier(0,0,0.2,1)_forwards]">
+        {flash.kind === "play" ? (
+          <Play className="h-8 w-8" fill="currentColor" />
+        ) : (
+          <Pause className="h-8 w-8" fill="currentColor" />
+        )}
+      </div>
+    </div>
+  );
+
+  const notice = glFailure ? <WebGLNotice failure={glFailure} /> : failedUrl === url && <VideoDecodeNotice />;
+  // Without WebGL the video is never loaded, so there is nothing to control.
+  const controlBar = glFailure !== "unavailable" && controls;
+
+  const stage = (
+    <div className="relative min-h-0 flex-1">
+      <div ref={mountRef} className="absolute inset-0 overflow-hidden outline-none" tabIndex={-1} />
+      {flashIcon}
+      {notice}
+    </div>
+  );
 
   if (contained) {
     return (
-      <div className="absolute inset-0 bg-black flex flex-col">
-        <div className="relative flex-1 flex flex-col">
-          <div ref={mountRef} className="flex-1 outline-none" tabIndex={-1} />
-          {notice}
-        </div>
-        {controls}
+      <div className="absolute inset-0 flex flex-col bg-black">
+        {stage}
+        {controlBar}
       </div>
     );
   }
 
   return (
-    <div className="fixed inset-0 z-[1000] bg-black flex flex-col">
-      <div className="flex justify-between items-center px-4 py-2 text-white text-sm shrink-0 bg-black/60">
-        <span>360° Video — drag to look around · scroll to zoom</span>
-        <button
-          onClick={onClose}
-          className="text-white hover:text-gray-300 text-xl leading-none"
-        >
-          ✕
-        </button>
-      </div>
-      <div className="relative flex-1 flex flex-col">
-        <div ref={mountRef} className="flex-1 outline-none" tabIndex={-1} />
-        {notice}
-      </div>
-      {controls}
+    <div className="fixed inset-0 z-[1000] flex flex-col bg-black">
+      <ViewerHeader title="360° video" onClose={onClose} />
+      {stage}
+      {controlBar}
     </div>
   );
 }

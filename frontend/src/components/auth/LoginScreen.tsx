@@ -21,7 +21,8 @@ export function LoginScreen() {
   const message = authError ? AUTH_ERROR_MESSAGES[authError] ?? "Sign-in failed. Please try again." : null;
 
   return (
-    <div className="flex h-screen items-center justify-center bg-background p-6">
+    // min-h-dvh: 100vh is taller than what a phone browser shows, which would make the page scroll.
+    <div className="flex min-h-dvh items-center justify-center bg-background p-4 sm:p-6">
       <div className="w-full max-w-sm rounded-lg border p-6 text-center">
         <h1 className="mb-2 text-xl font-semibold tracking-tight">GeoGallery</h1>
         <p className="mb-6 text-sm text-muted-foreground">Sign in to view your gallery.</p>
@@ -32,24 +33,24 @@ export function LoginScreen() {
         )}
         <a
           href={loginHref({ invite })}
-          className="block rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+          className="block rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground touch:py-3"
         >
           Sign in
         </a>
         {authError && (
           <a
             href={loginHref({ prompt: "login", invite })}
-            className="mt-2 block rounded-lg border px-4 py-2 text-sm font-medium hover:bg-accent"
+            className="mt-2 block rounded-lg border px-4 py-2 text-sm font-medium hover:bg-accent touch:py-3"
           >
             Sign in with a different account
           </a>
         )}
         <p className="mt-6 text-xs text-muted-foreground">
-          <a href="/privacy.html" className="hover:underline">
+          <a href="/privacy.html" className="hover:underline touch:inline-block touch:py-3.5">
             Privacy Policy
           </a>
           {" · "}
-          <a href="/terms.html" className="hover:underline">
+          <a href="/terms.html" className="hover:underline touch:inline-block touch:py-3.5">
             Terms of Service
           </a>
         </p>

@@ -305,4 +305,15 @@ describe("AlbumMenu", () => {
       expect(within(dialog).getByRole("textbox", { name: "New album name" })).toHaveValue("Summer");
     });
   });
+
+  it("gives the gallery toolbar's icon trigger a finger-sized target on touch", async () => {
+    render(<AlbumMenu item={item} isOwn variant="overlay" />);
+    const trigger = screen.getByRole("button", { name: "Albums" });
+    expect(trigger).toHaveClass("touch:min-h-11", "touch:min-w-11");
+    const dialog = await openMenu();
+    const box = await within(dialog).findByRole("checkbox", { name: /Family/ });
+    expect(box.closest("label")).toHaveClass("touch:min-h-11");
+    // A long name wraps inside the row instead of widening the dialog.
+    expect(within(dialog).getByText("Family")).toHaveClass("min-w-0", "break-words");
+  });
 });
