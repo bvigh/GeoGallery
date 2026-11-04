@@ -90,6 +90,7 @@ func newOwnershipRouter(pool *pgxpool.Pool, store *fakeObjectStore) http.Handler
 		r.Get("/game/round", game.NewRound)
 		r.Post("/game/guess", game.SubmitGuess)
 		r.Post("/gps-tracks/import", tracks.Import)
+		r.Post("/gps-tracks/upload", tracks.Upload)
 		r.Post("/gps-matcher/run", matcher.Run)
 	})
 	return r
@@ -483,6 +484,74 @@ func TestOwnership_GPSImportIsOwnedByCaller(t *testing.T) {
 		`SELECT COUNT(*) FROM gps_tracks WHERE owner_id = $1`, f.userB).Scan(&n))
 	assert.Equal(t, 2, n)
 	assert.Nil(t, snapshotMedia(t, f.pool, f.mediaAUnlocated).lat, "B's import never geolocates A's media")
+}
+
+func uploadTrackFiles(t *testing.T, h http.Handler, userID string, files ...trackFile) trackUploadResponse {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for _, f := range files {
+		fw, err := mw.CreateFormFile("files", f.name)
+		require.NoError(t, err)
+		_, err = fw.Write([]byte(f.content))
+		require.NoError(t, err)
+	}
+	require.NoError(t, mw.Close())
+	req := httptest.NewRequest(http.MethodPost, "/api/gps-tracks/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(testUserHeader, userID)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp trackUploadResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp
+}
+
+func TestOwnership_GPSUploadIsOwnedByCaller(t *testing.T) {
+	f := newOwnershipFixture(t)
+	gpx := trackFile{"walk.gpx", `<gpx><trk><trkseg>
+		<trkpt lat="47.4979" lon="19.0402"><time>2024-05-03T12:20:00Z</time></trkpt>
+		<trkpt lat="48.2082" lon="16.3738"><time>2024-05-03T12:40:00Z</time></trkpt>
+	</trkseg></trk></gpx>`}
+
+	resp := uploadTrackFiles(t, f.router, f.userB, gpx)
+	assert.Equal(t, 2, resp.Inserted)
+
+	rows, err := f.pool.Query(context.Background(), `
+		SELECT owner_id::text, ST_Y(location::geometry), ST_X(location::geometry)
+		FROM gps_tracks WHERE source = 'gpx:walk.gpx' ORDER BY recorded_at`)
+	require.NoError(t, err)
+	type row struct {
+		owner    string
+		lat, lng float64
+	}
+	var got []row
+	for rows.Next() {
+		var r row
+		require.NoError(t, rows.Scan(&r.owner, &r.lat, &r.lng))
+		got = append(got, r)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []row{{f.userB, budapestLat, budapestLng}, {f.userB, viennaLat, viennaLng}}, got)
+
+	resp = uploadTrackFiles(t, f.router, f.userB, gpx)
+	assert.Equal(t, 0, resp.Inserted, "re-uploading the same file adds nothing")
+	assert.Equal(t, 2, resp.Skipped)
+
+	assert.Nil(t, snapshotMedia(t, f.pool, f.mediaAUnlocated).lat, "B's upload never geolocates A's media")
+}
+
+func TestOwnership_GPSUploadKeepsActivityStartAndEnd(t *testing.T) {
+	// Loom puts an activity's start and end at the same (middle) time, where the unique
+	// (owner_id, source, recorded_at) key would keep only one of them.
+	f := newOwnershipFixture(t)
+	resp := uploadTrackFiles(t, f.router, f.userB, trackFile{"Timeline.json", `{"semanticSegments": [{
+		"startTime": "2024-05-03T12:00:00.000+02:00", "endTime": "2024-05-03T13:00:00.000+02:00",
+		"activity": {"start": {"latLng": "47.4979°, 19.0402°"}, "end": {"latLng": "48.2082°, 16.3738°"}}
+	}]}`})
+	assert.Equal(t, 2, resp.Inserted)
+	assert.Equal(t, 0, resp.Skipped)
 }
 
 // Positive controls for the mutating routes in TestOwnership_ForeignResourcesAreInvisible, so

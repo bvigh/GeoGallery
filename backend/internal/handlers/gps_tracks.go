@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
 
 	"codeberg.org/bvigh/geogallery/internal/auth"
+	"codeberg.org/bvigh/geogallery/internal/gpstrack"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -74,17 +76,7 @@ func (h *GPSTrackHandler) Import(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type validPoint struct {
-		recordedAt time.Time
-		lat        float64
-		lng        float64
-		source     string
-		altitudeM  *float64
-		accuracyM  *float64
-		activity   *string
-	}
-
-	var valid []validPoint
+	var valid []trackRow
 	var errs []rowError
 
 	for i, p := range points {
@@ -105,7 +97,7 @@ func (h *GPSTrackHandler) Import(w http.ResponseWriter, r *http.Request) {
 			errs = append(errs, rowError{Row: i, Reason: "invalid source: must not be empty"})
 			continue
 		}
-		valid = append(valid, validPoint{
+		valid = append(valid, trackRow{
 			recordedAt: t,
 			lat:        p.Lat,
 			lng:        p.Lng,
@@ -123,12 +115,44 @@ func (h *GPSTrackHandler) Import(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	for start := 0; start < len(valid); start += importBatchSize {
-		end := start + importBatchSize
-		if end > len(valid) {
-			end = len(valid)
+	inserted, err := h.insertRows(ctx, ownerID, valid)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	resp.Inserted = inserted
+	resp.Skipped = len(valid) - inserted
+
+	if len(valid) > 0 {
+		if err := h.runMatcher(ctx, h.matcherPool, ownerID, h.matchWindow, true); err != nil {
+			slog.Error("gps-tracks: GPS matcher failed after import", "err", err)
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
 		}
-		batch := valid[start:end]
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// trackRow is one validated gps_tracks row.
+type trackRow struct {
+	recordedAt time.Time
+	lat        float64
+	lng        float64
+	source     string
+	altitudeM  *float64
+	accuracyM  *float64
+	activity   *string
+}
+
+// insertRows inserts rows for ownerID in batches of importBatchSize and returns how many were
+// new; the rest already existed (same owner, source and recorded_at). It logs a failure.
+func (h *GPSTrackHandler) insertRows(ctx context.Context, ownerID string, rows []trackRow) (int, error) {
+	inserted := 0
+	for start := 0; start < len(rows); start += importBatchSize {
+		end := min(start+importBatchSize, len(rows))
+		batch := rows[start:end]
 
 		var sb strings.Builder
 		sb.WriteString(`INSERT INTO gps_tracks (owner_id, source, recorded_at, location, altitude_m, accuracy_m, activity) VALUES `)
@@ -148,22 +172,111 @@ func (h *GPSTrackHandler) Import(w http.ResponseWriter, r *http.Request) {
 		tag, err := h.db.Exec(ctx, sb.String(), args...)
 		if err != nil {
 			slog.Error("gps-tracks: batch insert failed", "batch_start", start, "err", err)
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return inserted, err
+		}
+		inserted += int(tag.RowsAffected())
+	}
+	return inserted, nil
+}
+
+var maxTrackUploadBytes int64 = 256 << 20 // var so tests can lower it
+
+type fileError struct {
+	File   string `json:"file"`
+	Reason string `json:"reason"`
+}
+
+type trackUploadResponse struct {
+	Inserted int         `json:"inserted"`
+	Skipped  int         `json:"skipped"`
+	Empty    []string    `json:"empty"`
+	Failed   []fileError `json:"failed"`
+}
+
+// Upload imports track files (multipart field "files") in any format gpstrack.Parse reads. Each
+// point's source is "<format>:<file name>", so re-uploading a file skips its points; a
+// GeoGallery JSON row keeps its own source. A file that cannot be read is reported in failed and
+// the rest still import; a file without a usable point is reported in empty. The matcher runs
+// once at the end.
+func (h *GPSTrackHandler) Upload(w http.ResponseWriter, r *http.Request) {
+	ownerID := auth.MustUser(r.Context()).ID
+	r.Body = http.MaxBytesReader(w, r.Body, maxTrackUploadBytes)
+	if err := r.ParseMultipartForm(uploadFormMaxMemory); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
 			return
 		}
-		inserted := int(tag.RowsAffected())
-		resp.Inserted += inserted
-		resp.Skipped += len(batch) - inserted
+		slog.Warn("gps-tracks: parse multipart form failed", "owner", ownerID, "err", err)
+		http.Error(w, `{"error":"invalid multipart form"}`, http.StatusBadRequest)
+		return
+	}
+	// RequireUser hands us a copy of the request, so net/http would not remove spooled parts.
+	defer func() {
+		if err := r.MultipartForm.RemoveAll(); err != nil {
+			slog.Error("gps-tracks: remove multipart temp files failed", "err", err)
+		}
+	}()
+
+	files := r.MultipartForm.File["files"]
+	if len(files) == 0 {
+		http.Error(w, `{"error":"no files"}`, http.StatusBadRequest)
+		return
 	}
 
-	if len(valid) > 0 {
+	ctx := r.Context()
+	resp := trackUploadResponse{Empty: []string{}, Failed: []fileError{}}
+	anyPoints := false
+	for _, fh := range files {
+		format, points, err := parseTrackFile(fh)
+		if err != nil {
+			slog.Error("gps-tracks: track file not imported", "owner", ownerID, "file", fh.Filename, "err", err)
+			resp.Failed = append(resp.Failed, fileError{File: fh.Filename, Reason: err.Error()})
+			continue
+		}
+		if len(points) == 0 {
+			resp.Empty = append(resp.Empty, fh.Filename)
+			continue
+		}
+		anyPoints = true
+
+		source := format + ":" + fh.Filename
+		rows := make([]trackRow, len(points))
+		for i, p := range points {
+			rows[i] = trackRow{recordedAt: p.Time, lat: p.Lat, lng: p.Lng, source: source,
+				altitudeM: p.AltitudeM, accuracyM: p.AccuracyM, activity: p.Activity}
+			if p.Source != "" {
+				rows[i].source = p.Source
+			}
+		}
+		inserted, err := h.insertRows(ctx, ownerID, rows)
+		if err != nil {
+			http.Error(w, `{"error":"insert failed"}`, http.StatusInternalServerError)
+			return
+		}
+		resp.Inserted += inserted
+		resp.Skipped += len(rows) - inserted
+	}
+
+	if anyPoints {
 		if err := h.runMatcher(ctx, h.matcherPool, ownerID, h.matchWindow, true); err != nil {
-			slog.Error("gps-tracks: GPS matcher failed after import", "err", err)
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			slog.Error("gps-tracks: GPS matcher failed after upload", "err", err)
+			http.Error(w, `{"error":"GPS matcher failed"}`, http.StatusInternalServerError)
 			return
 		}
 	}
+	slog.Info("gps-tracks: upload done", "owner", ownerID, "files", len(files),
+		"inserted", resp.Inserted, "skipped", resp.Skipped, "empty", len(resp.Empty), "failed", len(resp.Failed))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func parseTrackFile(fh *multipart.FileHeader) (string, []gpstrack.Point, error) {
+	f, err := fh.Open()
+	if err != nil {
+		return "", nil, err
+	}
+	defer f.Close()
+	return gpstrack.Parse(fh.Filename, f)
 }

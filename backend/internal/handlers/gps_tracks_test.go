@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -306,4 +307,201 @@ func TestImport_1001Rows_TwoDBBatches(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, 2, execCallCount)
+}
+
+// --- POST /api/gps-tracks/upload ---
+
+type trackFile struct{ name, content string }
+
+// postTrackFiles fires POST /api/gps-tracks/upload with one multipart "files" part per file.
+func postTrackFiles(h *GPSTrackHandler, files ...trackFile) *httptest.ResponseRecorder {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for _, f := range files {
+		fw, _ := mw.CreateFormFile("files", f.name)
+		fw.Write([]byte(f.content))
+	}
+	mw.Close()
+	r := httptest.NewRequest(http.MethodPost, "/api/gps-tracks/upload", &buf)
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	w := httptest.NewRecorder()
+	h.Upload(w, withTestUser(r))
+	return w
+}
+
+const (
+	walkGPX = `<gpx><trk><trkseg>
+	  <trkpt lat="47.5" lon="19.0"><time>2024-06-15T12:00:00Z</time></trkpt>
+	  <trkpt lat="47.6" lon="19.1"><time>2024-06-15T12:00:01Z</time></trkpt>
+	</trkseg></trk></gpx>`
+	driveNMEA = "$GPRMC,120000.000,A,4730.0000,N,01900.0000,E,0,0,150624,,,A*00\n"
+)
+
+// insertRecorder is a gpsTrackDB that records the source and owner of every inserted row and
+// reports them all as new.
+type insertRecorder struct {
+	sources []string
+	owners  []any
+	execs   int
+}
+
+func (d *insertRecorder) Exec(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+	d.execs++
+	for i := 0; i < len(args); i += 8 {
+		d.owners = append(d.owners, args[i])
+		d.sources = append(d.sources, args[i+1].(string))
+	}
+	return makeTag(len(args) / 8), nil
+}
+
+func decodeTrackUpload(t *testing.T, w *httptest.ResponseRecorder) trackUploadResponse {
+	t.Helper()
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var resp trackUploadResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	return resp
+}
+
+func TestTrackUpload_ParsesEachFileByExtension(t *testing.T) {
+	db := &insertRecorder{}
+	var matcherCalls int
+	var matcherOwner string
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour,
+		runMatcher: func(_ context.Context, _ matcherDB, ownerID string, _ time.Duration, reprocess bool) error {
+			matcherCalls++
+			matcherOwner = ownerID
+			assert.True(t, reprocess)
+			return nil
+		}}
+
+	resp := decodeTrackUpload(t, postTrackFiles(h,
+		trackFile{"walk.gpx", walkGPX},
+		trackFile{"FILE240615-120000.NMEA", driveNMEA},
+	))
+
+	assert.Equal(t, trackUploadResponse{Inserted: 3, Empty: []string{}, Failed: []fileError{}}, resp)
+	assert.Equal(t, []string{"gpx:walk.gpx", "gpx:walk.gpx", "nmea:FILE240615-120000.NMEA"}, db.sources,
+		"source is <format>:<file name>, so re-uploading the file skips its points")
+	assert.Equal(t, []any{testOwnerID, testOwnerID, testOwnerID}, db.owners)
+	assert.Equal(t, 2, db.execs, "one insert per file")
+	assert.Equal(t, 1, matcherCalls, "the matcher runs once per request")
+	assert.Equal(t, testOwnerID, matcherOwner)
+}
+
+func TestTrackUpload_ReportsFailedAndEmptyFiles(t *testing.T) {
+	db := &insertRecorder{}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour,
+		runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
+
+	resp := decodeTrackUpload(t, postTrackFiles(h,
+		trackFile{"notes.txt", "hello"},
+		trackFile{"broken.gpx", "<gpx><trk>"},
+		trackFile{"planned-route.gpx", `<gpx><trkpt lat="47.5" lon="19.0"/></gpx>`},
+		trackFile{"walk.gpx", walkGPX},
+	))
+
+	assert.Equal(t, 2, resp.Inserted, "the readable file still imports")
+	assert.Equal(t, []string{"planned-route.gpx"}, resp.Empty)
+	require.Len(t, resp.Failed, 2)
+	assert.Equal(t, "notes.txt", resp.Failed[0].File)
+	assert.Contains(t, resp.Failed[0].Reason, "unsupported file type")
+	assert.Equal(t, "broken.gpx", resp.Failed[1].File)
+	assert.True(t, strings.HasPrefix(resp.Failed[1].Reason, "gpx: "), resp.Failed[1].Reason)
+}
+
+func TestTrackUpload_NothingImportable_NoInsertNoMatcher(t *testing.T) {
+	db := &insertRecorder{}
+	matcherCalled := false
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour,
+		runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error {
+			matcherCalled = true
+			return nil
+		}}
+
+	resp := decodeTrackUpload(t, postTrackFiles(h, trackFile{"notes.txt", "x"}, trackFile{"empty.nmea", ""}))
+
+	assert.Equal(t, 0, resp.Inserted)
+	assert.Equal(t, []string{"empty.nmea"}, resp.Empty)
+	assert.Len(t, resp.Failed, 1)
+	assert.Zero(t, db.execs)
+	assert.False(t, matcherCalled)
+}
+
+func TestTrackUpload_GeoGalleryJSONKeepsRowSource(t *testing.T) {
+	db := &insertRecorder{}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour,
+		runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
+
+	decodeTrackUpload(t, postTrackFiles(h, trackFile{"points.json", `[
+		{"recorded_at": "2024-06-15T12:00:00Z", "lat": 47.5, "lng": 19.0, "source": "gpx:tracks/Strava/1.gpx"},
+		{"recorded_at": "2024-06-15T12:00:01Z", "lat": 47.6, "lng": 19.1}
+	]`}))
+
+	assert.Equal(t, []string{"gpx:tracks/Strava/1.gpx", "geogallery:points.json"}, db.sources)
+}
+
+func TestTrackUpload_DuplicatesCountedAsSkipped(t *testing.T) {
+	db := &mockGPSTrackDB{execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+		return makeTag(0), nil // both points were imported before
+	}}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour,
+		runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
+
+	resp := decodeTrackUpload(t, postTrackFiles(h, trackFile{"walk.gpx", walkGPX}))
+
+	assert.Equal(t, 0, resp.Inserted)
+	assert.Equal(t, 2, resp.Skipped)
+}
+
+func TestTrackUpload_BadRequests(t *testing.T) {
+	h := &GPSTrackHandler{db: &insertRecorder{}, matchWindow: time.Hour,
+		runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
+
+	w := postTrackFiles(h)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "no files")
+
+	r := httptest.NewRequest(http.MethodPost, "/api/gps-tracks/upload", strings.NewReader(`[]`))
+	r.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	h.Upload(w, withTestUser(r))
+	assert.Equal(t, http.StatusBadRequest, w.Code, "not multipart")
+}
+
+func TestTrackUpload_BodyTooLarge_Returns413(t *testing.T) {
+	assert.Equal(t, int64(256<<20), maxTrackUploadBytes)
+	orig := maxTrackUploadBytes
+	maxTrackUploadBytes = 1024
+	t.Cleanup(func() { maxTrackUploadBytes = orig })
+
+	db := &insertRecorder{}
+	h := &GPSTrackHandler{db: db, matchWindow: time.Hour,
+		runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error { return nil }}
+
+	w := postTrackFiles(h, trackFile{"walk.gpx", walkGPX + strings.Repeat(" ", 2048)})
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+	assert.Zero(t, db.execs)
+}
+
+func TestTrackUpload_InsertOrMatcherFailure_Returns500(t *testing.T) {
+	failingDB := &mockGPSTrackDB{execFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+		return pgconn.CommandTag{}, fmt.Errorf("connection reset")
+	}}
+	matcherCalled := false
+	h := &GPSTrackHandler{db: failingDB, matchWindow: time.Hour,
+		runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error {
+			matcherCalled = true
+			return nil
+		}}
+	w := postTrackFiles(h, trackFile{"walk.gpx", walkGPX})
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.NotContains(t, w.Body.String(), "connection reset", "DB errors stay in the log")
+	assert.False(t, matcherCalled)
+
+	h = &GPSTrackHandler{db: &insertRecorder{}, matchWindow: time.Hour,
+		runMatcher: func(_ context.Context, _ matcherDB, _ string, _ time.Duration, _ bool) error {
+			return fmt.Errorf("matcher down")
+		}}
+	w = postTrackFiles(h, trackFile{"walk.gpx", walkGPX})
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }

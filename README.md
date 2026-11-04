@@ -182,6 +182,7 @@ Every route except those marked *public* needs a session cookie or an API token 
 | `GET` | `/api/game/round` | user | Get a random geolocated media item; supports same filters as `/api/media`; 404 when none |
 | `POST` | `/api/game/guess` | user | Submit a guess, receive scored result |
 | `POST` | `/api/gps-tracks/import` | user | Bulk-insert GPS track points (JSON array) |
+| `POST` | `/api/gps-tracks/upload` | user | Import track files (multipart `files`: GPX, TCX, KML/KMZ, GeoJSON, NMEA, Google Timeline, Samsung Health, …) |
 | `POST` | `/api/gps-matcher/run` | user | Re-run GPS matcher over your media |
 | `GET` | `/api/tokens` | session | List your API tokens |
 | `POST` | `/api/tokens` | session | Create a token `{"name":"...","expires_in_days":90}`; plaintext returned once |
@@ -212,9 +213,21 @@ Files are deduplicated per user by a partial hash (first + last 64 KB), so re-sc
 
 ## Importing external GPS tracks
 
-From the browser: **Upload** tab → **GPS track import (JSON)**.
+From the browser: **Upload** tab → **GPS track import**. Select any number of track files; the page sends them in batches to `POST /api/gps-tracks/upload`. The format is chosen by file extension:
 
-From a script, use a personal API token (see below):
+| Extension | Format |
+|---|---|
+| `.gpx` | GPX track points (Strava, Komoot, …); points without a time are skipped |
+| `.tcx` | Garmin Training Center XML (Strava export) |
+| `.kml`, `.kmz` | Google Earth / Google Maps history: `gx:Track`, and placemarks with a `TimeSpan` or `TimeStamp` (a `LineString`'s vertices are spread evenly over the span) |
+| `.geojson` | Google Takeout history: `Point` and `LineString` features with a `timespan` property |
+| `.json` | An object: Google Maps Timeline export (`semanticSegments`). An array: Samsung Health `location_data`, or the `/import` format below |
+| `.nmea` | NMEA 0183 (dashcams): RMC sentences with an active fix |
+| `.log` | esoko CSV log (`time,speed,heading,latitude,longitude,altitude`, header optional) |
+
+Any of them may be gzipped (`.gpx.gz`, `.json.gz`, …). Each point's `source` is `<format>:<file name>`, so uploading a file again adds nothing. Files that cannot be read are listed with the reason; the rest still import. One request is limited to 256 MiB.
+
+From a script, upload files the same way (`curl -F files=@ride.gpx -F files=@Zeitachse.json …/api/gps-tracks/upload`), or post points as JSON with a personal API token (see below):
 
 ```bash
 curl -X POST https://<your-site>/api/gps-tracks/import \

@@ -6,7 +6,7 @@ import type {
   CreatedApiToken,
   CurrentUser,
   DirectoryUser,
-  GpsImportResult,
+  GpsUploadResult,
   OrientationKeyframe,
 } from "@/types";
 
@@ -153,13 +153,12 @@ async function knownHashes(hashes: string[]): Promise<Record<string, string>> {
   return data.known;
 }
 
-async function importGpsTracks(file: File): Promise<GpsImportResult> {
-  const res = await request("/gps-tracks/import", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: file,
-  });
-  if (!res.ok) throw new ApiError(`POST /gps-tracks/import failed: ${res.status}`, res.status);
+// Track files in any format the backend reads (GPX, TCX, KML, NMEA, ...), as one multipart request.
+async function uploadGpsTracks(files: File[]): Promise<GpsUploadResult> {
+  const form = new FormData();
+  for (const file of files) form.append("files", file);
+  const res = await request("/gps-tracks/upload", { method: "POST", body: form });
+  if (!res.ok) throw new ApiError(`POST /gps-tracks/upload failed: ${res.status}`, res.status);
   return res.json();
 }
 
@@ -253,7 +252,7 @@ export const api = {
   logout,
   upload,
   knownHashes,
-  importGpsTracks,
+  uploadGpsTracks,
   listTokens,
   createToken,
   revokeToken,

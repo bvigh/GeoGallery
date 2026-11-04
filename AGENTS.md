@@ -26,6 +26,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `backend/internal/handlers/gps_matcher.go` | `RunGPSMatcher` — interpolates GPS from the owner's `gps_tracks` into `media.location` |
 | `backend/internal/handlers/trip_detect.go` | `RunTripDetect` — groups one owner's media into trips by time gap |
 | `backend/internal/ingest/exif.go` | EXIF extraction + 360° detection + `DetectMediaType` |
+| `backend/internal/gpstrack/` | Track file parsers for `POST /api/gps-tracks/upload`: `Parse(name, r)` picks GPX, TCX, KML/KMZ, GeoJSON, NMEA, esoko `.log` or a `.json` format (Google Timeline object; Samsung Health or GeoGallery array) by extension, any of them `.gz`. Unreadable and out-of-range points are skipped |
 | `backend/internal/geo/gps.go` | GPS interpolation (Haversine + confidence scoring) |
 | `backend/internal/storage/s3.go` | S3/MinIO client wrapper (presigned GETs, 15 min) |
 | `backend/migrations/` | golang-migrate SQL, numbered `000001_…`; `000009_albums` adds `albums`, `album_members`, `album_media` and `media_id_owner_key` |
@@ -47,7 +48,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `frontend/src/lib/mediaHash.ts` | `mediaHash`: the backend's `file_hash` computed in the browser (Web Crypto), so the Upload page skips files already in the library; `canHashFiles` |
 | `frontend/src/lib/trips.ts` | `groupTripsByYear`: the filter panel's year groups (newest first, undated last, server order inside) |
 | `frontend/src/lib/video.ts` | `videoDecodeFailed` (data loaded but a 0×0 picture, or a decode/unsupported media error) and `useVideoDecodeCheck` (handlers for a `<video>`, keyed by src) |
-| `frontend/src/pages/` | One file per tab: MapPage, TripsPage ("Add to album…" per trip), AlbumsPage (album cards, members dialog with a searchable user list and leave, gallery), GamePage, UploadPage (duplicate pre-check by hash, optional "Add to album" through `AlbumPickerDialog`), SettingsPage (API tokens), AdminPage (users, invites) |
+| `frontend/src/pages/` | One file per tab: MapPage, TripsPage ("Add to album…" per trip), AlbumsPage (album cards, members dialog with a searchable user list and leave, gallery), GamePage, UploadPage (duplicate pre-check by hash, optional "Add to album" through `AlbumPickerDialog`; GPS track files sent in batches of ≤ 32 MiB and ≤ 500 files), SettingsPage (API tokens), AdminPage (users, invites) |
 | `frontend/public/privacy.html`, `terms.html` | Static privacy policy and terms of service (public, no login; linked from `LoginScreen`, required for Google sign-in). Update them when the data the app stores, its providers or retention change |
 | `frontend/public/video-playback.html` | Static guide for browsers that cannot decode HEVC (Chromium on Linux needs GPU decoding through VA-API, or use Firefox ≥ 137); linked from `VideoDecodeNotice` |
 | `frontend/e2e/` | Playwright suite: `playwright.config.ts`, `support.ts` (`E2E_BACKEND_ENV`), `auth.setup.ts`, `*.e2e.ts`; `sharing.e2e.ts` runs in its own `sharing` project after all others |
@@ -125,6 +126,7 @@ Auth column:
 | `GET` | `/api/game/round` | user | Random geolocated readable media (own + shared); supports the same filters as `/api/media`, including `album_id[]` and `owner`; `max_dist_km` spans the same filtered set; 404 when none, 400 on malformed filters |
 | `POST` | `/api/game/guess` | user | Submit a guess on a readable item, returns scores; 404 if the item is no longer readable |
 | `POST` | `/api/gps-tracks/import` | user | Bulk-insert GPS track points (JSON array of `{recorded_at, lat, lng, source, altitude_m?, accuracy_m?, activity?}`, body limit 100 MiB); returns `{inserted, skipped, errors}`; runs GPS matcher after insert |
+| `POST` | `/api/gps-tracks/upload` | user | Import track files (multipart `files`, body limit 256 MiB) through `gpstrack.Parse`; each point's source is `<format>:<file name>` (a GeoGallery JSON row keeps its own), so a re-upload is skipped. Returns `{inserted, skipped, empty, failed: [{file, reason}]}`: an unreadable file is listed in `failed` and the others still import. Runs the GPS matcher once if any file had points |
 | `POST` | `/api/gps-matcher/run` | user | Re-run GPS matcher over the caller's media that has no EXIF or manual location (including previously interpolated rows) |
 | `GET` | `/api/tokens` | session-only | List the caller's API tokens (never hash or plaintext) |
 | `POST` | `/api/tokens` | session-only | `{"name", "expires_in_days"?: 1–365, default 90}` → 201 with plaintext `token` once; max 25 active (409) |
@@ -231,7 +233,7 @@ OIDC_SCOPES               # default: openid profile email (space-separated)
 SESSION_TTL_HOURS         # default: 720 — absolute session lifetime, no sliding refresh
 ```
 
-Docker Compose only (root `.env`): `POSTGRES_*`, `MINIO_*`, `FRONTEND_PORT` (default 5173), `KEYCLOAK_PORT` (default 8180, bound to 127.0.0.1), `KEYCLOAK_ADMIN` / `KEYCLOAK_ADMIN_PASSWORD` (default `admin`/`admin`). The compose backend service does **not** pass through `OIDC_SCOPES`, `SESSION_TTL_HOURS`, `GPS_MATCH_WINDOW_HOURS`, `TRIP_GAP_HOURS`, `LOG_LEVEL` or `LOG_FORMAT`. With a managed IdP, set `OIDC_DISCOVERY_URL` equal to `OIDC_ISSUER_URL`. `S3_ENDPOINT` is hard-coded to `http://minio:9000` in `docker-compose.yml`, a container-only hostname, so presigned URLs do not resolve in browsers. For a hosted instance, edit it there to a browser-reachable S3 host (known gap).
+Docker Compose only (root `.env`): `POSTGRES_*`, `MINIO_*`, `FRONTEND_PORT` (default 5173), `KEYCLOAK_PORT` (default 8180, bound to 127.0.0.1), `KEYCLOAK_ADMIN` / `KEYCLOAK_ADMIN_PASSWORD` (default `admin`/`admin`). The compose backend service does **not** pass through `OIDC_SCOPES`, `SESSION_TTL_HOURS`, `GPS_MATCH_WINDOW_HOURS`, `TRIP_GAP_HOURS`, `LOG_LEVEL` or `LOG_FORMAT`. With a managed IdP, set `OIDC_DISCOVERY_URL` equal to `OIDC_ISSUER_URL`. `S3_ENDPOINT` is hard-coded to `http://minio:9000` in `docker-compose.yml`, a container-only hostname, so presigned URLs do not resolve in browsers. For a hosted instance, edit it there to a browser-reachable S3 host (known gap). The `db` service sets `shm_size: 256mb`: Docker's default 64 MB `/dev/shm` is too small for a parallel `VACUUM` of `gps_tracks` at the default 64 MB `maintenance_work_mem`.
 
 Copy `.env.example` to `backend/.env` for local development. The backend loads it with godotenv, which fills only variables that are unset.
 
@@ -289,6 +291,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 **Backend — unit tests (no external deps, always run)**
 - `internal/ingest/exif_test.go`, `video_test.go` — EXIF extraction, media type detection, video probing
 - `internal/geo/gps_test.go` — GPS interpolation
+- `internal/gpstrack/*_test.go` — every track format, extension dispatch, `.gz`, the expansion limit, the Google Timeline activity start/end times, headerless esoko logs
 - `internal/config/config_test.go` — `PUBLIC_URL` normalisation, refusing dev secrets over https
 - `internal/httplog/httplog_test.go` — logged line has the path, never the query
 - `internal/auth/handlers_test.go` — login/callback/logout against `oidctest` + in-memory fake store (`fakestore_test.go`): state/nonce/signature, `return_to`, invites, prompt rules, userinfo fallback, session rotation, logout hint
@@ -298,7 +301,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `cmd/server/compress_integration_test.go` — `GET /api/media` is gzipped through the real router, other routes are not (needs `TEST_DATABASE_URL`)
 - `internal/handlers/admin_test.go` — admin handlers
 - `internal/handlers/gps_matcher_test.go`, `gps_matcher_handler_test.go` — GPS matcher logic and handler
-- `internal/handlers/gps_tracks_test.go` — GPS track import endpoint
+- `internal/handlers/gps_tracks_test.go` — GPS track import and upload endpoints (per-file source, failed and empty files, one matcher run)
 - `internal/handlers/media_test.go`, `upload_scan_matcher_test.go` — media list/upload/scan/dedup flow, owner propagation, opaque keys, owner fields and `trip_id` only on own rows, `rows.Err()` → 500, upload `?album_id` (refused before the body, duplicates added), `registerMedia` looking up the hash before uploading (a duplicate is never uploaded; a concurrent one is deleted again), `KnownHashes` validation and owner scoping
 - `internal/handlers/media_hash_test.go` — `mediaHash` equals the original streaming hash at every size edge, tail read errors, and the shared vectors in `frontend/src/lib/mediaHash.vectors.json`
 - `internal/handlers/media_delete_test.go`, `media_location_test.go` — delete and manual location
@@ -315,7 +318,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `internal/db/migrations_integration_test.go` — migrate to 6, seed, up, assert backfill, down/up round trip; migration 9 up/down with populated album tables
 - `internal/db/albums_schema_integration_test.go` — the album FKs and cascades (contributor must be a member and the media owner; member removal, album and media deletion)
 - `internal/auth/store_integration_test.go` — invite consumption and claim races, `SetDisabled` (incl. creator's invites), sessions/tokens refused for inactive users, `RebindIssuer`, token SQL
-- `internal/handlers/ownership_integration_test.go` — cross-user isolation on every route, matcher/trip-detection scoping, per-owner dedup, `known-hashes` finds only the caller's own media (not shared ones), composite FK
+- `internal/handlers/ownership_integration_test.go` — cross-user isolation on every route (GPS track upload included: owner, coordinates, re-upload skipped, activity start and end both stored), matcher/trip-detection scoping, per-owner dedup, `known-hashes` finds only the caller's own media (not shared ones), composite FK
 - `internal/handlers/ingest_scan_integration_test.go` — `RunIngestScan` ownership, re-run skip (nothing re-uploaded), per-owner dedup, failure count, no orphan objects
 - `internal/handlers/albums_integration_test.go` — every album route: create/list (incl. the caller's `last_added_at`), rename, delete keeps media, members, remove/leave, disabled users keep memberships, album media add/remove, `/api/media/{id}/albums`, `/api/users`
 - `internal/handlers/sharing_integration_test.go` — read access follows membership, members cannot write shared media, filters on shared rows, owner fields, GPS isolation, trip detection ignores shared media
