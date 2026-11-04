@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -145,15 +146,39 @@ func runSubcommand(name string, args []string, stdout io.Writer) int {
 			if scanDir == "" {
 				scanDir = env.cfg.IngestWatchDir
 			}
+			logCameraTimezone(env.cfg)
 			deps := handlers.NewIngestDeps(env.pool, env.s3,
-				time.Duration(env.cfg.GPSMatchWindowHours)*time.Hour, env.cfg.TripGapHours)
+				time.Duration(env.cfg.GPSMatchWindowHours)*time.Hour, env.cfg.TripGapHours, env.cfg.CameraTimezone)
 			scan := func(ctx context.Context, dir, ownerID string) (handlers.ScanResult, error) {
 				return handlers.RunIngestScan(ctx, deps, dir, ownerID)
 			}
 			return runScan(ctx, stdout, scan, users, *userID, scanDir)
 		}
+	case "retime":
+		userID := fs.String("user", "", "id of the user whose media are re-read (see `server users`)")
+		apply := fs.Bool("apply", false, "write the changes; without it the command only lists them")
+		needS3 = true
+		check = func() error {
+			if *userID == "" {
+				return errors.New("--user is required (find the id with `server users`)")
+			}
+			return nil
+		}
+		run = func(ctx context.Context, env cmdEnv) error {
+			users, err := env.store.ListUsers(ctx)
+			if err != nil {
+				return err
+			}
+			logCameraTimezone(env.cfg)
+			deps := handlers.NewRetimeDeps(env.pool, env.s3, env.cfg.CameraTimezone,
+				time.Duration(env.cfg.GPSMatchWindowHours)*time.Hour, env.cfg.TripGapHours)
+			retime := func(ctx context.Context, ownerID string, report func(handlers.RetimeChange)) (handlers.RetimeResult, error) {
+				return handlers.RunRetime(ctx, deps, ownerID, *apply, report)
+			}
+			return runRetime(ctx, stdout, retime, users, *userID, *apply, env.cfg.CameraTimezone)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (available: invite, rebind-issuer, users, scan; no command starts the server)\n", name)
+		fmt.Fprintf(os.Stderr, "unknown command %q (available: invite, rebind-issuer, users, scan, retime; no command starts the server)\n", name)
 		return 2
 	}
 
@@ -231,6 +256,64 @@ func runScan(ctx context.Context, stdout io.Writer, scan scanFunc, users []auth.
 	return nil
 }
 
+type retimeFunc func(ctx context.Context, ownerID string, report func(handlers.RetimeChange)) (handlers.RetimeResult, error)
+
+// runRetime checks that the user exists, then prints a tab-separated line per change, with times
+// in the camera timezone, and the counts on stdout. Any user is accepted, including a disabled or
+// unclaimed one: their media's times are just as wrong. A dry run (apply false) writes nothing and
+// says so. An error, an interrupt or a failed item makes the command exit 1.
+func runRetime(ctx context.Context, stdout io.Writer, retime retimeFunc, users []auth.UserRecord, userID string, apply bool, zone *time.Location) error {
+	userID = strings.ToLower(userID)
+	if !slices.ContainsFunc(users, func(u auth.UserRecord) bool { return u.ID == userID }) {
+		return fmt.Errorf("unknown user %q (list users with `server users`)", userID)
+	}
+	fmt.Fprintln(stdout, "media_id\tfilename\told\tnew\tshift\tzone\tgps_source")
+	res, err := retime(ctx, userID, func(c handlers.RetimeChange) {
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c.MediaID, c.Filename,
+			c.Old.In(zone).Format(time.RFC3339), c.New.In(zone).Format(time.RFC3339),
+			formatShift(c.New.Sub(c.Old)), c.Zone, dash(c.GPSSource))
+	})
+	fmt.Fprintf(stdout, "checked=%d retimed=%d unchanged=%d not_exif=%d mismatched=%d failed=%d\n",
+		res.Checked, res.Retimed, res.Unchanged, res.NotExif, res.Mismatch, res.Failed)
+	if !apply {
+		fmt.Fprintln(stdout, "dry run: nothing was written; re-run with --apply to write these changes")
+	}
+	switch {
+	case ctx.Err() != nil:
+		return errors.New("interrupted; re-run retime to finish")
+	case err != nil:
+		return err
+	case res.Failed > 0:
+		return fmt.Errorf("%d item(s) failed; see the errors above", res.Failed)
+	}
+	return nil
+}
+
+// formatShift renders a whole-minute shift as +1h, -2h or -5h30m.
+func formatShift(d time.Duration) string {
+	sign := "+"
+	if d < 0 {
+		sign, d = "-", -d
+	}
+	h, m := d/time.Hour, (d%time.Hour)/time.Minute
+	if m == 0 {
+		return fmt.Sprintf("%s%dh", sign, h)
+	}
+	return fmt.Sprintf("%s%dh%02dm", sign, h, m)
+}
+
+// logCameraTimezone states the zone EXIF times are read in, and warns when CAMERA_TIMEZONE is unset
+// and the server runs in UTC (a container without TZ), which is what made times an hour or two off.
+func logCameraTimezone(cfg *config.Config) {
+	abbrev, offset := time.Now().In(cfg.CameraTimezone).Zone()
+	if cfg.CameraTimezoneFallsBackToUTC() {
+		slog.Warn("CAMERA_TIMEZONE is unset and the server runs in UTC, so photo times without a usable GPS timestamp are read as UTC; set CAMERA_TIMEZONE to the zone camera clocks show, e.g. Europe/Warsaw")
+		return
+	}
+	slog.Info("camera timezone", "zone", cfg.CameraTimezone.String(), "set", cfg.CameraTimezoneSet,
+		"now", fmt.Sprintf("%s (%+.1fh)", abbrev, float64(offset)/3600))
+}
+
 func writeUsersTable(w io.Writer, users []auth.UserRecord) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "id\trole\tstatus\temail\tdisplay_name")
@@ -296,9 +379,10 @@ func serve() {
 
 	store := auth.NewPGStore(pool)
 	authH := auth.New(store, provider, cfg)
+	logCameraTimezone(cfg)
 	matchWindow := time.Duration(cfg.GPSMatchWindowHours) * time.Hour
 	h := routeHandlers{
-		media:      handlers.NewMediaHandler(pool, s3Client, matchWindow, cfg.TripGapHours),
+		media:      handlers.NewMediaHandler(pool, s3Client, matchWindow, cfg.TripGapHours, cfg.CameraTimezone),
 		trips:      handlers.NewTripHandler(pool, cfg.TripGapHours),
 		game:       handlers.NewGameHandler(pool, s3Client),
 		gpsTracks:  handlers.NewGPSTrackHandler(pool, matchWindow),

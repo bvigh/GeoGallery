@@ -34,6 +34,9 @@ type registrarStorage interface {
 type MediaRegistrar struct {
 	db      registrarDB
 	storage registrarStorage
+	// cameraZone is CAMERA_TIMEZONE, the zone EXIF capture times are read in when the photo's GPS
+	// clock does not say otherwise (ingest.ExtractExif). nil reads them as UTC.
+	cameraZone *time.Location
 }
 
 // registerMedia stores one media file for ownerID and returns its media ID. inserted is false when
@@ -59,7 +62,7 @@ func (r *MediaRegistrar) registerMedia(
 	}
 
 	ext := strings.ToLower(filepath.Ext(filename))
-	exifData := ingest.ExtractExif(bytes.NewReader(head))
+	exifData := ingest.ExtractExif(bytes.NewReader(head), r.cameraZone)
 	// Insta360 and similar cameras write moov at end of file, so EXIF dimension extraction from
 	// the head alone fails, and the video is probed with ffprobe instead.
 	probeVideo := ingest.IsVideoExt(ext) && exifData.WidthPx == nil

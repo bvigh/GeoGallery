@@ -72,7 +72,7 @@ func newTestRouter(t *testing.T) http.Handler {
 	require.NoError(t, cop.AddTrustedOrigin(cfg.PublicOrigin))
 	store := routeStore{}
 	h := routeHandlers{
-		media:      handlers.NewMediaHandler(nil, nil, time.Hour, 24),
+		media:      handlers.NewMediaHandler(nil, nil, time.Hour, 24, time.UTC),
 		trips:      handlers.NewTripHandler(nil, 24),
 		game:       handlers.NewGameHandler(nil, nil),
 		gpsTracks:  handlers.NewGPSTrackHandler(nil, time.Hour),
@@ -196,6 +196,9 @@ func TestRunSubcommand_UsageErrors(t *testing.T) {
 		{"rebind same issuer", "rebind-issuer", []string{"--from", "a", "--to", "a"}},
 		{"scan without --user", "scan", nil},
 		{"scan stray argument", "scan", []string{"--user", "u", "extra"}},
+		{"retime without --user", "retime", nil},
+		{"retime --apply without --user", "retime", []string{"--apply"}},
+		{"retime stray argument", "retime", []string{"--user", "u", "extra"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -285,5 +288,105 @@ func TestRunScan(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
+	}
+}
+
+func TestRunRetime(t *testing.T) {
+	warsaw, err := time.LoadLocation("Europe/Warsaw")
+	require.NoError(t, err)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	change := handlers.RetimeChange{
+		MediaID: "m-1", Filename: "P1011841.JPG",
+		Old:  time.Date(2018, 10, 23, 11, 50, 53, 0, time.UTC),
+		New:  time.Date(2018, 10, 23, 9, 50, 53, 0, time.UTC),
+		Zone: "camera", GPSSource: "manual",
+	}
+	unlocated := change
+	unlocated.MediaID, unlocated.GPSSource = "m-2", ""
+	const header = "media_id\tfilename\told\tnew\tshift\tzone\tgps_source\n"
+	const line1 = "m-1\tP1011841.JPG\t2018-10-23T13:50:53+02:00\t2018-10-23T11:50:53+02:00\t-2h\tcamera\tmanual\n"
+	const line2 = "m-2\tP1011841.JPG\t2018-10-23T13:50:53+02:00\t2018-10-23T11:50:53+02:00\t-2h\tcamera\t-\n"
+	const dryRun = "dry run: nothing was written; re-run with --apply to write these changes\n"
+
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		userID     string
+		apply      bool
+		changes    []handlers.RetimeChange
+		res        handlers.RetimeResult
+		retimeErr  error
+		wantCalled bool
+		wantOut    string
+		wantErr    string
+	}{
+		{"dry run lists the changes", context.Background(), "active-user", false,
+			[]handlers.RetimeChange{change, unlocated}, handlers.RetimeResult{Checked: 5, Retimed: 2, Unchanged: 1, NotExif: 1, Mismatch: 1}, nil,
+			true, header + line1 + line2 + "checked=5 retimed=2 unchanged=1 not_exif=1 mismatched=1 failed=0\n" + dryRun, ""},
+		{"apply", context.Background(), "active-user", true,
+			[]handlers.RetimeChange{change}, handlers.RetimeResult{Checked: 1, Retimed: 1}, nil,
+			true, header + line1 + "checked=1 retimed=1 unchanged=0 not_exif=0 mismatched=0 failed=0\n", ""},
+		{"failed items exit non-zero", context.Background(), "active-user", true,
+			nil, handlers.RetimeResult{Checked: 2, Unchanged: 1, Failed: 1}, nil,
+			true, header + "checked=2 retimed=0 unchanged=1 not_exif=0 mismatched=0 failed=1\n", "1 item(s) failed"},
+		{"retime error", context.Background(), "active-user", true,
+			nil, handlers.RetimeResult{}, errors.New("gps matcher: boom"),
+			true, header + "checked=0 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", "gps matcher: boom"},
+		{"interrupted", cancelled, "active-user", true,
+			nil, handlers.RetimeResult{Checked: 1}, context.Canceled,
+			true, header + "checked=1 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", "interrupted; re-run retime to finish"},
+		{"unclaimed owner of pre-auth data accepted", context.Background(), auth.LegacyOwnerID, true,
+			nil, handlers.RetimeResult{}, nil,
+			true, header + "checked=0 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", ""},
+		{"disabled user accepted", context.Background(), "disabled-user", true,
+			nil, handlers.RetimeResult{}, nil,
+			true, header + "checked=0 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", ""},
+		{"unknown user refused before reading anything", context.Background(), "nobody", true,
+			nil, handlers.RetimeResult{}, nil,
+			false, "", `unknown user "nobody"`},
+		{"uppercase id normalised", context.Background(), "ACTIVE-USER", true,
+			nil, handlers.RetimeResult{}, nil,
+			true, header + "checked=0 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			retime := func(_ context.Context, ownerID string, report func(handlers.RetimeChange)) (handlers.RetimeResult, error) {
+				called = true
+				assert.Equal(t, strings.ToLower(tt.userID), ownerID)
+				for _, c := range tt.changes {
+					report(c)
+				}
+				return tt.res, tt.retimeErr
+			}
+			var out bytes.Buffer
+			err := runRetime(tt.ctx, &out, retime, scanUsers(), tt.userID, tt.apply, warsaw)
+			assert.Equal(t, tt.wantCalled, called)
+			assert.Equal(t, tt.wantOut, out.String())
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestFormatShift(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{-2 * time.Hour, "-2h"},
+		{time.Hour, "+1h"},
+		{-(5*time.Hour + 30*time.Minute), "-5h30m"},
+		{45 * time.Minute, "+0h45m"},
+		{0, "+0h"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, formatShift(tt.d), tt.d.String())
 	}
 }
