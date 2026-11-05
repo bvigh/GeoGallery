@@ -47,12 +47,12 @@ type MediaHandler struct {
 	runTripDetect func(ctx context.Context, db tripDetectDB, ownerID string, gapHours int) error
 }
 
-func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Duration, tripGapHours int) *MediaHandler {
+func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Duration, tripGapHours int, cameraZone *time.Location) *MediaHandler {
 	return &MediaHandler{
 		db:            db,
 		pool:          db,
 		storage:       s,
-		registrar:     &MediaRegistrar{db: db, storage: s},
+		registrar:     &MediaRegistrar{db: db, storage: s, cameraZone: cameraZone},
 		matcherPool:   db,
 		matchWindow:   matchWindow,
 		tripGapHours:  tripGapHours,

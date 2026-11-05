@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -11,7 +12,7 @@ func setBaseEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DATABASE_URL", "postgres://x@localhost/db")
 	for _, k := range []string{"PUBLIC_URL", "OIDC_ISSUER_URL", "OIDC_DISCOVERY_URL", "OIDC_CLIENT_ID",
-		"OIDC_CLIENT_SECRET", "OIDC_SCOPES", "SESSION_TTL_HOURS", "S3_ACCESS_KEY", "S3_SECRET_KEY"} {
+		"OIDC_CLIENT_SECRET", "OIDC_SCOPES", "SESSION_TTL_HOURS", "S3_ACCESS_KEY", "S3_SECRET_KEY", "CAMERA_TIMEZONE"} {
 		t.Setenv(k, "")
 	}
 }
@@ -29,6 +30,8 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, DevOIDCClientSecret, cfg.OIDCClientSecret)
 	assert.Equal(t, []string{"openid", "profile", "email"}, cfg.OIDCScopes)
 	assert.Equal(t, 720, cfg.SessionTTLHours)
+	assert.Same(t, time.Local, cfg.CameraTimezone, "unset, the server's own zone")
+	assert.False(t, cfg.CameraTimezoneSet)
 }
 
 func TestLoad_PublicURL(t *testing.T) {
@@ -64,6 +67,7 @@ func TestLoad_PublicURL(t *testing.T) {
 			t.Setenv("OIDC_CLIENT_SECRET", "real-secret")
 			t.Setenv("S3_ACCESS_KEY", "real-access")
 			t.Setenv("S3_SECRET_KEY", "real-secret-key")
+			t.Setenv("CAMERA_TIMEZONE", "Europe/Warsaw")
 			cfg, err := Load()
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -93,13 +97,15 @@ func TestLoad_RefusesDevSecretsOverHTTPS(t *testing.T) {
 		secret    string
 		access    string
 		secretKey string
+		zone      string
 		wantErr   bool
 	}{
-		{"https with real secrets", "https://g.example.com", "s", "a", "k", false},
-		{"https with dev oidc secret", "https://g.example.com", "", "a", "k", true},
-		{"https with minioadmin access key", "https://g.example.com", "s", "", "k", true},
-		{"https with minioadmin secret key", "https://g.example.com", "s", "a", "", true},
-		{"http with dev secrets", "http://localhost:5173", "", "", "", false},
+		{"https with real secrets", "https://g.example.com", "s", "a", "k", "Europe/Warsaw", false},
+		{"https with dev oidc secret", "https://g.example.com", "", "a", "k", "Europe/Warsaw", true},
+		{"https with minioadmin access key", "https://g.example.com", "s", "", "k", "Europe/Warsaw", true},
+		{"https with minioadmin secret key", "https://g.example.com", "s", "a", "", "Europe/Warsaw", true},
+		{"https without a camera zone", "https://g.example.com", "s", "a", "k", "", true},
+		{"http with dev secrets", "http://localhost:5173", "", "", "", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -108,6 +114,7 @@ func TestLoad_RefusesDevSecretsOverHTTPS(t *testing.T) {
 			t.Setenv("OIDC_CLIENT_SECRET", tt.secret)
 			t.Setenv("S3_ACCESS_KEY", tt.access)
 			t.Setenv("S3_SECRET_KEY", tt.secretKey)
+			t.Setenv("CAMERA_TIMEZONE", tt.zone)
 			_, err := Load()
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -116,6 +123,23 @@ func TestLoad_RefusesDevSecretsOverHTTPS(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Over https the production server must state its camera zone: a deployment that leaves it out
+// would otherwise read photo times in whatever zone the host happens to run in.
+func TestLoad_RefusesHTTPSWithoutCameraTimezone(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv("PUBLIC_URL", "https://g.example.com")
+	t.Setenv("OIDC_CLIENT_SECRET", "real-secret")
+	t.Setenv("S3_ACCESS_KEY", "real-access")
+	t.Setenv("S3_SECRET_KEY", "real-secret-key")
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to start over https without CAMERA_TIMEZONE")
+
+	t.Setenv("CAMERA_TIMEZONE", "Europe/Warsaw")
+	_, err = Load()
+	assert.NoError(t, err)
 }
 
 func TestLoad_SessionTTL(t *testing.T) {
@@ -140,6 +164,59 @@ func TestLoad_SessionTTL(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, cfg.SessionTTLHours)
+		})
+	}
+}
+
+func TestLoad_CameraTimezone(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr string
+	}{
+		{"IANA name", "Europe/Warsaw", "Europe/Warsaw", ""},
+		{"UTC", "UTC", "UTC", ""},
+		{"unknown zone fails startup", "Europe/Atlantis", "", `CAMERA_TIMEZONE "Europe/Atlantis"`},
+		{"an offset is not a zone", "+02:00", "", `CAMERA_TIMEZONE "+02:00"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("CAMERA_TIMEZONE", tt.raw)
+			cfg, err := Load()
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.CameraTimezone.String())
+			assert.True(t, cfg.CameraTimezoneSet)
+		})
+	}
+}
+
+func TestCameraTimezoneFallsBackToUTC(t *testing.T) {
+	warsaw, err := time.LoadLocation("Europe/Warsaw")
+	require.NoError(t, err)
+	london, err := time.LoadLocation("Europe/London")
+	require.NoError(t, err)
+	tests := []struct {
+		name string
+		zone *time.Location
+		set  bool
+		want bool
+	}{
+		{"unset and the server runs in UTC", time.UTC, false, true},
+		{"unset and the server has a zone", warsaw, false, false},
+		{"unset, UTC in winter only", london, false, false},
+		{"UTC chosen explicitly", time.UTC, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{CameraTimezone: tt.zone, CameraTimezoneSet: tt.set}
+			assert.Equal(t, tt.want, cfg.CameraTimezoneFallsBackToUTC())
 		})
 	}
 }

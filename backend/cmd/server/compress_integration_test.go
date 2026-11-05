@@ -40,7 +40,7 @@ func TestRouter_MediaListIsGzipped(t *testing.T) {
 	cfg := &config.Config{PublicOrigin: "http://localhost:5173", SessionTTLHours: 720}
 	store := compressStore{userID: userID}
 	h := routeHandlers{
-		media:  handlers.NewMediaHandler(pool, nil, time.Hour, 24),
+		media:  handlers.NewMediaHandler(pool, nil, time.Hour, 24, time.UTC),
 		albums: handlers.NewAlbumHandler(pool),
 	}
 	router := newRouter(http.NewCrossOriginProtection(), auth.New(store, nil, cfg), h)

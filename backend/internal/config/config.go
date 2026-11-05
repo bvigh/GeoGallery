@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -27,6 +28,12 @@ type Config struct {
 	TripGapHours        int
 	LogLevel            string
 	LogFormat           string
+
+	// CameraTimezone is the zone camera clocks are assumed to show: a photo's EXIF time carries no
+	// usable zone, so ingest reads it here unless the photo's GPS clock says otherwise. From
+	// CAMERA_TIMEZONE (an IANA name); unset, the server's own zone (TZ or /etc/localtime).
+	CameraTimezone    *time.Location
+	CameraTimezoneSet bool // CAMERA_TIMEZONE was set
 
 	PublicURL        string // normalised to scheme://host[:port]
 	PublicOrigin     string // CSRF trusted origin, redirect_uri and post-logout URI base
@@ -61,6 +68,15 @@ func Load() (*Config, error) {
 	}
 	cfg.OIDCDiscoveryURL = getEnv("OIDC_DISCOVERY_URL", cfg.OIDCIssuerURL)
 
+	cfg.CameraTimezone = time.Local
+	if name := os.Getenv("CAMERA_TIMEZONE"); name != "" {
+		loc, err := time.LoadLocation(name)
+		if err != nil {
+			return nil, fmt.Errorf("CAMERA_TIMEZONE %q: %w", name, err)
+		}
+		cfg.CameraTimezone, cfg.CameraTimezoneSet = loc, true
+	}
+
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
@@ -78,6 +94,9 @@ func Load() (*Config, error) {
 	}
 
 	if cfg.CookieSecure {
+		if !cfg.CameraTimezoneSet {
+			return nil, errors.New("refusing to start over https without CAMERA_TIMEZONE: set it to the zone your camera clocks show, e.g. Europe/Warsaw; photo times must not depend on the server's zone")
+		}
 		if cfg.OIDCClientSecret == DevOIDCClientSecret {
 			return nil, errors.New("refusing to start over https with the dev OIDC_CLIENT_SECRET")
 		}
@@ -87,6 +106,22 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// CameraTimezoneFallsBackToUTC reports whether CAMERA_TIMEZONE is unset and the server's own zone
+// is UTC all year, as in a container without TZ: photo times would then be read as UTC, which is
+// rarely what a camera clock shows.
+func (c *Config) CameraTimezoneFallsBackToUTC() bool {
+	if c.CameraTimezoneSet {
+		return false
+	}
+	year := time.Now().Year()
+	for _, month := range []time.Month{time.January, time.July} {
+		if _, offset := time.Date(year, month, 1, 12, 0, 0, 0, c.CameraTimezone).Zone(); offset != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // normalisePublicURL trims one trailing slash and rejects anything beyond scheme://host[:port]:
