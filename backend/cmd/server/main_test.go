@@ -72,7 +72,7 @@ func newTestRouter(t *testing.T) http.Handler {
 	require.NoError(t, cop.AddTrustedOrigin(cfg.PublicOrigin))
 	store := routeStore{}
 	h := routeHandlers{
-		media:      handlers.NewMediaHandler(nil, nil, time.Hour, 24),
+		media:      handlers.NewMediaHandler(nil, nil, time.Hour, 24, time.UTC),
 		trips:      handlers.NewTripHandler(nil, 24),
 		game:       handlers.NewGameHandler(nil, nil),
 		gpsTracks:  handlers.NewGPSTrackHandler(nil, time.Hour),

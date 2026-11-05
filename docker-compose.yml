@@ -102,6 +102,7 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-geogallery}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-geogallery-dev-secret}
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:${FRONTEND_PORT:-5173}}
+      CAMERA_TIMEZONE: ${CAMERA_TIMEZONE:-}
     ports:
       - "${SERVER_PORT:-8080}:8080"
     volumes:

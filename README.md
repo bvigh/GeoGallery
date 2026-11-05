@@ -211,6 +211,10 @@ Folder ingest is an operator command, not an HTTP endpoint. It reads the server'
 
 Files are deduplicated per user by a partial hash (first + last 64 KB), so re-scanning is always safe. It refuses unknown, disabled and unclaimed users.
 
+### Capture times and `CAMERA_TIMEZONE`
+
+A photo's EXIF time is a wall-clock reading without a usable timezone. The backend reads it in `CAMERA_TIMEZONE` (an IANA name such as `Europe/Warsaw`). When the photo carries a GPS timestamp that puts the camera clock within two minutes of a real UTC offset, it uses that offset instead, so phone photos taken abroad come out right. `OffsetTimeOriginal` is ignored: some cameras write a fixed offset all year. Unset, `CAMERA_TIMEZONE` falls back to the server's own zone, which is UTC in Docker; the backend warns about that at startup. Over https the backend refuses to start without `CAMERA_TIMEZONE`, so a production server cannot drift silently.
+
 ## Importing external GPS tracks
 
 From the browser: **Upload** tab → **GPS track import**. Select any number of track files; the page sends them in batches to `POST /api/gps-tracks/upload`. The format is chosen by file extension:
@@ -311,5 +315,6 @@ Defaults work out of the box for local development. Copy `.env.example` to `.env
 | `TRIP_GAP_HOURS` | `24` | Time gap (hours) that splits media into separate trips (native only; not passed through by `docker-compose.yml`) |
 | `LOG_LEVEL` | `info` | Backend log level: `debug`, `info`, `warn`, `error` (native only; not passed through by `docker-compose.yml`) |
 | `LOG_FORMAT` | `text` | Backend log format: `text` (human-readable) or `json` (structured) (native only; not passed through by `docker-compose.yml`) |
+| `CAMERA_TIMEZONE` | the server's zone (UTC in Docker) | IANA zone that camera clocks show, e.g. `Europe/Warsaw`; EXIF times are read in it unless the photo's GPS timestamp gives the offset |
 
 Changing `KEYCLOAK_PORT` or `FRONTEND_PORT` requires matching redirect and post-logout URIs in `deploy/keycloak/geogallery-realm.json`, and `PUBLIC_URL` / `OIDC_ISSUER_URL` must match the new ports if you set them (compose derives them from the ports when unset). Keycloak imports the realm only when it does not exist yet, and its state lives in the `keycloak_data` volume. To apply realm edits, remove the container and that volume (`docker compose --profile dev rm -sf keycloak && docker volume rm geogallery_keycloak_data`, where the prefix is your compose project name), then start it again. The test users' IDs are pinned, so existing GeoGallery accounts keep working.

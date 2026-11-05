@@ -303,6 +303,7 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
       SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-720}
+      CAMERA_TIMEZONE: ${CAMERA_TIMEZONE}
     volumes:
       - ./ingest:/ingest
     # no ports: only nginx reaches the backend, over the compose network
@@ -370,6 +371,10 @@ S3_SECRET_KEY=<hetzner secret key>
 OIDC_ISSUER_URL=https://auth.example.com/oidc
 OIDC_CLIENT_ID=<Logto App ID>
 OIDC_CLIENT_SECRET=<Logto App secret>
+
+# The zone camera clocks show. Required: over https the backend refuses to start without it.
+# Without it, every photo time without a usable GPS timestamp would be read in the container's UTC.
+CAMERA_TIMEZONE=Europe/Warsaw
 ```
 
 Run `chmod 600 .env`. Because `PUBLIC_URL` is https, the backend refuses to start with the dev OIDC secret or `minioadmin` credentials, so a forgotten value fails loudly.

@@ -145,8 +145,9 @@ func runSubcommand(name string, args []string, stdout io.Writer) int {
 			if scanDir == "" {
 				scanDir = env.cfg.IngestWatchDir
 			}
+			logCameraTimezone(env.cfg)
 			deps := handlers.NewIngestDeps(env.pool, env.s3,
-				time.Duration(env.cfg.GPSMatchWindowHours)*time.Hour, env.cfg.TripGapHours)
+				time.Duration(env.cfg.GPSMatchWindowHours)*time.Hour, env.cfg.TripGapHours, env.cfg.CameraTimezone)
 			scan := func(ctx context.Context, dir, ownerID string) (handlers.ScanResult, error) {
 				return handlers.RunIngestScan(ctx, deps, dir, ownerID)
 			}
@@ -231,6 +232,18 @@ func runScan(ctx context.Context, stdout io.Writer, scan scanFunc, users []auth.
 	return nil
 }
 
+// logCameraTimezone states the zone EXIF times are read in, and warns when CAMERA_TIMEZONE is unset
+// and the server runs in UTC (a container without TZ), which is what made times an hour or two off.
+func logCameraTimezone(cfg *config.Config) {
+	abbrev, offset := time.Now().In(cfg.CameraTimezone).Zone()
+	if cfg.CameraTimezoneFallsBackToUTC() {
+		slog.Warn("CAMERA_TIMEZONE is unset and the server runs in UTC, so photo times without a usable GPS timestamp are read as UTC; set CAMERA_TIMEZONE to the zone camera clocks show, e.g. Europe/Warsaw")
+		return
+	}
+	slog.Info("camera timezone", "zone", cfg.CameraTimezone.String(), "set", cfg.CameraTimezoneSet,
+		"now", fmt.Sprintf("%s (%+.1fh)", abbrev, float64(offset)/3600))
+}
+
 func writeUsersTable(w io.Writer, users []auth.UserRecord) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "id\trole\tstatus\temail\tdisplay_name")
@@ -296,9 +309,10 @@ func serve() {
 
 	store := auth.NewPGStore(pool)
 	authH := auth.New(store, provider, cfg)
+	logCameraTimezone(cfg)
 	matchWindow := time.Duration(cfg.GPSMatchWindowHours) * time.Hour
 	h := routeHandlers{
-		media:      handlers.NewMediaHandler(pool, s3Client, matchWindow, cfg.TripGapHours),
+		media:      handlers.NewMediaHandler(pool, s3Client, matchWindow, cfg.TripGapHours, cfg.CameraTimezone),
 		trips:      handlers.NewTripHandler(pool, cfg.TripGapHours),
 		game:       handlers.NewGameHandler(pool, s3Client),
 		gpsTracks:  handlers.NewGPSTrackHandler(pool, matchWindow),
