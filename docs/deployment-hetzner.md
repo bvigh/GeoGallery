@@ -373,7 +373,7 @@ OIDC_CLIENT_ID=<Logto App ID>
 OIDC_CLIENT_SECRET=<Logto App secret>
 
 # The zone camera clocks show. Required: over https the backend refuses to start without it.
-# Without it, every photo time without a usable GPS timestamp would be read in the container's UTC.
+# Without it, every photo time without a usable GPS timestamp or offset tag would be read in the container's UTC.
 CAMERA_TIMEZONE=Europe/Warsaw
 ```
 

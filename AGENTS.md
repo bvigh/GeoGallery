@@ -10,7 +10,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 
 | Path | Purpose |
 |---|---|
-| `backend/cmd/server/main.go` | Entrypoint, route wiring, operator subcommands (`invite`, `rebind-issuer`, `users`, `scan`) |
+| `backend/cmd/server/main.go` | Entrypoint, route wiring, operator subcommands (`invite`, `rebind-issuer`, `users`, `scan`, `retime`, `video-locations`) |
 | `backend/internal/config/config.go` | All env config — add new vars here |
 | `backend/internal/auth/` | OIDC login/callback/logout/me (`handlers.go`), discovery (`oidc.go`), `RequireUser`/`RequireSession`/`RequireAdmin` (`middleware.go`), `Store` interface + `PGStore` (`store.go`), API token handlers (`tokens.go`), session/invite/API token generation + `CanonicalUUID` (`token.go`), invites (`invite.go`), `User`/`Method`/`MustUser` (`user.go`), `safeReturnTo` (`returnto.go`) |
 | `backend/internal/auth/oidctest/` | In-process OIDC test issuer |
@@ -23,13 +23,15 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `backend/internal/handlers/albums.go` | `AlbumHandler`: albums, members, album media, `GET /api/media/{id}/albums`, the `GET /api/users` directory; `authorize` (non-member 404, member on an owner-only action 403) |
 | `backend/internal/handlers/register.go` | `MediaRegistrar.registerMedia` — shared ingest path for upload and scan, returns `(mediaID, inserted, err)`; `mediaHash` (the frozen `file_hash` definition); `newStorageKey` |
 | `backend/internal/handlers/ingest.go` | `RunIngestScan` + `NewIngestDeps` (called by `server scan`; no HTTP route) |
+| `backend/internal/handlers/retime.go` | `RunRetime` + `NewRetimeDeps` (called by `server retime`): re-reads EXIF capture times and corrects `taken_at`, moving the item's `exif`/`manual` track point with it |
+| `backend/internal/handlers/video_locations.go` | `RunVideoLocations` + `NewVideoLocationDeps` (called by `server video-locations`): gives stored videos the position in their own container tag; `denseLogConfidence` |
 | `backend/internal/handlers/gps_matcher.go` | `RunGPSMatcher` — interpolates GPS from the owner's `gps_tracks` into `media.location` |
 | `backend/internal/handlers/trip_detect.go` | `RunTripDetect` — groups one owner's media into trips by time gap |
 | `backend/internal/ingest/exif.go` | EXIF extraction (capture time: see "`taken_at` Fallback Priority") + 360° detection + `DetectMediaType` |
-| `backend/internal/ingest/exiftest/` | Test helper: builds small JPEGs with chosen EXIF tags (capture time, offset, GPS position and timestamp) |
+| `backend/internal/ingest/exiftest/` | Test helper: builds small JPEGs with chosen EXIF tags (make, capture time, offset, GPS position and timestamp) and optionally an Exif IFD goexif rejects |
 | `backend/internal/gpstrack/` | Track file parsers for `POST /api/gps-tracks/upload`: `Parse(name, r)` picks GPX, TCX, KML/KMZ, GeoJSON, NMEA, esoko `.log` or a `.json` format (Google Timeline object; Samsung Health or GeoGallery array) by extension, any of them `.gz`. Unreadable and out-of-range points are skipped |
 | `backend/internal/geo/gps.go` | GPS interpolation (Haversine + confidence scoring) |
-| `backend/internal/storage/s3.go` | S3/MinIO client wrapper (presigned GETs, 15 min) |
+| `backend/internal/storage/s3.go` | S3/MinIO client wrapper (presigned GETs, 15 min; `ReadHead`, a ranged GET of an object's first bytes) |
 | `backend/migrations/` | golang-migrate SQL, numbered `000001_…`; `000009_albums` adds `albums`, `album_members`, `album_media` and `media_id_owner_key` |
 | `deploy/keycloak/geogallery-realm.json` | Dev/E2E Keycloak realm (client + test users alice/bob/carol, self-registration on). Dev only |
 | `docs/auth.md` | Identity provider setup (Logto, other providers, production Keycloak), API tokens, port hardening |
@@ -68,7 +70,9 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `cd backend && go run ./cmd/server users` | List users: `id  role  status(active\|disabled\|unclaimed)  email  display_name` |
 | `cd backend && go run ./cmd/server scan --user <id> [--dir <path>]` | Ingest `INGEST_WATCH_DIR` (or `--dir`) into that user's library, then run matcher + trip detection. Prints `ingested=N skipped=M failed=K`; exit 1 on any failure or interrupt |
 | `cd backend && go run ./cmd/server rebind-issuer --from <old> --to <new>` | Rewrite `users.issuer` after the IdP's issuer URL changed (same `sub`); prints rows changed |
-| `docker compose exec backend ./server <invite\|users\|scan\|rebind-issuer> …` | The same subcommands in Docker (`./ingest` is mounted at `/ingest`) |
+| `cd backend && go run ./cmd/server retime --user <id> [--apply]` | Re-read the EXIF capture time of that user's media and correct `taken_at` (see "`taken_at` Fallback Priority"). Without `--apply` it only lists the changes. Prints a tab-separated line per change, then `checked=N retimed=N unchanged=N not_exif=N mismatched=N failed=N`; exit 1 on any failure or interrupt |
+| `cd backend && go run ./cmd/server video-locations --user <id> [--apply]` | Give that user's videos the position in their own container tag (see "Video location tag"). Without `--apply` it only lists the changes. Prints a tab-separated line per change, then `checked=N located=N dense_log=N no_tag=N failed=N`; exit 1 on any failure or interrupt |
+| `docker compose exec backend ./server <invite\|users\|scan\|retime\|video-locations\|rebind-issuer> …` | The same subcommands in Docker (`./ingest` is mounted at `/ingest`) |
 | `cd frontend && npm install && npm run dev` | Run frontend dev server (proxies `/api` → `VITE_API_TARGET`, default `http://localhost:8080`) |
 | `cd frontend && npm run build` | Production build (`tsc -b && vite build`) |
 | `cd frontend && npm run lint` | ESLint (known broken: no `eslint.config.*`; fix separately) |
@@ -152,7 +156,7 @@ There is no HTTP ingest route. Folder scans are `server scan --user <id>` only.
   - Media **writes** keep a literal `owner_id = $n` and never use `readableMediaCond`: location, view settings, keyframes PUT, delete. A member touching a shared item gets 404.
   - Trips are personal: trip filters (including `unassigned`) are ANDed with `m.owner_id = $1`, and `trip_id` is returned as `NULL` for media the caller does not own.
   - Only an item's owner contributes it to an album, and only while a member: album media inserts select `FROM media m WHERE m.owner_id = $me`, and the composite FKs on `album_media` enforce it in the database.
-  - `RunGPSMatcher`, `RunTripDetect` and `RunIngestScan` take an `ownerID`. Never match one user's media against another user's tracks.
+  - `RunGPSMatcher`, `RunTripDetect`, `RunIngestScan`, `RunRetime` and `RunVideoLocations` take an `ownerID`. Never match one user's media against another user's tracks.
 - **GPS stays per owner.** `RunGPSMatcher` (its media query and `bracketingPoints`), `insertExifGPSTrack` and `auto_detect_trips`/`RunTripDetect` keep their literal `owner_id` filters and must **never** use `readableMediaCond`. Media shared with a user through an album are not that user's rows: their matcher must neither write to them nor read their locations as track points, and their trip detection must never assign them. Comments in `gps_matcher.go` and `trip_detect.go` say so; `TestSharing_GPSIsolation` and `TestSharing_TripDetectIgnoresSharedMedia` pin it.
 - **Auth methods.** `auth.MethodFrom(ctx)` is `MethodSession` (cookie) or `MethodToken` (Bearer `gg_pat_…`). The zero value `MethodNone` never counts as a session. Session-only routes: `DELETE /api/media/{id}`, `DELETE /api/trips/{id}`, `DELETE /api/albums/{id}`, `POST /api/albums/{id}/members`, `DELETE /api/albums/{id}/members/{user_id}`, `GET /api/users`, `/api/tokens*`, `/api/admin/*`. Granting or revoking album access and listing users' emails need a session, so an API token can never widen who sees the data. A `Bearer` header is authoritative; other schemes fall through to the cookie.
 - **Secrets in logs.** Never log tokens (session, invite, API), ID tokens, query strings or `Authorization` headers. Invite tokens and OIDC `code`/`state` travel in query strings, which is why the request logger (`internal/httplog`) logs `r.URL.Path` only. Tokens are stored as sha256 hashes.
@@ -215,12 +219,32 @@ Both ingest paths follow the same order:
 
 **The EXIF time is a wall clock without a zone.** `takenAt` in `exif.go` picks the offset and never uses the server's own zone:
 - The photo's GPS clock: `GPSDateStamp` + `GPSTimeStamp` (UTC). It is used when wall minus GPS lands within `gpsClockTolerance` (2 min) of a real UTC offset (whole hours, or the fractional offsets in `fractionalOffsets`). A stale fix (minutes or days old, 1970-01-01) falls through.
+- Otherwise `OffsetTimeOriginal`, trusted unless the photo's make is in `offsetIgnoredMakes`. It follows a phone abroad, and many phones (the Galaxy S24 on every photo) write no GPS timestamp. The Panasonic DC-TZ200 is exempt: it writes `+01:00` all year, even while its clock shows summer time. The value alone cannot separate it from a phone in London, so the exemption goes by make. An offset that is blank or not in real use (`isRealOffset`) falls through.
 - Otherwise `CAMERA_TIMEZONE` (`MediaRegistrar.cameraZone`; nil reads UTC), with that zone's DST on that date.
-- `OffsetTimeOriginal` is deliberately ignored: the Panasonic DC-TZ200 writes `+01:00` all year.
 
-`ExifData.TakenAtZone` says which one applied (`ingest.ZoneGPS`, `ingest.ZoneCamera`). Never call goexif's `x.DateTime()`, which falls back to `time.Local`. Before `CAMERA_TIMEZONE`, a Docker server read every EXIF time as UTC.
+`ExifData.TakenAtZone` says which one applied (`ingest.ZoneGPS`, `ingest.ZoneOffset`, `ingest.ZoneCamera`). Never call goexif's `x.DateTime()`, which falls back to `time.Local`. Before `CAMERA_TIMEZONE`, a Docker server read every EXIF time as UTC.
+
+`ExtractExif` keeps what it could read after a non-critical goexif error: old Sony cameras write an Exif IFD goexif rejects, and their IFD0 `DateTime` is still right. A critical error (say, a corrupt IFD0) leaves no EXIF at all, so the file time is used.
+
+`server retime --user <id> [--apply]` repairs rows ingested under older rules:
+- It reads the same 1 MB head of each object again (`storage.ReadHead`) and runs `ExtractExif`.
+- It changes only rows whose stored `taken_at` is that EXIF wall clock in some quarter-hour offset (`sameWallClock`). Other rows count as `not_exif` or `mismatched` and stay as they are.
+- Per change, in one transaction, it:
+  - clears an interpolated location;
+  - moves the item's `exif` point (if the EXIF has a position) and `manual` point (if `gps_source = 'manual'`), writing the item's own position at the new time. Nothing is created where no point existed. The old point stays while another item that could own it is still at that second, and is then given that item's position;
+  - when a point moved, clears interpolated locations within the match window of its old time, videos included.
+- It then runs `RunGPSMatcher` and `RunTripDetect` for the owner on every `--apply`, so a re-run finishes an interrupted one.
+- A `taken_at` corrected by hand with SQL is undone by the next `--apply` when it is the EXIF wall clock in another offset. A camera whose clock was wrong needs a rule in `takenAt`, not a one-off shift.
+
+For a video, `taken_at` is the container's `creation_time`. On Samsung phones that is when the recording ended (about 2 s after start + duration), so it sits later than the time in the filename. Insta360 files do not behave this way, so it is not corrected.
 
 Future: filename-based timestamp guessing (not yet implemented).
+
+## Video location tag
+
+`ingest.parseProbeOutput` reads a video's position from the container's `location`, `location-eng` or `com.apple.quicktime.location.ISO6709` tag: ISO 6709 in decimal degrees. The degrees-and-minutes forms and `+00.0000+000.0000/` (no fix) are refused. `registerMedia` stores it with `gps_source = 'exif'`, which covers everything read from the file itself. It makes **no track point**: the tag can be the phone's last known fix and `taken_at` is the end of the recording, so the pair is too loose to place other media.
+
+`server video-locations --user <id> [--apply]` backfills stored videos through ffprobe on a presigned URL (`ingest.ProbeURL`; ranged requests, nothing downloaded whole, and the URL never reaches a log). It changes only videos with no location or an interpolated one. An interpolation with `gps_confidence >= denseLogConfidence` stays: that is a GPS log recording during the clip, and it beats the tag. On a real library, where such a log existed, the interpolation lay on it and 4 of 16 tags were 400 m to 4 km off it. Known limit: a newly ingested video keeps its tag even when a dense log covers it, because the matcher leaves `exif` rows alone. The tags from 2022 on agreed with the log to within 20 m; the bad ones all date from 2017.
 
 ## Environment
 
@@ -289,7 +313,7 @@ Changing `KEYCLOAK_PORT` or `FRONTEND_PORT` requires matching `redirectUris` / `
   - Deleting an album cascades its members and contributions; the media rows are never touched.
 - **Trip detection** is the SQL function `auto_detect_trips(p_owner UUID, gap_hours INT)`. It only touches that owner's auto trips.
 - Users are never deleted, only disabled (`ON DELETE RESTRICT` on owned data).
-- GPS resolution priority: EXIF → timestamp-interpolated from the owner's `gps_tracks` → null. Never from another user's tracks or shared media.
+- GPS resolution priority: EXIF (for a video, its container's location tag) → timestamp-interpolated from the owner's `gps_tracks` → null. Never from another user's tracks or shared media.
 
 ## Unimplemented Work (in priority order)
 
@@ -306,7 +330,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 **Tests are required for all new and modified code.**
 
 **Backend — unit tests (no external deps, always run)**
-- `internal/ingest/exif_test.go`, `video_test.go` — EXIF extraction, capture time (camera zone with DST, the GPS clock abroad and at fractional offsets, stale and 1970 GPS fixes rejected, `OffsetTimeOriginal` ignored, the result independent of the process's own zone), media type detection, video probing
+- `internal/ingest/exif_test.go`, `video_test.go` — EXIF extraction, capture time (camera zone with DST, the GPS clock abroad and at fractional offsets, stale and 1970 GPS fixes rejected, `OffsetTimeOriginal` trusted except for exempt makes, a broken Exif IFD, the result independent of the process's own zone), media type detection, video probing, ISO 6709 location tags, `ProbeURL` over HTTP
 - `internal/geo/gps_test.go` — GPS interpolation
 - `internal/gpstrack/*_test.go` — every track format, extension dispatch, `.gz`, the expansion limit, the Google Timeline activity start/end times, headerless esoko logs
 - `internal/config/config_test.go` — `PUBLIC_URL` normalisation, refusing dev secrets over https, `CAMERA_TIMEZONE` (unknown zone fails, the UTC fallback check, refusal over https without it)
@@ -314,12 +338,15 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `internal/auth/handlers_test.go` — login/callback/logout against `oidctest` + in-memory fake store (`fakestore_test.go`): state/nonce/signature, `return_to`, invites, prompt rules, userinfo fallback, session rotation, logout hint
 - `internal/auth/middleware_test.go` — cookie and Bearer cases, `RequireSession`, `RequireAdmin`
 - `internal/auth/tokens_test.go`, `invite_test.go`, `oidc_test.go`, `returnto_test.go`
-- `cmd/server/main_test.go` — route wiring (token → 403 on session-only routes, album routes included), `scan` user checks and exit behaviour, `users` table
+- `cmd/server/main_test.go` — route wiring (token → 403 on session-only routes, album routes included), `scan` user checks and exit behaviour, `retime` and `video-locations` output, user check and exit behaviour, `users` table
 - `cmd/server/compress_integration_test.go` — `GET /api/media` is gzipped through the real router, other routes are not (needs `TEST_DATABASE_URL`)
 - `internal/handlers/admin_test.go` — admin handlers
 - `internal/handlers/gps_matcher_test.go`, `gps_matcher_handler_test.go` — GPS matcher logic and handler
 - `internal/handlers/gps_tracks_test.go` — GPS track import and upload endpoints (per-file source, failed and empty files, one matcher run)
-- `internal/handlers/register_exif_time_test.go` — `registerMedia` stores the EXIF time in the camera zone (or by the GPS clock), on the row and on the `exif` track point
+- `internal/handlers/register_exif_time_test.go` — `registerMedia` stores the EXIF time in the camera zone (or by the GPS clock or `OffsetTimeOriginal`), on the row and on the `exif` track point
+- `internal/handlers/register_video_location_test.go` — `registerMedia` with real ffmpeg and ffprobe: a video's location tag becomes its location, zeros and no tag leave none, never a track point
+- `internal/handlers/retime_test.go` — `sameWallClock`
+- `internal/storage/s3_test.go` — `ReadHead`
 - `internal/handlers/media_test.go`, `upload_scan_matcher_test.go` — media list/upload/scan/dedup flow, owner propagation, opaque keys, owner fields and `trip_id` only on own rows, `rows.Err()` → 500, upload `?album_id` (refused before the body, duplicates added), `registerMedia` looking up the hash before uploading (a duplicate is never uploaded; a concurrent one is deleted again), `KnownHashes` validation and owner scoping
 - `internal/handlers/media_hash_test.go` — `mediaHash` equals the original streaming hash at every size edge, tail read errors, and the shared vectors in `frontend/src/lib/mediaHash.vectors.json`
 - `internal/handlers/media_delete_test.go`, `media_location_test.go` — delete and manual location
@@ -341,6 +368,15 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `internal/handlers/albums_integration_test.go` — every album route: create/list (incl. the caller's `last_added_at`), rename, delete keeps media, members, remove/leave, disabled users keep memberships, album media add/remove, `/api/media/{id}/albums`, `/api/users`
 - `internal/handlers/sharing_integration_test.go` — read access follows membership, members cannot write shared media, filters on shared rows, owner fields, GPS isolation, trip detection ignores shared media
 - `internal/handlers/filters_integration_test.go` — `/api/media` and `/api/game/round` filters, canonical ID binding, OFFSET pages hold every item once
+- `internal/handlers/retime_integration_test.go` — `RunRetime`:
+  - apply, with a dry run that writes nothing and a re-run that changes nothing;
+  - only the owner's rows, tracks and trips;
+  - interpolated, manual and EXIF locations;
+  - unreadable objects and interrupted runs;
+  - track points shared by bursts or by an unrelated item at the old second;
+  - interpolations resting on a moved point (videos included);
+  - `OffsetTimeOriginal`: a phone abroad moves, the Panasonic and a phone at home stay, a broken Exif IFD
+- `internal/handlers/video_locations_integration_test.go` — `RunVideoLocations`: which rows change, dense-log, manual and EXIF locations kept, no track points, owner scoping, dry run, re-run, a manual edit during the run, interruption
 - `internal/handlers/upload_album_integration_test.go` — upload `?album_id` refused before the body is read, new files and duplicates added (duplicates never reach S3), `registerMedia` returns the existing ID
 - Use `testing` + [testify](https://github.com/stretchr/testify) (`assert`/`require`). Test files live alongside source.
 - Pure logic tests use no external deps. Handler tests use `net/http/httptest`.
@@ -381,6 +417,6 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - **Leaflet/OSM over Google Maps** — no API key required, fully offline-capable.
 - **chi over Gin/Echo** — handlers are plain `http.Handler`, zero lock-in, composes with stdlib middleware.
 - **File mtime as upload fallback** — EXIF `DateTime` preferred; browser sends `file_mtime[]` (ms-since-epoch) so the server can use real file mtime instead of `time.Now()`.
-- **Capture times in a configured camera zone, not the server's.** EXIF times have no reliable zone. `CAMERA_TIMEZONE` decides unless the photo's own GPS clock gives the offset; `OffsetTimeOriginal` is ignored because a camera with daylight saving switched off writes the wrong one. On a real library, the GPS clock agreed with the camera zone on every accepted reading, and the 2-minute tolerance rejected every stale fix.
+- **Capture times in a configured camera zone, not the server's.** EXIF times have no reliable zone. `CAMERA_TIMEZONE` decides unless the photo's own GPS clock or `OffsetTimeOriginal` gives the offset. The offset is trusted by default, because a phone's is right even abroad, and exempt by make, because a camera with daylight saving switched off writes the wrong one. On a real library, the GPS clock agreed with the camera zone on every accepted reading, the 2-minute tolerance rejected every stale fix, and all Samsung offsets were right.
 - **Partial hash dedup** — the size plus (roughly) the first and last 64 KB are hashed, so dedup never reads the full file; see `mediaHash` for the exact, frozen definition. The browser computes the same hash and asks `POST /api/media/known-hashes` first, so a re-upload sends only new files; the server still hashes everything it receives, so a wrong browser hash costs only bandwidth.
 - **Relative scoring** — game location score is relative to the geographic spread of the media collection (`max_dist_km` from `NewRound`), not a fixed global scale; GPS confidence adjusts tolerance. With `owner` unset the spread includes shared media, so a friend's far-away album changes the scale; `owner=mine` restores own-only scoring.

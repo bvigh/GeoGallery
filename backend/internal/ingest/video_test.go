@@ -1,14 +1,121 @@
 package ingest
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestParseISO6709(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       string
+		lat, lng float64
+		ok       bool
+	}{
+		{"north west, as a Samsung phone writes it", "+51.5074-000.1278/", 51.5074, -0.1278, true},
+		{"north east", "+46.0000+008.0000/", 46.0, 8.0, true},
+		{"south west", "-33.4489-070.6693/", -33.4489, -70.6693, true},
+		{"with an altitude", "+47.4979+019.0402+120.00/", 47.4979, 19.0402, true},
+		{"whole degrees", "+47+019/", 47, 19, true},
+		{"trailing bytes after the slash", "+47.4979+019.0402/\xff\xfe", 47.4979, 19.0402, true},
+		{"no fix", "+00.0000+000.0000/", 0, 0, false},
+		{"no fix, with trailing bytes", "+00.0000+000.0000/\xff\xfe", 0, 0, false},
+		{"latitude out of range", "+91.0000+019.0402/", 0, 0, false},
+		{"longitude out of range", "+47.0000+181.0000/", 0, 0, false},
+		{"degrees and minutes are not read as degrees", "+4729.87+01902.41/", 0, 0, false},
+		{"empty", "", 0, 0, false},
+		{"not a position", "London", 0, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lat, lng, ok := parseISO6709(tt.in)
+			assert.Equal(t, tt.ok, ok)
+			assert.InDelta(t, tt.lat, lat, 1e-9)
+			assert.InDelta(t, tt.lng, lng, 1e-9)
+		})
+	}
+}
+
+func TestParseProbeOutput_Location(t *testing.T) {
+	const stream = `{"streams":[{"width":1920,"height":1080}],"format":{"tags":`
+	tests := []struct {
+		name string
+		tags string
+		lat  float64
+	}{
+		{"location", `{"location":"+51.5074-000.1278/"}`, 51.5074},
+		{"location-eng only", `{"location-eng":"+51.5074-000.1278/"}`, 51.5074},
+		{"QuickTime key", `{"com.apple.quicktime.location.ISO6709":"+51.5074-000.1278+050.000/"}`, 51.5074},
+		{"a tag without a fix does not hide a real one", `{"location":"+00.0000+000.0000/","location-eng":"+51.5074-000.1278/"}`, 51.5074},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseProbeOutput([]byte(stream + tt.tags + `}}`))
+			require.NotNil(t, result.Lat)
+			require.NotNil(t, result.Lng)
+			assert.InDelta(t, tt.lat, *result.Lat, 1e-9)
+			assert.InDelta(t, -0.1278, *result.Lng, 1e-9)
+		})
+	}
+	for name, tags := range map[string]string{
+		"no location tag": `{"creation_time":"2024-01-01T12:00:00Z"}`,
+		"no fix":          `{"location":"+00.0000+000.0000/"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := parseProbeOutput([]byte(stream + tags + `}}`))
+			assert.Nil(t, result.Lat)
+			assert.Nil(t, result.Lng)
+		})
+	}
+}
+
+// TestProbeURL reads a real file's tags through ffprobe over HTTP, with range requests like S3's.
+func TestProbeURL(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " not in PATH")
+		}
+	}
+	path := filepath.Join(t.TempDir(), "clip.mp4")
+	out, err := exec.Command("ffmpeg", "-y", "-v", "error",
+		"-f", "lavfi", "-i", "color=c=black:s=16x16:d=0.1:r=10", "-c:v", "libx264",
+		"-metadata", "location=+51.5074-000.1278/",
+		"-metadata", "creation_time=2025-07-14T14:30:12Z",
+		path).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/clip.mp4" {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, path)
+	}))
+	defer srv.Close()
+
+	result, err := ProbeURL(context.Background(), srv.URL+"/clip.mp4")
+	require.NoError(t, err)
+	require.NotNil(t, result.Lat)
+	assert.InDelta(t, 51.5074, *result.Lat, 1e-9)
+	assert.InDelta(t, -0.1278, *result.Lng, 1e-9)
+	require.NotNil(t, result.CreatedAt)
+	assert.True(t, time.Date(2025, 7, 14, 14, 30, 12, 0, time.UTC).Equal(*result.CreatedAt))
+
+	// A presigned URL carries a signature, so it must not end up in the error a caller logs.
+	const secret = "X-Amz-Signature=deadbeef"
+	_, err = ProbeURL(context.Background(), srv.URL+"/missing.mp4?"+secret)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), secret)
+}
 
 func TestParseProbeOutput_Equirectangular_WithCreatedAt(t *testing.T) {
 	fixture := `{"streams":[{"width":5760,"height":2880,"side_data_list":[{"side_data_type":"Spherical Mapping","projection":"equirectangular"}]}],"format":{"tags":{"creation_time":"2022-07-20T17:06:24.000000Z"}}}`

@@ -213,7 +213,27 @@ Files are deduplicated per user by a partial hash (first + last 64 KB), so re-sc
 
 ### Capture times and `CAMERA_TIMEZONE`
 
-A photo's EXIF time is a wall-clock reading without a usable timezone. The backend reads it in `CAMERA_TIMEZONE` (an IANA name such as `Europe/Warsaw`). When the photo carries a GPS timestamp that puts the camera clock within two minutes of a real UTC offset, it uses that offset instead, so phone photos taken abroad come out right. `OffsetTimeOriginal` is ignored: some cameras write a fixed offset all year. Unset, `CAMERA_TIMEZONE` falls back to the server's own zone, which is UTC in Docker; the backend warns about that at startup. Over https the backend refuses to start without `CAMERA_TIMEZONE`, so a production server cannot drift silently.
+A photo's EXIF time is a wall-clock reading without a usable timezone. The backend reads it in `CAMERA_TIMEZONE` (an IANA name such as `Europe/Warsaw`). When the photo carries a GPS timestamp that puts the camera clock within two minutes of a real UTC offset, it uses that offset instead. Otherwise it uses the photo's `OffsetTimeOriginal`, so phone photos taken abroad come out right. Makes known to write a wrong offset are exempt (the Panasonic DC-TZ200 writes `+01:00` all year). Unset, `CAMERA_TIMEZONE` falls back to the server's own zone, which is UTC in Docker; the backend warns about that at startup. Over https the backend refuses to start without `CAMERA_TIMEZONE`, so a production server cannot drift silently.
+
+Media ingested under older rules can be repaired. `retime` re-reads the EXIF time of one user's media and corrects `taken_at`:
+
+```bash
+docker compose exec backend ./server retime --user <id>            # dry run: lists the changes
+docker compose exec backend ./server retime --user <id> --apply    # writes them
+```
+
+It changes only rows whose time came from EXIF. Each item's GPS track point (EXIF or manual) moves with it. Interpolated locations that rested on the old time are matched again, and trips are re-detected. It reads the first 1 MB of every item from storage, prints one tab-separated line per change and `checked=… retimed=… unchanged=… not_exif=… mismatched=… failed=…`, and exits 1 if anything failed.
+
+### Video locations
+
+Phones usually write a position into the video file. Ingest stores it like a photo's EXIF position. To give videos ingested before that their tag:
+
+```bash
+docker compose exec backend ./server video-locations --user <id>            # dry run: lists the changes
+docker compose exec backend ./server video-locations --user <id> --apply    # writes them
+```
+
+It changes only videos with no location or an interpolated one. Manual locations stay, and so does a position interpolated from a GPS log that was recording during the clip, because a phone's tag can be a stale fix. Each line shows how far the video moves (`moved_m`).
 
 ## Importing external GPS tracks
 
@@ -315,6 +335,6 @@ Defaults work out of the box for local development. Copy `.env.example` to `.env
 | `TRIP_GAP_HOURS` | `24` | Time gap (hours) that splits media into separate trips (native only; not passed through by `docker-compose.yml`) |
 | `LOG_LEVEL` | `info` | Backend log level: `debug`, `info`, `warn`, `error` (native only; not passed through by `docker-compose.yml`) |
 | `LOG_FORMAT` | `text` | Backend log format: `text` (human-readable) or `json` (structured) (native only; not passed through by `docker-compose.yml`) |
-| `CAMERA_TIMEZONE` | the server's zone (UTC in Docker) | IANA zone that camera clocks show, e.g. `Europe/Warsaw`; EXIF times are read in it unless the photo's GPS timestamp gives the offset |
+| `CAMERA_TIMEZONE` | the server's zone (UTC in Docker) | IANA zone that camera clocks show, e.g. `Europe/Warsaw`; EXIF times are read in it unless the photo's GPS timestamp or `OffsetTimeOriginal` gives the offset |
 
 Changing `KEYCLOAK_PORT` or `FRONTEND_PORT` requires matching redirect and post-logout URIs in `deploy/keycloak/geogallery-realm.json`, and `PUBLIC_URL` / `OIDC_ISSUER_URL` must match the new ports if you set them (compose derives them from the ports when unset). Keycloak imports the realm only when it does not exist yet, and its state lives in the `keycloak_data` volume. To apply realm edits, remove the container and that volume (`docker compose --profile dev rm -sf keycloak && docker volume rm geogallery_keycloak_data`, where the prefix is your compose project name), then start it again. The test users' IDs are pinned, so existing GeoGallery accounts keep working.

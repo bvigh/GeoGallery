@@ -196,6 +196,12 @@ func TestRunSubcommand_UsageErrors(t *testing.T) {
 		{"rebind same issuer", "rebind-issuer", []string{"--from", "a", "--to", "a"}},
 		{"scan without --user", "scan", nil},
 		{"scan stray argument", "scan", []string{"--user", "u", "extra"}},
+		{"retime without --user", "retime", nil},
+		{"retime --apply without --user", "retime", []string{"--apply"}},
+		{"retime stray argument", "retime", []string{"--user", "u", "extra"}},
+		{"video-locations without --user", "video-locations", nil},
+		{"video-locations --apply without --user", "video-locations", []string{"--apply"}},
+		{"video-locations stray argument", "video-locations", []string{"--user", "u", "extra"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -276,6 +282,180 @@ func TestRunScan(t *testing.T) {
 			}
 			var out bytes.Buffer
 			err := runScan(tt.ctx, &out, scan, scanUsers(), tt.userID, "/ingest")
+			assert.Equal(t, tt.wantCalled, called)
+			assert.Equal(t, tt.wantOut, out.String())
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestRunRetime(t *testing.T) {
+	warsaw, err := time.LoadLocation("Europe/Warsaw")
+	require.NoError(t, err)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	change := handlers.RetimeChange{
+		MediaID: "m-1", Filename: "P1011841.JPG",
+		Old:  time.Date(2018, 10, 23, 11, 50, 53, 0, time.UTC),
+		New:  time.Date(2018, 10, 23, 9, 50, 53, 0, time.UTC),
+		Zone: "camera", GPSSource: "manual",
+	}
+	unlocated := change
+	unlocated.MediaID, unlocated.GPSSource = "m-2", ""
+	const header = "media_id\tfilename\told\tnew\tshift\tzone\tgps_source\n"
+	const line1 = "m-1\tP1011841.JPG\t2018-10-23T13:50:53+02:00\t2018-10-23T11:50:53+02:00\t-2h\tcamera\tmanual\n"
+	const line2 = "m-2\tP1011841.JPG\t2018-10-23T13:50:53+02:00\t2018-10-23T11:50:53+02:00\t-2h\tcamera\t-\n"
+	const dryRun = "dry run: nothing was written; re-run with --apply to write these changes\n"
+
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		userID     string
+		apply      bool
+		changes    []handlers.RetimeChange
+		res        handlers.RetimeResult
+		retimeErr  error
+		wantCalled bool
+		wantOut    string
+		wantErr    string
+	}{
+		{"dry run lists the changes", context.Background(), "active-user", false,
+			[]handlers.RetimeChange{change, unlocated}, handlers.RetimeResult{Checked: 5, Retimed: 2, Unchanged: 1, NotExif: 1, Mismatch: 1}, nil,
+			true, header + line1 + line2 + "checked=5 retimed=2 unchanged=1 not_exif=1 mismatched=1 failed=0\n" + dryRun, ""},
+		{"apply", context.Background(), "active-user", true,
+			[]handlers.RetimeChange{change}, handlers.RetimeResult{Checked: 1, Retimed: 1}, nil,
+			true, header + line1 + "checked=1 retimed=1 unchanged=0 not_exif=0 mismatched=0 failed=0\n", ""},
+		{"failed items exit non-zero", context.Background(), "active-user", true,
+			nil, handlers.RetimeResult{Checked: 2, Unchanged: 1, Failed: 1}, nil,
+			true, header + "checked=2 retimed=0 unchanged=1 not_exif=0 mismatched=0 failed=1\n", "1 item(s) failed"},
+		{"retime error", context.Background(), "active-user", true,
+			nil, handlers.RetimeResult{}, errors.New("gps matcher: boom"),
+			true, header + "checked=0 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", "gps matcher: boom"},
+		{"interrupted", cancelled, "active-user", true,
+			nil, handlers.RetimeResult{Checked: 1}, context.Canceled,
+			true, header + "checked=1 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", "interrupted; re-run retime to finish"},
+		{"unclaimed owner of pre-auth data accepted", context.Background(), auth.LegacyOwnerID, true,
+			nil, handlers.RetimeResult{}, nil,
+			true, header + "checked=0 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", ""},
+		{"disabled user accepted", context.Background(), "disabled-user", true,
+			nil, handlers.RetimeResult{}, nil,
+			true, header + "checked=0 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", ""},
+		{"unknown user refused before reading anything", context.Background(), "nobody", true,
+			nil, handlers.RetimeResult{}, nil,
+			false, "", `unknown user "nobody"`},
+		{"uppercase id normalised", context.Background(), "ACTIVE-USER", true,
+			nil, handlers.RetimeResult{}, nil,
+			true, header + "checked=0 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			retime := func(_ context.Context, ownerID string, report func(handlers.RetimeChange)) (handlers.RetimeResult, error) {
+				called = true
+				assert.Equal(t, strings.ToLower(tt.userID), ownerID)
+				for _, c := range tt.changes {
+					report(c)
+				}
+				return tt.res, tt.retimeErr
+			}
+			var out bytes.Buffer
+			err := runRetime(tt.ctx, &out, retime, scanUsers(), tt.userID, tt.apply, warsaw)
+			assert.Equal(t, tt.wantCalled, called)
+			assert.Equal(t, tt.wantOut, out.String())
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestFormatShift(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{-2 * time.Hour, "-2h"},
+		{time.Hour, "+1h"},
+		{-(5*time.Hour + 30*time.Minute), "-5h30m"},
+		{45 * time.Minute, "+0h45m"},
+		{0, "+0h"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, formatShift(tt.d), tt.d.String())
+	}
+}
+
+func TestRunVideoLocations(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	moved := 159.6
+	change := handlers.VideoLocationChange{MediaID: "m-1", Filename: "abroad.mp4", Lat: 51.5074, Lng: -0.1278, OldSource: "interpolated", MovedM: &moved}
+	unlocated := handlers.VideoLocationChange{MediaID: "m-2", Filename: "clip.mp4", Lat: 46.0, Lng: 14.0}
+	const header = "media_id\tfilename\tlat\tlng\told_source\tmoved_m\n"
+	const line1 = "m-1\tabroad.mp4\t51.50740\t-0.12780\tinterpolated\t160\n"
+	const line2 = "m-2\tclip.mp4\t46.00000\t14.00000\t-\t-\n"
+	const dryRun = "dry run: nothing was written; re-run with --apply to write these changes\n"
+
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		userID     string
+		apply      bool
+		changes    []handlers.VideoLocationChange
+		res        handlers.VideoLocationResult
+		runErr     error
+		wantCalled bool
+		wantOut    string
+		wantErr    string
+	}{
+		{"dry run lists the changes", context.Background(), "active-user", false,
+			[]handlers.VideoLocationChange{change, unlocated}, handlers.VideoLocationResult{Checked: 4, Located: 2, DenseLog: 1, NoTag: 1}, nil,
+			true, header + line1 + line2 + "checked=4 located=2 dense_log=1 no_tag=1 failed=0\n" + dryRun, ""},
+		{"apply", context.Background(), "active-user", true,
+			[]handlers.VideoLocationChange{change}, handlers.VideoLocationResult{Checked: 1, Located: 1}, nil,
+			true, header + line1 + "checked=1 located=1 dense_log=0 no_tag=0 failed=0\n", ""},
+		{"failed items exit non-zero", context.Background(), "active-user", true,
+			nil, handlers.VideoLocationResult{Checked: 2, NoTag: 1, Failed: 1}, nil,
+			true, header + "checked=2 located=0 dense_log=0 no_tag=1 failed=1\n", "1 item(s) failed"},
+		{"error", context.Background(), "active-user", true,
+			nil, handlers.VideoLocationResult{}, errors.New("list media: boom"),
+			true, header + "checked=0 located=0 dense_log=0 no_tag=0 failed=0\n", "list media: boom"},
+		{"interrupted", cancelled, "active-user", true,
+			nil, handlers.VideoLocationResult{Checked: 1}, context.Canceled,
+			true, header + "checked=1 located=0 dense_log=0 no_tag=0 failed=0\n", "interrupted; re-run video-locations to finish"},
+		{"unclaimed owner of pre-auth data accepted", context.Background(), auth.LegacyOwnerID, true,
+			nil, handlers.VideoLocationResult{}, nil,
+			true, header + "checked=0 located=0 dense_log=0 no_tag=0 failed=0\n", ""},
+		{"unknown user refused before reading anything", context.Background(), "nobody", true,
+			nil, handlers.VideoLocationResult{}, nil,
+			false, "", `unknown user "nobody"`},
+		{"uppercase id normalised", context.Background(), "ACTIVE-USER", true,
+			nil, handlers.VideoLocationResult{}, nil,
+			true, header + "checked=0 located=0 dense_log=0 no_tag=0 failed=0\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			locate := func(_ context.Context, ownerID string, report func(handlers.VideoLocationChange)) (handlers.VideoLocationResult, error) {
+				called = true
+				assert.Equal(t, strings.ToLower(tt.userID), ownerID)
+				for _, c := range tt.changes {
+					report(c)
+				}
+				return tt.res, tt.runErr
+			}
+			var out bytes.Buffer
+			err := runVideoLocations(tt.ctx, &out, locate, scanUsers(), tt.userID, tt.apply)
 			assert.Equal(t, tt.wantCalled, called)
 			assert.Equal(t, tt.wantOut, out.String())
 			if tt.wantErr == "" {
