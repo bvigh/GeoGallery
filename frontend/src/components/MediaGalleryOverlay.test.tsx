@@ -22,6 +22,9 @@ vi.mock("@/api/client", async (importOriginal) => {
       mediaAlbums: vi.fn(),
       addToAlbum: vi.fn(),
       removeFromAlbum: vi.fn(),
+      // The view editor.
+      updateViewSettings: vi.fn(),
+      replaceKeyframes: vi.fn(),
     },
   };
 });
@@ -92,21 +95,49 @@ vi.mock("leaflet", () => ({
 // Every URL a 360° viewer was rendered with, in order: the real ones build a WebGL renderer and
 // load the texture for each.
 const viewerUrls = vi.hoisted(() => [] as string[]);
+// What the view editor captures from its viewer: the view on screen and, for a video, the time.
+const capturedView = { yaw: 1, pitch: 0.5, fov: 80 };
+const capturedTime = 2.5;
+type Ref<T> = { current: T | null };
+type ViewerProps = {
+  url: string;
+  contained?: boolean;
+  initialYaw?: number | null;
+  keyframes?: unknown[];
+  captureRef?: Ref<() => typeof capturedView>;
+  captureTimeRef?: Ref<() => number>;
+  controlRef?: Ref<{ pause: () => void; seek: (t: number) => void; seekAndApply: (t: number) => void }>;
+};
+function viewerAttrs({ url, initialYaw, keyframes, captureRef, captureTimeRef, controlRef }: ViewerProps) {
+  viewerUrls.push(url);
+  if (captureRef) captureRef.current = () => capturedView;
+  if (captureTimeRef) captureTimeRef.current = () => capturedTime;
+  if (controlRef) controlRef.current = { pause: () => {}, seek: () => {}, seekAndApply: () => {} };
+  return {
+    "data-url": url,
+    "data-editor": String(!!captureRef),
+    "data-yaw": String(initialYaw ?? ""),
+    "data-keyframes": String(keyframes?.length ?? ""),
+  };
+}
 vi.mock("@/components/viewer/Panorama360", () => ({
-  default: ({ url }: { url: string }) => {
-    viewerUrls.push(url);
-    return <div data-testid="panorama" data-url={url} />;
-  },
+  default: (props: ViewerProps) => <div data-testid="panorama" {...viewerAttrs(props)} />,
 }));
 vi.mock("@/components/viewer/Video360", () => ({
-  default: ({ url }: { url: string }) => {
-    viewerUrls.push(url);
-    return <div data-testid="video360" data-url={url} />;
-  },
+  default: (props: ViewerProps) => <div data-testid="video360" {...viewerAttrs(props)} />,
 }));
 
 const mockApi = api as unknown as Record<
-  "get" | "getMediaUrl" | "getKeyframes" | "delete" | "listAlbums" | "mediaAlbums" | "addToAlbum" | "removeFromAlbum",
+  | "get"
+  | "getMediaUrl"
+  | "getKeyframes"
+  | "delete"
+  | "listAlbums"
+  | "mediaAlbums"
+  | "addToAlbum"
+  | "removeFromAlbum"
+  | "updateViewSettings"
+  | "replaceKeyframes",
   ReturnType<typeof vi.fn>
 >;
 
@@ -697,6 +728,156 @@ describe("MediaGalleryOverlay", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Marker at 64.1,-21.9" }));
       expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+      expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
+    });
+  });
+
+  describe("view editor", () => {
+    const pano = makeItem("pano", { media_type: "photo_360", taken_at: "2025-06-01T10:00:00Z", initial_yaw: 0 });
+    const video = makeItem("video", { media_type: "video_360", taken_at: "2025-06-01T10:00:00Z" });
+    const second = makeItem("second", { taken_at: "2025-06-02T10:00:00Z" });
+    const storedKeyframe = { time: 1, yaw: 0, pitch: 0, fov: 75 };
+    const editorTitle = /^Edit default view —/;
+
+    beforeEach(() => {
+      mockApi.updateViewSettings.mockResolvedValue(undefined);
+      mockApi.replaceKeyframes.mockResolvedValue(undefined);
+    });
+
+    it.each([
+      ["an own 360° photo", pano, true],
+      ["an own 360° video", video, true],
+      ["an own flat photo", own, false],
+      ["an own flat video", makeItem("flat", { media_type: "video" }), false],
+      ["a shared 360° photo", { ...pano, owner_id: "u-bob", owner_name: "Bob" }, false],
+      ["a shared 360° video", { ...video, owner_id: "u-bob", owner_name: "Bob" }, false],
+    ])("offers the editor for %s: %s", async (_name, item, shown) => {
+      mockApi.get.mockResolvedValue([item]);
+      renderOverlay();
+      await screen.findByText("1 / 1");
+
+      expect(!!screen.queryByRole("button", { name: "Edit default view" })).toBe(shown);
+    });
+
+    it("saves the current view as default and shows it in the gallery", async () => {
+      mockApi.get.mockResolvedValue([pano]);
+      renderOverlay();
+      await waitFor(() => expect(screen.getByTestId("panorama")).toHaveAttribute("data-yaw", "0"));
+      await userEvent.click(screen.getByRole("button", { name: "Edit default view" }));
+      expect(screen.getByText(editorTitle)).toHaveTextContent("pano.jpg");
+
+      // Only the editor's viewer: one underneath would hold a second WebGL context.
+      expect(screen.getAllByTestId("panorama")).toHaveLength(1);
+      expect(screen.getByTestId("panorama")).toHaveAttribute("data-editor", "true");
+
+      await userEvent.click(screen.getByRole("button", { name: "Set current view as default" }));
+      expect(mockApi.updateViewSettings).toHaveBeenCalledWith("pano", {
+        initial_yaw: 1,
+        initial_pitch: 0.5,
+        initial_fov: 80,
+      });
+      expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
+      expect(screen.getByTestId("panorama")).toHaveAttribute("data-editor", "false");
+      expect(screen.getByTestId("panorama")).toHaveAttribute("data-yaw", "1");
+      expect(mockApi.get).toHaveBeenCalledTimes(1);
+    });
+
+    it("waits for a video's keyframes, then saves them and plays them in the gallery", async () => {
+      mockApi.get.mockResolvedValue([video]);
+      const keyframes = deferred<(typeof storedKeyframe)[]>();
+      mockApi.getKeyframes.mockReturnValue(keyframes.promise);
+      renderOverlay();
+      await screen.findByText("1 / 1");
+      // Opened from an empty list, saving would delete the stored keyframes.
+      expect(screen.getByRole("button", { name: "Edit default view" })).toBeDisabled();
+
+      await act(async () => keyframes.resolve([storedKeyframe]));
+      await userEvent.click(screen.getByRole("button", { name: "Edit default view" }));
+      expect(screen.getAllByTestId("video360")).toHaveLength(1);
+      expect(screen.getByTestId("video360")).toHaveAttribute("data-keyframes", "1");
+
+      await userEvent.click(screen.getByRole("button", { name: "+ Add keyframe at current time" }));
+      await userEvent.click(screen.getByRole("button", { name: "Save keyframes" }));
+      expect(mockApi.replaceKeyframes).toHaveBeenCalledWith("video", [
+        storedKeyframe,
+        { time: capturedTime, ...capturedView },
+      ]);
+      expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
+      expect(screen.getByTestId("video360")).toHaveAttribute("data-editor", "false");
+      expect(screen.getByTestId("video360")).toHaveAttribute("data-keyframes", "2");
+      expect(mockApi.getKeyframes).toHaveBeenCalledTimes(1);
+    });
+
+    it("stays open and says why when saving fails", async () => {
+      mockApi.get.mockResolvedValue([pano]);
+      mockApi.updateViewSettings.mockRejectedValue(new ApiError("boom", 500));
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      renderOverlay();
+      await screen.findByText("1 / 1");
+      await waitFor(() => expect(screen.getByRole("button", { name: "Edit default view" })).toBeEnabled());
+      await userEvent.click(screen.getByRole("button", { name: "Edit default view" }));
+
+      await userEvent.click(screen.getByRole("button", { name: "Set current view as default" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("Could not save the default view");
+      expect(screen.getByText(editorTitle)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Set current view as default" })).toBeEnabled();
+    });
+
+    it("keeps the gallery's keys off the editor: the arrows do nothing, Escape closes only the editor", async () => {
+      mockApi.get.mockResolvedValue([pano, second]);
+      const { props } = renderOverlay();
+      await screen.findByText("1 / 2");
+      await waitFor(() => expect(screen.getByRole("button", { name: "Edit default view" })).toBeEnabled());
+      await userEvent.click(screen.getByRole("button", { name: "Edit default view" }));
+
+      // Focus is on the toolbar button behind the editor, not in a field.
+      await userEvent.keyboard("{ArrowRight}");
+      expect(screen.getByText(editorTitle)).toHaveTextContent("pano.jpg");
+      expect(screen.getByText("1 / 2")).toBeInTheDocument();
+
+      await userEvent.keyboard("{Escape}");
+      expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
+      expect(props.onClose).not.toHaveBeenCalled();
+      expect(screen.getByTestId("panorama")).toHaveAttribute("data-editor", "false");
+
+      await userEvent.keyboard("{ArrowRight}");
+      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+    });
+
+    it("closes on the back gesture without closing the gallery", async () => {
+      await settleHistory();
+      mockApi.get.mockResolvedValue([pano]);
+      const { props } = renderOverlay();
+      await screen.findByText("1 / 1");
+      await waitFor(() => expect(screen.getByRole("button", { name: "Edit default view" })).toBeEnabled());
+      const depth = () => (window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY] as number;
+      const galleryDepth = depth();
+      await userEvent.click(screen.getByRole("button", { name: "Edit default view" }));
+      await waitFor(() => expect(depth()).toBe(galleryDepth + 1));
+
+      await act(async () => {
+        const popped = new Promise((resolve) => window.addEventListener("popstate", resolve, { once: true }));
+        window.history.back();
+        await popped;
+      });
+
+      expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
+      expect(props.onClose).not.toHaveBeenCalled();
+      expect(screen.getByTestId("panorama")).toHaveAttribute("data-editor", "false");
+    });
+
+    it("closes the editor when its item goes away", async () => {
+      mockApi.get.mockResolvedValue([pano, second]);
+      const removal = deferred<void>();
+      renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum: vi.fn(() => removal.promise) });
+      await screen.findByText("1 / 2");
+      await waitFor(() => expect(screen.getByRole("button", { name: "Edit default view" })).toBeEnabled());
+      await userEvent.click(screen.getByRole("button", { name: "Remove from album" }));
+      await userEvent.click(screen.getByRole("button", { name: "Edit default view" }));
+      expect(screen.getByText(editorTitle)).toBeInTheDocument();
+
+      await act(async () => removal.resolve());
+      expect(await screen.findByText("1 / 1")).toBeInTheDocument();
       expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
     });
   });
