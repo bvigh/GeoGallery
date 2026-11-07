@@ -8,8 +8,8 @@ type Owner = { close: () => void };
 // One module-wide stack, so nested views and views closing together agree on history. Views only
 // change the stack; flush() then brings history in line with it, one traversal at a time.
 let base = 0; // depth of the entry the views sit on
-let entries: (Owner | null)[] = []; // our entries above base, innermost last; null = view gone
-let waiting: Owner[] = []; // open views that have no entry yet
+const entries: (Owner | null)[] = []; // our entries above base, innermost last; null = view gone
+const waiting: Owner[] = []; // open views that have no entry yet
 let popping = false; // our history.go has not reached its popstate yet
 let flushQueued = false;
 let listening = false;
