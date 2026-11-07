@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, ExternalLink, FolderMinus, MapPin, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, FolderMinus, MapPin, Rotate3d, Trash2 } from "lucide-react";
 import { Marker, useMap } from "react-leaflet";
 import L from "leaflet";
 import type { MediaItem } from "@/types";
@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { AlbumMenu } from "@/components/albums/AlbumMenu";
 import { EditLocationModal } from "@/components/EditLocationModal";
+import { EditViewModal } from "@/components/viewer/EditViewModal";
 import { MiniMapOverlay, type MiniMapSize } from "@/components/map/MiniMapOverlay";
 import { TOP_MARKER_Z_INDEX_OFFSET } from "@/components/map/markers";
 import Panorama360 from "@/components/viewer/Panorama360";
@@ -211,10 +212,10 @@ export function MediaGalleryOverlay({
   const [busyIds, setBusyIds] = useState<string[]>([]);
   // Set once an item was dropped, so only emptying the list by hand closes the gallery.
   const dropped = useRef(false);
-  // The item whose location editor is open. Tied to the item, so a change of item under the
-  // editor (a removal finishing) closes it instead of showing the next one with the old
-  // coordinates, and coming back to the item does not reopen it.
-  const [editingId, setEditingId] = useState<string | null>(null);
+  // The open editor (location, or the 360° default view and keyframes) and its item. Tied to the
+  // item, so a change of item under the editor (a removal finishing) closes it instead of showing
+  // the next one with the old values, and coming back to the item does not reopen it.
+  const [editing, setEditing] = useState<{ id: string; kind: "location" | "view" } | null>(null);
   // The size chosen with the map's buttons; it outlives the map, which unmounts while loading.
   const [mapSize, setMapSize] = useState<MiniMapSize>("small");
   const urlCache = useRef<Map<string, string>>(new Map());
@@ -346,7 +347,7 @@ export function MediaGalleryOverlay({
           : m
       )
     );
-    setEditingId(null);
+    setEditing(null);
     // Re-fetch all media so GPS-matched neighbours get their updated coordinates
     fetchAllMedia(paramsRef.current)
       .then((data) => {
@@ -359,6 +360,12 @@ export function MediaGalleryOverlay({
         );
       })
       .catch(console.error);
+  }
+
+  // The viewer remounts with these once the editor closes.
+  function handleViewSaved(id: string, updated: Partial<MediaItem>) {
+    setItems((prev) => prev.map((m) => (m.id === id ? { ...m, ...updated } : m)));
+    setEditing(null);
   }
 
   // Runs after an await, so it filters the latest list: overlapping removals must
@@ -440,11 +447,18 @@ export function MediaGalleryOverlay({
       })
     : null;
   // Only while its item is current; the effect below forgets an editor whose item went away.
-  const editingLocation = editingId !== null && editingId === currentItem?.id;
+  const editorOpen = editing !== null && editing.id === currentItem?.id;
+  const editingLocation = editorOpen && editing.kind === "location";
+  const editingView = editorOpen && editing.kind === "view";
+  const is360 = currentItem?.media_type === "photo_360" || currentItem?.media_type === "video_360";
+  // The view editor starts from the item's keyframes, so it waits for them: saving from an empty
+  // list would delete the stored ones.
+  const viewEditorReady =
+    !!currentUrl && (currentItem?.media_type !== "video_360" || currentItem.keyframes !== undefined);
 
   useEffect(() => {
-    if (editingId !== null && editingId !== currentItem?.id) setEditingId(null);
-  }, [editingId, currentItem?.id]);
+    if (editing !== null && editing.id !== currentItem?.id) setEditing(null);
+  }, [editing, currentItem?.id]);
 
   // Keyboard navigation
   useEffect(() => {
@@ -452,10 +466,10 @@ export function MediaGalleryOverlay({
       const tag = (e.target as HTMLElement)?.tagName;
       const editable = (e.target as HTMLElement)?.isContentEditable;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || editable) return;
-      // The location editor covers the gallery: Escape closes only the editor, as back does, and
-      // the other keys must not change or play the item under it.
-      if (editingLocation) {
-        if (e.key === "Escape") setEditingId(null);
+      // An editor covers the gallery: Escape closes only the editor, as back does, and the other
+      // keys must not change or play the item under it.
+      if (editorOpen) {
+        if (e.key === "Escape") setEditing(null);
         return;
       }
       if (e.key === "Escape") onClose();
@@ -471,7 +485,7 @@ export function MediaGalleryOverlay({
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, currentIndex, items.length, editingLocation]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [onClose, currentIndex, items.length, editorOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function renderMedia() {
     if (!currentItem) return null;
@@ -482,6 +496,9 @@ export function MediaGalleryOverlay({
         </div>
       );
     }
+    // The view editor brings its own viewer. One underneath would hold a second WebGL context,
+    // play a video's sound and toggle it on Space; it remounts with the saved view afterwards.
+    if (editingView) return null;
     // currentUrl always belongs to currentItem; the key also gives each item a fresh viewer state.
     if (currentItem.media_type === "photo_360") {
       return (
@@ -588,11 +605,22 @@ export function MediaGalleryOverlay({
             {currentItem && isOwn && (
               <button
                 className={toolButton}
-                onClick={() => setEditingId(currentItem.id)}
+                onClick={() => setEditing({ id: currentItem.id, kind: "location" })}
                 aria-label="Edit GPS location"
                 title="Edit GPS location"
               >
                 <MapPin className="h-5 w-5" />
+              </button>
+            )}
+            {currentItem && isOwn && is360 && (
+              <button
+                className={toolButton}
+                onClick={() => setEditing({ id: currentItem.id, kind: "view" })}
+                disabled={!viewEditorReady}
+                aria-label="Edit default view"
+                title="Edit default view"
+              >
+                <Rotate3d className="h-5 w-5" />
               </button>
             )}
             {canRemove && (
@@ -734,8 +762,17 @@ export function MediaGalleryOverlay({
       {editingLocation && currentItem && isOwn && (
         <EditLocationModal
           item={currentItem}
-          onClose={() => setEditingId(null)}
+          onClose={() => setEditing(null)}
           onSaved={handleLocationSaved}
+        />
+      )}
+
+      {editingView && currentItem && currentUrl && isOwn && (
+        <EditViewModal
+          item={currentItem}
+          url={currentUrl}
+          onClose={() => setEditing(null)}
+          onSaved={(updated) => handleViewSaved(currentItem.id, updated)}
         />
       )}
     </div>
