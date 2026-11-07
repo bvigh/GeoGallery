@@ -11,6 +11,7 @@ import { useCurrentUser } from "@/components/auth/AuthContext";
 import { AlbumMenu } from "@/components/albums/AlbumMenu";
 import { EditLocationModal } from "@/components/EditLocationModal";
 import { MiniMapOverlay, type MiniMapSize } from "@/components/map/MiniMapOverlay";
+import { TOP_MARKER_Z_INDEX_OFFSET } from "@/components/map/markers";
 import Panorama360 from "@/components/viewer/Panorama360";
 import Video360 from "@/components/viewer/Video360";
 import VideoDecodeNotice from "@/components/viewer/VideoDecodeNotice";
@@ -720,6 +721,7 @@ export function MediaGalleryOverlay({
                     key={m.id}
                     position={[m.lat!, m.lng!]}
                     icon={m.id === currentItem.id ? currentMarkerIcon : markerIcon(m)}
+                    zIndexOffset={m.id === currentItem.id ? TOP_MARKER_Z_INDEX_OFFSET : 0}
                     eventHandlers={{ click: () => handleMarkerClick(m) }}
                   />
                 ))}

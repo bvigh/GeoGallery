@@ -64,7 +64,11 @@ vi.mock("react-leaflet", async () => {
     TileLayer: ({ attribution }: { attribution?: string }) => (
       <span data-testid="tile-credit" data-attribution={attribution} />
     ),
-    Marker: forwardRef(() => null),
+    Marker: forwardRef(
+      ({ position, zIndexOffset }: { position: [number, number]; zIndexOffset?: number }, _ref) => (
+        <span data-testid="marker" data-position={position.join(",")} data-z-index-offset={zIndexOffset ?? 0} />
+      ),
+    ),
     Polyline: () => null,
     useMap: () => leaflet.map,
     useMapEvents: (handlers: { click?: MapClick }) => {
@@ -546,6 +550,18 @@ describe("GamePage", () => {
     it("isolates the map, so Leaflet's controls stay under the score card", async () => {
       await showResult();
       expect(screen.getByTestId("map")).toHaveClass("isolate");
+    });
+
+    // Leaflet stacks markers by screen row: a guess just below the spot would cover it.
+    it("draws the actual location above the guess", async () => {
+      await showResult();
+      const offsets = Object.fromEntries(
+        within(screen.getByTestId("map"))
+          .getAllByTestId("marker")
+          .map((marker) => [marker.dataset.position, marker.dataset.zIndexOffset]),
+      );
+      expect(offsets["64.2,-21.8"]).toBe("1000");
+      expect(Object.values(offsets).filter((offset) => offset === "0")).toHaveLength(1);
     });
 
     it("opens the map credit in a new tab, so a mis-tap does not leave the round", async () => {
