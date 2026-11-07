@@ -34,6 +34,9 @@ func TestRegisterMedia_ExifTimeZone(t *testing.T) {
 		{"EXIF GPS without a GPS clock, track point in the camera zone",
 			exiftest.Photo{DateTimeOriginal: "2018:10:23 11:50:53", GPS: &exiftest.GPS{Lat: 47.4979, Lng: 19.0402}},
 			warsaw, "2018-10-23T09:50:53Z", true},
+		{"a phone abroad by OffsetTimeOriginal, track point at the same instant",
+			exiftest.Photo{Make: "samsung", DateTimeOriginal: "2025:07:14 15:30:00", OffsetTimeOriginal: "+01:00", GPS: &exiftest.GPS{Lat: 51.5074, Lng: -0.1278}},
+			warsaw, "2025-07-14T14:30:00Z", true},
 		{"no EXIF time falls back to the file time", exiftest.Photo{}, warsaw, "2026-01-01T00:00:00Z", false},
 	}
 	for _, tt := range tests {

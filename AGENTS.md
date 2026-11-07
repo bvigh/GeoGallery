@@ -26,7 +26,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `backend/internal/handlers/gps_matcher.go` | `RunGPSMatcher` — interpolates GPS from the owner's `gps_tracks` into `media.location` |
 | `backend/internal/handlers/trip_detect.go` | `RunTripDetect` — groups one owner's media into trips by time gap |
 | `backend/internal/ingest/exif.go` | EXIF extraction (capture time: see "`taken_at` Fallback Priority") + 360° detection + `DetectMediaType` |
-| `backend/internal/ingest/exiftest/` | Test helper: builds small JPEGs with chosen EXIF tags (capture time, offset, GPS position and timestamp) |
+| `backend/internal/ingest/exiftest/` | Test helper: builds small JPEGs with chosen EXIF tags (make, capture time, offset, GPS position and timestamp) and optionally an Exif IFD goexif rejects |
 | `backend/internal/gpstrack/` | Track file parsers for `POST /api/gps-tracks/upload`: `Parse(name, r)` picks GPX, TCX, KML/KMZ, GeoJSON, NMEA, esoko `.log` or a `.json` format (Google Timeline object; Samsung Health or GeoGallery array) by extension, any of them `.gz`. Unreadable and out-of-range points are skipped |
 | `backend/internal/geo/gps.go` | GPS interpolation (Haversine + confidence scoring) |
 | `backend/internal/storage/s3.go` | S3/MinIO client wrapper (presigned GETs, 15 min) |
@@ -215,12 +215,24 @@ Both ingest paths follow the same order:
 
 **The EXIF time is a wall clock without a zone.** `takenAt` in `exif.go` picks the offset and never uses the server's own zone:
 - The photo's GPS clock: `GPSDateStamp` + `GPSTimeStamp` (UTC). It is used when wall minus GPS lands within `gpsClockTolerance` (2 min) of a real UTC offset (whole hours, or the fractional offsets in `fractionalOffsets`). A stale fix (minutes or days old, 1970-01-01) falls through.
+- Otherwise `OffsetTimeOriginal`, trusted unless the photo's make is in `offsetIgnoredMakes`. It follows a phone abroad, and many phones (the Galaxy S24 on every photo) write no GPS timestamp. The Panasonic DC-TZ200 is exempt: it writes `+01:00` all year, even while its clock shows summer time. The value alone cannot separate it from a phone in London, so the exemption goes by make. An offset that is blank or not in real use (`isRealOffset`) falls through.
 - Otherwise `CAMERA_TIMEZONE` (`MediaRegistrar.cameraZone`; nil reads UTC), with that zone's DST on that date.
-- `OffsetTimeOriginal` is deliberately ignored: the Panasonic DC-TZ200 writes `+01:00` all year.
 
-`ExifData.TakenAtZone` says which one applied (`ingest.ZoneGPS`, `ingest.ZoneCamera`). Never call goexif's `x.DateTime()`, which falls back to `time.Local`. Before `CAMERA_TIMEZONE`, a Docker server read every EXIF time as UTC.
+`ExifData.TakenAtZone` says which one applied (`ingest.ZoneGPS`, `ingest.ZoneOffset`, `ingest.ZoneCamera`). Never call goexif's `x.DateTime()`, which falls back to `time.Local`. Before `CAMERA_TIMEZONE`, a Docker server read every EXIF time as UTC.
+
+`ExtractExif` keeps what it could read after a non-critical goexif error: old Sony cameras write an Exif IFD goexif rejects, and their IFD0 `DateTime` is still right. A critical error (say, a corrupt IFD0) leaves no EXIF at all, so the file time is used.
+
+A rule change applies to new ingests only; stored rows keep their times. The existing deployments were repaired once with the operator commands `server retime` and `server video-locations`, which are deliberately not in `main`: they live in commit `f2afa0d` (branch `fix/exif-offset-video-location`). Port them from there if a later rule change needs another repair.
+
+For a video, `taken_at` is the container's `creation_time`. On Samsung phones that is when the recording ended (about 2 s after start + duration), so it sits later than the time in the filename. Insta360 files do not behave this way, so it is not corrected.
 
 Future: filename-based timestamp guessing (not yet implemented).
+
+## Video location tag
+
+`ingest.parseProbeOutput` reads a video's position from the container's `location`, `location-eng` or `com.apple.quicktime.location.ISO6709` tag: ISO 6709 in decimal degrees. The degrees-and-minutes forms and `+00.0000+000.0000/` (no fix) are refused. `registerMedia` stores it with `gps_source = 'exif'`, which covers everything read from the file itself. It makes **no track point**: the tag can be the phone's last known fix and `taken_at` is the end of the recording, so the pair is too loose to place other media.
+
+Known limit: a video keeps its tag even when a dense GPS log covers the clip, because the matcher leaves `exif` rows alone. On a real library, tags from 2022 on agreed with such a log to within 20 m; 4 of 16 tags from 2017 were 400 m to 4 km off it.
 
 ## Environment
 
@@ -289,7 +301,7 @@ Changing `KEYCLOAK_PORT` or `FRONTEND_PORT` requires matching `redirectUris` / `
   - Deleting an album cascades its members and contributions; the media rows are never touched.
 - **Trip detection** is the SQL function `auto_detect_trips(p_owner UUID, gap_hours INT)`. It only touches that owner's auto trips.
 - Users are never deleted, only disabled (`ON DELETE RESTRICT` on owned data).
-- GPS resolution priority: EXIF → timestamp-interpolated from the owner's `gps_tracks` → null. Never from another user's tracks or shared media.
+- GPS resolution priority: EXIF (for a video, its container's location tag) → timestamp-interpolated from the owner's `gps_tracks` → null. Never from another user's tracks or shared media.
 
 ## Unimplemented Work (in priority order)
 
@@ -306,7 +318,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 **Tests are required for all new and modified code.**
 
 **Backend — unit tests (no external deps, always run)**
-- `internal/ingest/exif_test.go`, `video_test.go` — EXIF extraction, capture time (camera zone with DST, the GPS clock abroad and at fractional offsets, stale and 1970 GPS fixes rejected, `OffsetTimeOriginal` ignored, the result independent of the process's own zone), media type detection, video probing
+- `internal/ingest/exif_test.go`, `video_test.go` — EXIF extraction, capture time (camera zone with DST, the GPS clock abroad and at fractional offsets, stale and 1970 GPS fixes rejected, `OffsetTimeOriginal` trusted except for exempt makes, a broken Exif IFD, the result independent of the process's own zone), media type detection, video probing, ISO 6709 location tags
 - `internal/geo/gps_test.go` — GPS interpolation
 - `internal/gpstrack/*_test.go` — every track format, extension dispatch, `.gz`, the expansion limit, the Google Timeline activity start/end times, headerless esoko logs
 - `internal/config/config_test.go` — `PUBLIC_URL` normalisation, refusing dev secrets over https, `CAMERA_TIMEZONE` (unknown zone fails, the UTC fallback check, refusal over https without it)
@@ -319,7 +331,8 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `internal/handlers/admin_test.go` — admin handlers
 - `internal/handlers/gps_matcher_test.go`, `gps_matcher_handler_test.go` — GPS matcher logic and handler
 - `internal/handlers/gps_tracks_test.go` — GPS track import and upload endpoints (per-file source, failed and empty files, one matcher run)
-- `internal/handlers/register_exif_time_test.go` — `registerMedia` stores the EXIF time in the camera zone (or by the GPS clock), on the row and on the `exif` track point
+- `internal/handlers/register_exif_time_test.go` — `registerMedia` stores the EXIF time in the camera zone (or by the GPS clock or `OffsetTimeOriginal`), on the row and on the `exif` track point
+- `internal/handlers/register_video_location_test.go` — `registerMedia` with real ffmpeg and ffprobe: a video's location tag becomes its location, zeros and no tag leave none, never a track point
 - `internal/handlers/media_test.go`, `upload_scan_matcher_test.go` — media list/upload/scan/dedup flow, owner propagation, opaque keys, owner fields and `trip_id` only on own rows, `rows.Err()` → 500, upload `?album_id` (refused before the body, duplicates added), `registerMedia` looking up the hash before uploading (a duplicate is never uploaded; a concurrent one is deleted again), `KnownHashes` validation and owner scoping
 - `internal/handlers/media_hash_test.go` — `mediaHash` equals the original streaming hash at every size edge, tail read errors, and the shared vectors in `frontend/src/lib/mediaHash.vectors.json`
 - `internal/handlers/media_delete_test.go`, `media_location_test.go` — delete and manual location
@@ -381,6 +394,6 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - **Leaflet/OSM over Google Maps** — no API key required, fully offline-capable.
 - **chi over Gin/Echo** — handlers are plain `http.Handler`, zero lock-in, composes with stdlib middleware.
 - **File mtime as upload fallback** — EXIF `DateTime` preferred; browser sends `file_mtime[]` (ms-since-epoch) so the server can use real file mtime instead of `time.Now()`.
-- **Capture times in a configured camera zone, not the server's.** EXIF times have no reliable zone. `CAMERA_TIMEZONE` decides unless the photo's own GPS clock gives the offset; `OffsetTimeOriginal` is ignored because a camera with daylight saving switched off writes the wrong one. On a real library, the GPS clock agreed with the camera zone on every accepted reading, and the 2-minute tolerance rejected every stale fix.
+- **Capture times in a configured camera zone, not the server's.** EXIF times have no reliable zone. `CAMERA_TIMEZONE` decides unless the photo's own GPS clock or `OffsetTimeOriginal` gives the offset. The offset is trusted by default, because a phone's is right even abroad, and exempt by make, because a camera with daylight saving switched off writes the wrong one. On a real library, the GPS clock agreed with the camera zone on every accepted reading, the 2-minute tolerance rejected every stale fix, and all Samsung offsets were right.
 - **Partial hash dedup** — the size plus (roughly) the first and last 64 KB are hashed, so dedup never reads the full file; see `mediaHash` for the exact, frozen definition. The browser computes the same hash and asks `POST /api/media/known-hashes` first, so a re-upload sends only new files; the server still hashes everything it receives, so a wrong browser hash costs only bandwidth.
 - **Relative scoring** — game location score is relative to the geographic spread of the media collection (`max_dist_km` from `NewRound`), not a fixed global scale; GPS confidence adjusts tolerance. With `owner` unset the spread includes shared media, so a friend's far-away album changes the scale; `owner=mine` restores own-only scoring.

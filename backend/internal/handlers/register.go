@@ -138,6 +138,12 @@ func (r *MediaRegistrar) registerMedia(
 		takenAt = fallbackMtime
 	}
 
+	// EXIF position, or a video's own location tag (probe is empty for a photo).
+	lat, lng := exifData.Lat, exifData.Lng
+	if lat == nil {
+		lat, lng = probe.Lat, probe.Lng
+	}
+
 	err = r.db.QueryRow(ctx, `
 		INSERT INTO media (owner_id, filename, media_type, location, gps_confidence, gps_source, taken_at, storage_key, file_hash)
 		VALUES ($1, $2, $3,
@@ -147,9 +153,9 @@ func (r *MediaRegistrar) registerMedia(
 		RETURNING id
 	`,
 		ownerID, filename, mediaType,
-		exifData.Lat, exifData.Lng,
+		lat, lng,
 		nil, // confidence populated by background GPS matcher
-		gpsSource(exifData),
+		gpsSource(lat),
 		takenAt, key, fileHash,
 	).Scan(&mediaID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -171,6 +177,8 @@ func (r *MediaRegistrar) registerMedia(
 		}
 		return "", false, err
 	}
+	// A video's location tag makes no track point. The tag can be the phone's last known fix, and
+	// taken_at is when the recording ended, so the pair is too loose to place other media.
 	if exifData.Lat != nil && takenAt != nil {
 		if err := insertExifGPSTrack(ctx, r.db, ownerID, *exifData.Lat, *exifData.Lng, *takenAt); err != nil {
 			slog.Warn("register: exif GPS track insert failed", "err", err)
@@ -208,8 +216,10 @@ func newStorageKey(ownerID, ext string) string {
 	return fmt.Sprintf("media/%s/%s%s", ownerID, hex.EncodeToString(b), ext)
 }
 
-func gpsSource(e ingest.ExifData) *string {
-	if e.Lat != nil {
+// gpsSource labels a position read from the file itself. 'exif' covers a video's container tag too:
+// what matters to the matcher and the UI is that it came from the file, not from a track.
+func gpsSource(lat *float64) *string {
+	if lat != nil {
 		s := "exif"
 		return &s
 	}

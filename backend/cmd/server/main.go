@@ -237,7 +237,7 @@ func runScan(ctx context.Context, stdout io.Writer, scan scanFunc, users []auth.
 func logCameraTimezone(cfg *config.Config) {
 	abbrev, offset := time.Now().In(cfg.CameraTimezone).Zone()
 	if cfg.CameraTimezoneFallsBackToUTC() {
-		slog.Warn("CAMERA_TIMEZONE is unset and the server runs in UTC, so photo times without a usable GPS timestamp are read as UTC; set CAMERA_TIMEZONE to the zone camera clocks show, e.g. Europe/Warsaw")
+		slog.Warn("CAMERA_TIMEZONE is unset and the server runs in UTC, so photo times without a usable GPS timestamp or offset tag are read as UTC; set CAMERA_TIMEZONE to the zone camera clocks show, e.g. Europe/Warsaw")
 		return
 	}
 	slog.Info("camera timezone", "zone", cfg.CameraTimezone.String(), "set", cfg.CameraTimezoneSet,
