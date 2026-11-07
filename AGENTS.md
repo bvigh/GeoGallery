@@ -34,6 +34,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `deploy/keycloak/geogallery-realm.json` | Dev/E2E Keycloak realm (client + test users alice/bob/carol, self-registration on). Dev only |
 | `docs/auth.md` | Identity provider setup (Logto, other providers, production Keycloak), API tokens, port hardening |
 | `docs/sharing-albums.md` | Sharing/albums design: decisions, invariants, schema, routes; "Implementation notes" lists where the code differs |
+| `docs/roadmap.md` | Planned work: milestones, ranking, dependencies, with a Codeberg issue per item |
 | `frontend/src/api/client.ts` | Typed fetch wrapper — all backend calls go here; a 401 redirects to login |
 | `frontend/src/types/index.ts` | Canonical TypeScript types shared across the app |
 | `frontend/src/components/auth/` | `AuthGate`, `LoginScreen`, `AuthContext` |
@@ -204,7 +205,7 @@ There is no HTTP ingest route. Folder scans are `server scan --user <id>` only.
 
 The filename used here is the original one (`media.filename`), never the opaque S3 key.
 
-XMP `ProjectionType` tag (most reliable signal) is not yet implemented — requires raw XMP scanning or `exiftool` binary.
+XMP `ProjectionType` tag (most reliable signal) is not yet implemented — requires raw XMP scanning or `exiftool` binary. Planned in #89; an owner override for stored items in #88.
 
 ## `taken_at` Fallback Priority
 
@@ -226,7 +227,7 @@ A rule change applies to new ingests only; stored rows keep their times. The exi
 
 For a video, `taken_at` is the container's `creation_time`. On Samsung phones that is when the recording ended (about 2 s after start + duration), so it sits later than the time in the filename. Insta360 files do not behave this way, so it is not corrected.
 
-Future: filename-based timestamp guessing (not yet implemented).
+Future: filename-based timestamp guessing (#91).
 
 ## Video location tag
 
@@ -303,13 +304,9 @@ Changing `KEYCLOAK_PORT` or `FRONTEND_PORT` requires matching `redirectUris` / `
 - Users are never deleted, only disabled (`ON DELETE RESTRICT` on owned data).
 - GPS resolution priority: EXIF (for a video, its container's location tag) → timestamp-interpolated from the owner's `gps_tracks` → null. Never from another user's tracks or shared media.
 
-## Unimplemented Work (in priority order)
+## Planned Work
 
-1. **360° media rendering improvements** — currently renders via Pannellum/Photo Sphere Viewer. The view-settings and keyframe editors exist in the backend; the frontend 360° viewer components exist but the editor UI is not wired up end-to-end.
-2. **Pagination** — `GET /api/media` pages with `limit` (≤ 5000) and `offset`, and every page re-runs the whole filtered sort. Move to cursor-based pagination. More pressing now that shared albums add to the volume. If the `OR EXISTS` in `readableMediaCond` makes the list slow, split it into `UNION ALL` (own ∪ shared).
-3. **Map clustering** — add `react-leaflet-cluster` or Supercluster when library grows large.
-4. **Filename-based timestamp guessing** — parse common filename patterns (e.g. `20230729_210400.jpg`) as `taken_at` fallback after file mtime.
-5. **XMP 360° detection** — parse `XMP-GPano:ProjectionType = equirectangular` for reliable 360° detection without depending on filename or aspect ratio.
+`docs/roadmap.md` ranks the planned work into milestones, and every item has a Codeberg issue with the details. Read the issue before starting on an item, and keep the roadmap's issue table in step when an item is split, dropped or added. `PRD.md` is the original product vision and MLP requirements; where it and the code differ, this file describes the code.
 
 Also out of scope so far: API token scopes, user deletion/export, multi-issuer login, re-link invites after a `sub`-changing provider migration, and CI. For sharing (design: `docs/sharing-albums.md`): direct per-user shares, viewer-only roles, live trip→album links, album invite links, ownership transfer, public links, album cover picking, `server scan --album` and cross-user dedup.
 
