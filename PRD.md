@@ -2,6 +2,8 @@
 
 *A self-hosted, map-centric media gallery with GPS-track enrichment and a GeoGuessr-style memory game, designed to help individuals and friends and explore their travel history.*
 
+> **Status (2026-11-07).** This document records the product vision and the requirements the MLP was built against. Planned work lives in [docs/roadmap.md](docs/roadmap.md) and the Codeberg issues, not here. Where the code has moved on since the MLP, [AGENTS.md](AGENTS.md) describes the current behaviour.
+
 ---
 
 ## 1. Overview
@@ -62,28 +64,29 @@ The following items complete the MLP:
 | 360° media rendering | **Done** | Photo Sphere Viewer (photo_360) and video viewer (video_360) in `frontend/src/components/viewer/`; per-media default view and keyframe settings |
 | Test suite | **Done** | Backend: geo, exif, GPS matcher, GPS tracks, media handler tests; Frontend: Vitest + RTL for MapPage, TripsPage, FilterPanel, MediaMap |
 
-**Phase 1 is complete.**
+**Phase 1 is complete.** The table describes the MLP as built. Some of it has changed since: folder ingest is the operator command `server scan --user <id>` (there is no HTTP scan route), and the 360° viewers are built on three.js.
 
-#### Phase 2 — Sharing with Friends
+#### Phase 2 — Sharing with Friends: done
 
-- Simple authentication (single shared password or invite-link) to allow friend access without open registration
-- Read-only shared view (members can browse the gallery and play the game, but not upload or modify trips)
-- Mobile-responsive layout improvements
+Delivered beyond the original plan:
 
-#### Phase 3 — Open-source public release
+- Invite-only login through one OIDC issuer (Logto Cloud hosted, Keycloak for dev), instead of a shared password. Admins create invites; the first admin comes from `server invite --admin`. See [docs/auth.md](docs/auth.md).
+- Albums with members instead of a read-only view. Members see everything in an album and add their own media; only the owner manages it. See [docs/sharing-albums.md](docs/sharing-albums.md).
+- A layout that works on phones.
 
-- Comprehensive README and AGENTS.md (in progress)
-- Docker Hub image published
-- Pagination for `/api/media` (currently capped at 500 rows)
-- Map marker clustering (react-leaflet-cluster or Supercluster) for large libraries
-- Contribution guidelines
+#### Phase 3 — Open-source public release: in progress
 
-#### Phase 4 — Hosted multi-user SaaS (long-term)
+- Done: `AGENTS.md`, map marker clustering, paged `/api/media` (`limit` up to 5,000 and `offset`).
+- Open: cursor pagination, README refresh and contribution guidelines, published images, CI, `/api/v1`. Tracked in [docs/roadmap.md](docs/roadmap.md) under "Public release".
 
-- Multi-tenancy (per-user data isolation)
-- OAuth / social login
-- Cloud object storage (S3 or GCS) instead of MinIO
-- Billing integration (open-source self-hosted remains free)
+#### Phase 4 — Hosted multi-user: mostly done
+
+- Done: per-user data isolation (`owner_id` on every row, enforced in the schema), social login through the IdP, any S3-compatible object storage.
+- Not planned: billing.
+
+#### Beyond the phases
+
+Further work is planned as milestones in [docs/roadmap.md](docs/roadmap.md): papercuts, time and place correctness, browsing and organisation, sharing and social, the public release, and parked ideas.
 
 **API and backward compatibility:** Phase 1→2 transitions must not break stored media references (S3 keys are immutable once written). Phase 2→3 must not change the `media` or `gps_tracks` schema in a breaking way — add columns, do not remove.
 
@@ -98,13 +101,13 @@ Requirements are organized by feature group. Phase 1 MLP requirements are marked
 **Use cases and implementation scenarios:**
 - User navigates to the Upload tab, selects one or more files (photos, videos, 360° content), and clicks Upload.
 - The frontend posts a `multipart/form-data` request to `POST /api/media/upload` with field name `files`.
-- The backend extracts EXIF data (GPS lat/lng, timestamp, camera model) from each file, uploads the file to MinIO under the key `media/{unix_nano}/{filename}`, and inserts a row into the `media` table.
+- The backend extracts EXIF data (GPS lat/lng, timestamp, camera model) from each file, uploads the file to MinIO under an opaque key `media/{owner_id}/{random hex}{.ext}` (no filename or time, so presigned URLs give no game hints), and inserts a row into the `media` table.
 - If EXIF GPS is present, `media.location` is set immediately and `gps_source = 'exif'`.
 - If EXIF GPS is absent, `media.location` is NULL and `gps_source = NULL` pending the GPS matcher job (F2.R1).
 - `taken_at` is set from EXIF `DateTime` if present; falls back to file modification time.
 
 **Acceptance criteria:**
-- Files up to 50GB upload without timeout.
+- Requests up to the 4 GiB body limit upload without timeout.
 - EXIF GPS is extracted for images and videos with embedded coordinates.
 - Files with no EXIF GPS are inserted with `location = NULL` (not rejected).
 - Duplicate files (same partial hash: first + last 64 KB + file size) are skipped without error.
@@ -117,9 +120,9 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 - If MinIO is unreachable, upload returns HTTP 500 with a descriptive error. No partial DB inserts.
 - If EXIF extraction fails (corrupt file), the file is still uploaded and inserted with NULL location.
 
-**Configuration/telemetry/management:** Max upload size configurable via `SERVER_MAX_UPLOAD_MB` env var (default 50000). File count per request is unbounded.
+**Configuration/telemetry/management:** The request body is limited to 4 GiB. File count per request is unbounded. The Upload page hashes files in the browser first and sends only those not yet in the library.
 
-**Security considerations:** No authentication in Phase 1 (single-user). Phase 2 adds auth before exposing the upload endpoint publicly. File type is validated by extension and MIME type; no executable extensions accepted.
+**Security considerations:** Upload requires a signed-in user (session or API token), and every file goes into the caller's own library. File type is validated by extension and MIME type; no executable extensions accepted.
 
 **Performance/scale:** Upload is synchronous. For > 50 concurrent uploads, consider async queue (Phase 3).
 
@@ -129,9 +132,9 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 
 **Use cases and implementation scenarios:**
 - User copies media files to the `./ingest/` directory (mounted at `/ingest` in the backend container).
-- User calls `POST /api/ingest/scan` (or the frontend trigger button).
-- The backend walks the directory, processes each supported file (`.jpg`, `.jpeg`, `.png`, `.heic`, `.heif`, `.webp`, `.mp4`, `.mov`, `.avi`, `.mkv`), and ingests new files using the same pipeline as F1.R1.
-- Files already present in the `media` table (matched by filename) are skipped.
+- The operator runs `server scan --user <id>` on the server (there is no HTTP route; it needs server filesystem access).
+- The backend walks the directory, processes each supported file (`.jpg`, `.jpeg`, `.png`, `.heic`, `.heif`, `.webp`, `.mp4`, `.mov`, `.avi`, `.mkv`), and ingests new files into that user's library using the same pipeline as F1.R1.
+- Files already in that user's library (matched by partial file hash) are skipped.
 
 **Acceptance criteria:**
 - A directory with 1000 mixed files ingests completely without timeout (async or streaming response).
@@ -154,7 +157,8 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 **Use cases and implementation scenarios:**
 - User has a SQLite database or JSON/CSV export from Google Maps Timeline, Strava, or another GPS source.
 - User calls `POST /api/gps-tracks/import` with a JSON payload containing an array of track points: `[{source, recorded_at, lat, lng, altitude_m, accuracy_m}]`.
-- The backend bulk-inserts into the `gps_tracks` table. Duplicate `(source, recorded_at)` pairs are ignored (`ON CONFLICT DO NOTHING`).
+- The backend bulk-inserts into the caller's `gps_tracks`. Duplicate `(owner_id, source, recorded_at)` rows are ignored (`ON CONFLICT DO NOTHING`).
+- Since the MLP, track files can also be uploaded as they are (`POST /api/gps-tracks/upload`): GPX, TCX, KML/KMZ, GeoJSON, NMEA, esoko logs, Google Timeline and Samsung Health exports, optionally gzipped. No conversion script is needed.
 
 **Acceptance criteria:**
 - A batch of 100,000 track points imports in under 30 seconds.
@@ -180,7 +184,7 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 3. `interpolated` — estimated from bracketing `gps_tracks` points by timestamp; used only when EXIF GPS is absent.
 
 **Use cases and implementation scenarios:**
-- The matcher runs in two situations: (a) automatically at the end of every ingest scan, and (b) automatically after a GPS track import (`POST /api/gps-tracks/import`). This ensures that media uploaded before GPS tracks existed gets retroactively enriched when tracks are added later.
+- The matcher runs in two situations: (a) automatically at the end of every ingest (upload or scan), and (b) automatically after a GPS track import (`POST /api/gps-tracks/import`). This ensures that media uploaded before GPS tracks existed gets retroactively enriched when tracks are added later.
 - For each media row with `location = NULL` (and `gps_source` is NULL), the backend queries `gps_tracks` for the nearest point before and after `media.taken_at`.
 - `geo.Interpolate(before, after, takenAt, maxWindow)` computes a linear interpolated lat/lng and a confidence score (0.0–1.0).
 - Confidence decays with time gap (relative to the nearest bracketing point in time) and with distance between bracketing points (up to 10 km).
@@ -213,7 +217,7 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 - User opens the Map tab. All media with a resolved `location` is fetched from `GET /api/media` and rendered as markers on the Leaflet map.
 - Clicking a marker opens a side panel (not an inline popup) showing a preview of the media file and its metadata. The side panel is persistent — clicking another marker replaces the current preview without closing the panel.
 - The side panel displays: media preview (photo thumbnail or video player), filename, date, GPS source, confidence percentage, and trip name if assigned.
-- A "Full screen" button in the side panel opens the media in a full-screen overlay. For `photo_360` and `video_360` types, the full-screen view uses the 360° renderer (Pannellum or Photo Sphere Viewer).
+- A "Full screen" button in the side panel opens the media in a full-screen overlay. For `photo_360` and `video_360` types, the full-screen view uses the 360° renderer (three.js).
 - Media without a location is excluded from the map (but accessible from the Trips tab).
 
 **Acceptance criteria:**
@@ -229,9 +233,9 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 
 **Configuration/telemetry/management:** Map tile provider is configurable by changing the `<TileLayer>` URL in `MediaMap.tsx`. Defaults to OpenStreetMap (no API key needed).
 
-**Security considerations:** Presigned MinIO URLs are used for media previews — not raw MinIO endpoints. URLs expire after a configurable duration (default 1 hour).
+**Security considerations:** Presigned MinIO URLs are used for media previews — not raw MinIO endpoints. URLs expire after 15 minutes.
 
-**Performance/scale:** For libraries > 5,000 items, marker clustering (Supercluster or react-leaflet-cluster) must be added before public release (Phase 3). Without clustering, the Leaflet DOM degrades noticeably above ~2,000 markers.
+**Performance/scale:** Markers are clustered (`leaflet.markercluster`), and a filter change adds or removes only the markers that changed, in bulk. Without clustering, the Leaflet DOM degrades noticeably above ~2,000 markers.
 
 ---
 
@@ -266,7 +270,7 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 **Use cases and implementation scenarios:**
 - User opens the Game tab and clicks "Start Round".
 - `GET /api/game/round` returns a random media item with a resolved location, a presigned URL, and `max_dist_km` (the 95th-percentile pairwise distance across the media collection, computed per round).
-- The game can be filtered by date range, trip, and media type via query parameters — the same filter set as `GET /api/media`.
+- The game can be filtered by date range, trip, album, owner, and media type via query parameters — the same filter set as `GET /api/media`. Media shared through albums can appear in rounds.
 - The left half of the screen shows the photo or video. The right half shows a world map (Leaflet).
 - User clicks the map to place their location guess, and optionally enters a date guess.
 - User clicks "Submit Guess". `POST /api/game/guess` returns the actual location, actual date, distance error (km), date error (days), and component scores.
@@ -285,7 +289,7 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 
 **Security considerations:** The game endpoint does not reveal the actual location until after the guess is submitted. The `GET /api/game/round` response contains only the media URL and type — no coordinates.
 
-**Performance/scale:** No special requirements. Single-user game.
+**Performance/scale:** No special requirements. Each user plays on their own; shared challenges are planned (see the roadmap).
 
 ---
 
@@ -319,7 +323,7 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 
 ### 3.1 Definition of Use Cases Against Deployment Scenarios
 
-**Deployment scenario:** Single-user local instance (Phase 1). All services run via `docker compose up` on a personal workstation or home server. No internet access required.
+**Deployment scenario:** A self-hosted instance for one person or a group of friends. All services run via `docker compose up` on a personal workstation, home server or small VPS. Users sign in through an OIDC provider; locally, the dev Keycloak (`docker compose --profile dev up`) needs no internet access.
 
 ---
 
@@ -328,8 +332,8 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 *Precondition:* User has a directory of thousands of photos and videos from a past trip. Some have EXIF GPS; most do not.
 
 1. User copies files into `./ingest/`
-2. User calls `POST /api/ingest/scan` (or clicks the trigger in the Upload tab)
-3. Backend processes each file: extracts EXIF, uploads to MinIO, inserts into `media`
+2. The operator runs `server scan --user <id>` (or the user uploads the files on the Upload tab)
+3. Backend processes each file: extracts EXIF, uploads to MinIO, inserts into that user's `media`
 4. Backend triggers the GPS matcher; media with EXIF GPS shows immediately on the map
 5. Media without EXIF GPS shows as unlocated (grey, absent from map)
 
@@ -341,11 +345,10 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 
 *Precondition:* User has exported their Google Maps Timeline as JSON. Most media from UC1 has no EXIF GPS but was recorded during periods covered by the timeline.
 
-1. User converts Timeline export to the GeoGallery import format (script or manual)
-2. User calls `POST /api/gps-tracks/import` with the track points
-3. Backend inserts into `gps_tracks`
-4. GPS matcher runs: for each un-located media row, finds bracketing track points, interpolates, writes location + confidence
-5. Previously-grey markers appear on the map with their confidence shown in the popup
+1. User uploads the Timeline export on the Upload tab (`POST /api/gps-tracks/upload`; no conversion needed)
+2. Backend parses it and inserts the points into the user's `gps_tracks`
+3. GPS matcher runs: for each un-located media row, finds bracketing track points, interpolates, writes location + confidence
+4. Previously-grey markers appear on the map with their confidence shown in the popup
 
 *Success state:* > 80% of un-located media gains a location. Remaining un-located items are those recorded outside any tracked period.
 
@@ -395,27 +398,28 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 
 ### 3.2 Management Strategy
 
-**Admin interface:** There is no separate admin UI. Configuration is done entirely through environment variables (`.env` file) before startup. Changes require a container restart.
+**Admin interface:** The Admin tab (admins only) lists users, disables and re-enables them, and creates invite links. Server configuration is done through environment variables (`.env` file) before startup; changes require a restart.
 
-**APIs:** All functionality is exposed via the REST API at `/api/*`. See §API Reference in [README.md](README.md). The API is not versioned in Phase 1; versioning (`/api/v1/`) will be added before public release.
+**APIs:** All functionality is exposed via the REST API at `/api/*`, with a session cookie or a personal API token (`Authorization: Bearer gg_pat_…`, created on the Settings tab). The route list is in [AGENTS.md](AGENTS.md). The API is not versioned yet; `/api/v1/` is planned before a public release.
 
-**CLI tools:** No dedicated CLI. Operations are performed via `curl` or the frontend UI. A future `geogallery-cli` tool may wrap the import and scan operations for scripting.
+**CLI tools:** The server binary has operator subcommands: `invite`, `users`, `scan` and `rebind-issuer`. Scripts use the REST API with an API token.
 
-**Monitoring:** No built-in metrics or alerting in Phase 1. The Go backend logs all requests via chi's `middleware.Logger`. Structured JSON logging will be added in Phase 3.
+**Monitoring:** No built-in metrics or alerting. The backend logs every request path (never the query string) through `log/slog`, as text or JSON (`LOG_FORMAT`).
 
 **Operational runbooks:**
 
 | **Operation** | **Command** |
 |---|---|
-| Start all services | `docker compose up` |
-| Trigger folder ingest | `curl -X POST http://localhost:8080/api/ingest/scan` |
-| Import GPS tracks | `curl -X POST http://localhost:8080/api/gps-tracks/import -H "Content-Type: application/json" -d @tracks.json` |
-| Re-run GPS matcher | `curl -X POST http://localhost:8080/api/gps-matcher/run` |
-| Run trip auto-detection | Runs automatically after every ingest/import. No manual step needed. |
+| Start all services | `docker compose up` (add `--profile dev` for the dev Keycloak) |
+| Create the first admin | `docker compose exec backend ./server invite --admin`, then open the printed link |
+| Folder ingest for a user | `docker compose exec backend ./server scan --user <id>` (files in `./ingest`) |
+| Import GPS tracks | Upload the track files on the Upload tab, or `POST /api/gps-tracks/upload` with an API token |
+| Re-run GPS matcher | `POST /api/gps-matcher/run` (per user) |
+| Run trip auto-detection | Runs automatically after every ingest and import. No manual step needed. |
 | Reset all data | `docker compose down -v && docker compose up` |
 | Run DB migrations manually | `cd backend && go run ./cmd/server` (auto-runs on startup) |
 
-**Backup:** Docker volume `db_data` (PostGIS) and `minio_data` (media files) should be backed up regularly. No backup tooling is included in Phase 1.
+**Backup:** Docker volume `db_data` (PostGIS) and `minio_data` (media files) should be backed up regularly. No backup tooling is included.
 
 ---
 
@@ -424,7 +428,11 @@ Users with hundreds of files need bulk upload. The web UI enables this via the `
 | **Document** | **Location** |
 |---|---|
 | README.md | [README.md](README.md) — quickstart, API reference, env variables |
-| AGENTS.md | [AGENTS.md](AGENTS.md) — developer/agent guide, unimplemented gaps, conventions |
+| AGENTS.md | [AGENTS.md](AGENTS.md) — developer/agent guide: current behaviour, routes, conventions |
+| Roadmap | [docs/roadmap.md](docs/roadmap.md) — planned work, ranked, with issue numbers |
+| Authentication | [docs/auth.md](docs/auth.md) — identity provider setup, API tokens |
+| Sharing | [docs/sharing-albums.md](docs/sharing-albums.md) — albums design |
+| Deployment | [docs/deployment-hetzner.md](docs/deployment-hetzner.md) — a hosted instance |
 | docker-compose.yml | [docker-compose.yml](docker-compose.yml) |
 | DB schema (migration 1) | [backend/migrations/000001_init.up.sql](backend/migrations/000001_init.up.sql) |
 | Trip auto-detection SQL | [backend/migrations/000002_trip_autodetect.up.sql](backend/migrations/000002_trip_autodetect.up.sql) |
