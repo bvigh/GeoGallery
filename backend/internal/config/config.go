@@ -30,7 +30,7 @@ type Config struct {
 	LogFormat           string
 
 	// CameraTimezone is the zone camera clocks are assumed to show: a photo's EXIF time carries no
-	// usable zone, so ingest reads it here unless the photo's GPS clock says otherwise. From
+	// usable zone, so ingest reads it here unless the photo's GPS clock or offset tag says otherwise. From
 	// CAMERA_TIMEZONE (an IANA name); unset, the server's own zone (TZ or /etc/localtime).
 	CameraTimezone    *time.Location
 	CameraTimezoneSet bool // CAMERA_TIMEZONE was set

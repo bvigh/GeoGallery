@@ -12,10 +12,14 @@ import (
 
 // Photo lists the tags to write. An empty string or nil leaves a tag out.
 type Photo struct {
+	Make               string // IFD0 0x010F
 	DateTimeOriginal   string // Exif IFD 0x9003, "2006:01:02 15:04:05"
 	DateTime           string // IFD0 0x0132 (ModifyDate), the fallback when DateTimeOriginal is missing
 	OffsetTimeOriginal string // Exif IFD 0x9011, e.g. "+01:00"
 	GPS                *GPS
+	// BrokenExifIFD adds a zero-length tag to the Exif IFD, as old Sony cameras write. goexif then
+	// reports a non-critical error and skips that whole IFD.
+	BrokenExifIFD bool
 }
 
 // GPS is the GPS IFD. A zero Time leaves GPSDateStamp and GPSTimeStamp out.
@@ -55,6 +59,9 @@ func JPEG(p Photo) []byte {
 // TIFF returns the EXIF TIFF structure (header, IFD0, Exif IFD, GPS IFD) for p.
 func TIFF(p Photo) []byte {
 	var ifd0, exifIFD, gpsIFD []entry
+	if p.Make != "" {
+		ifd0 = append(ifd0, ascii(0x010F, p.Make))
+	}
 	if p.DateTime != "" {
 		ifd0 = append(ifd0, ascii(0x0132, p.DateTime))
 	}
@@ -63,6 +70,9 @@ func TIFF(p Photo) []byte {
 	}
 	if p.OffsetTimeOriginal != "" {
 		exifIFD = append(exifIFD, ascii(0x9011, p.OffsetTimeOriginal))
+	}
+	if p.BrokenExifIFD {
+		exifIFD = append(exifIFD, entry{0x9286, typeASCII, 0, nil})
 	}
 	if g := p.GPS; g != nil {
 		gpsIFD = append(gpsIFD,

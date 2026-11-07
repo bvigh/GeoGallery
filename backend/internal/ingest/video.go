@@ -6,9 +6,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/labstack/gommon/log"
+
+	"codeberg.org/bvigh/geogallery/internal/geo"
 )
 
 type VideoProbeResult struct {
@@ -18,6 +22,8 @@ type VideoProbeResult struct {
 	CreatedAt       *time.Time
 	CodecName       string // e.g. "h264", "mpeg4", "hevc"
 	CodecTag        string // e.g. "avc1", "mp4v", "hvc1"
+	// Lat and Lng are the container's location tag, nil when it is absent or unusable.
+	Lat, Lng *float64
 }
 
 // NeedsTranscode reports whether the video requires transcoding to H.264 for
@@ -103,6 +109,26 @@ func ProbeVideo(r io.Reader) (*os.File, VideoProbeResult, error) {
 	return tmp, parseProbeOutput(out), nil
 }
 
+// iso6709Degrees matches ISO 6709 in decimal degrees at the start of a tag: "+47.4979+019.0402/".
+// Real tags can carry an altitude or trailing bytes. The degrees-and-minutes forms, such as
+// "+4729.87+01902.41/", do not match, so they are refused instead of being read as far-off degrees.
+var iso6709Degrees = regexp.MustCompile(`^([+-]\d{2}(?:\.\d+)?)([+-]\d{3}(?:\.\d+)?)`)
+
+// parseISO6709 returns the position in a location tag. Phones without a fix write
+// "+00.0000+000.0000/", which geo.IsValidGPS refuses.
+func parseISO6709(s string) (lat, lng float64, ok bool) {
+	m := iso6709Degrees.FindStringSubmatch(s)
+	if m == nil {
+		return 0, 0, false
+	}
+	lat, errLat := strconv.ParseFloat(m[1], 64)
+	lng, errLng := strconv.ParseFloat(m[2], 64)
+	if errLat != nil || errLng != nil || !geo.IsValidGPS(lat, lng) {
+		return 0, 0, false
+	}
+	return lat, lng, true
+}
+
 func parseProbeOutput(out []byte) VideoProbeResult {
 	var parsed struct {
 		Streams []struct {
@@ -118,6 +144,9 @@ func parseProbeOutput(out []byte) VideoProbeResult {
 		Format struct {
 			Tags struct {
 				CreationTime string `json:"creation_time"`
+				Location     string `json:"location"`
+				LocationEng  string `json:"location-eng"`
+				LocationMOV  string `json:"com.apple.quicktime.location.ISO6709"`
 			} `json:"tags"`
 		} `json:"format"`
 	}
@@ -141,7 +170,7 @@ func parseProbeOutput(out []byte) VideoProbeResult {
 		}
 	}
 
-	return VideoProbeResult{
+	result := VideoProbeResult{
 		WidthPx:         s.Width,
 		HeightPx:        s.Height,
 		Equirectangular: equirect,
@@ -149,4 +178,12 @@ func parseProbeOutput(out []byte) VideoProbeResult {
 		CodecName:       s.CodecName,
 		CodecTag:        s.CodecTag,
 	}
+	tags := parsed.Format.Tags
+	for _, raw := range []string{tags.Location, tags.LocationEng, tags.LocationMOV} {
+		if lat, lng, ok := parseISO6709(raw); ok {
+			result.Lat, result.Lng = &lat, &lng
+			break
+		}
+	}
+	return result
 }

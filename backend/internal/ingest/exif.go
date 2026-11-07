@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"bytes"
 	"io"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 // Where ExifData.TakenAt's UTC offset came from.
 const (
 	ZoneGPS    = "gps"    // the camera clock measured against the photo's GPS timestamp
+	ZoneOffset = "offset" // the photo's OffsetTimeOriginal tag
 	ZoneCamera = "camera" // the camera timezone (CAMERA_TIMEZONE)
 )
 
@@ -22,7 +24,7 @@ type ExifData struct {
 	Lat         *float64
 	Lng         *float64
 	TakenAt     *time.Time
-	TakenAtZone string // ZoneGPS or ZoneCamera; empty without TakenAt
+	TakenAtZone string // ZoneGPS, ZoneOffset or ZoneCamera; empty without TakenAt
 	CameraModel string
 	WidthPx     *int
 	HeightPx    *int
@@ -32,7 +34,9 @@ type ExifData struct {
 // assumed to show (CAMERA_TIMEZONE); nil means UTC. takenAt explains how the capture time is read.
 func ExtractExif(r io.Reader, cameraZone *time.Location) ExifData {
 	x, err := exif.Decode(r)
-	if err != nil {
+	// A non-critical error means one sub-IFD was unreadable; the tags read from the rest are good.
+	// Old Sony cameras write an Exif IFD goexif rejects, and their IFD0 DateTime is still right.
+	if err != nil && (x == nil || exif.IsCriticalError(err)) {
 		return ExifData{}
 	}
 
@@ -70,26 +74,92 @@ func ExtractExif(r io.Reader, cameraZone *time.Location) ExifData {
 
 const exifTimeLayout = "2006:01:02 15:04:05"
 
-// takenAt reads the capture time. EXIF stores it as a wall clock without a zone, so the zone is
-// chosen here, and never from the server's own timezone (that made the same photo an hour or two
-// apart between a native and a Docker server):
+// takenAt reads the capture time. EXIF stores it as a wall clock, so the zone is chosen here, and
+// never from the server's own timezone (that made the same photo an hour or two apart between a
+// native and a Docker server):
 //  1. when the photo's GPS timestamp (UTC) puts the camera clock within gpsClockTolerance of a
-//     UTC offset in real use, that offset. It follows a phone abroad;
-//  2. otherwise cameraZone, with its daylight saving rules on that date.
-//
-// OffsetTimeOriginal is deliberately ignored: the Panasonic DC-TZ200 writes "+01:00" all year, so
-// a summer photo from a clock showing Central European wall time would land an hour late.
+//     UTC offset in real use, that offset. It is measured, so it outranks what the camera declares;
+//  2. the photo's OffsetTimeOriginal, unless its make is in offsetIgnoredMakes. A phone writes the
+//     offset its clock really shows, abroad too, and many phones write no GPS timestamp;
+//  3. otherwise cameraZone, with its daylight saving rules on that date.
 func takenAt(x *exif.Exif, cameraZone *time.Location) (*time.Time, string) {
 	wall, ok := exifWallClock(x)
 	if !ok {
 		return nil, ""
 	}
 	if offset, ok := gpsClockOffset(x, wall); ok {
-		t := wall.Add(-offset).In(time.FixedZone("", int(offset/time.Second)))
+		t := wallAtOffset(wall, offset)
 		return &t, ZoneGPS
+	}
+	if offset, ok := offsetTimeOriginal(x); ok {
+		t := wallAtOffset(wall, offset)
+		return &t, ZoneOffset
 	}
 	t := time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, cameraZone)
 	return &t, ZoneCamera
+}
+
+// wallAtOffset reads wall, a clock reading held as a time in UTC, at a UTC offset.
+func wallAtOffset(wall time.Time, offset time.Duration) time.Time {
+	return wall.Add(-offset).In(time.FixedZone("", int(offset/time.Second)))
+}
+
+// offsetIgnoredMakes lists camera makes, in lower case, whose OffsetTimeOriginal is wrong, so their
+// photos are read in the camera zone instead. The value alone cannot tell them apart: the Panasonic
+// DC-TZ200 writes "+01:00" all year, even while its clock shows Central European Summer Time, and a
+// phone in London writes the same "+01:00" and means it. If another camera turns out to write a
+// wrong offset, add its make here. Photos it already ingested keep their stored times until repaired.
+var offsetIgnoredMakes = map[string]bool{"panasonic": true}
+
+// offsetTimeOriginalTag is EXIF's OffsetTimeOriginal in the Exif IFD. goexif has no field for it.
+const offsetTimeOriginalTag = 0x9011
+
+// offsetTimeOriginal returns the photo's OffsetTimeOriginal when it is a UTC offset in real use and
+// its make is trusted.
+func offsetTimeOriginal(x *exif.Exif) (time.Duration, bool) {
+	if tag, err := x.Get(exif.Make); err == nil {
+		if cameraMake, err := tag.StringVal(); err == nil && offsetIgnoredMakes[strings.ToLower(strings.TrimSpace(cameraMake))] {
+			return 0, false
+		}
+	}
+	ptr, err := x.Get(exif.ExifIFDPointer)
+	if err != nil {
+		return 0, false
+	}
+	at, err := ptr.Int64(0)
+	if err != nil {
+		return 0, false
+	}
+	r := bytes.NewReader(x.Raw)
+	if _, err := r.Seek(at, io.SeekStart); err != nil {
+		return 0, false
+	}
+	dir, _, err := tiff.DecodeDir(r, x.Tiff.Order)
+	if err != nil {
+		return 0, false
+	}
+	for _, tag := range dir.Tags {
+		if tag.Id != offsetTimeOriginalTag {
+			continue
+		}
+		s, err := tag.StringVal()
+		if err != nil {
+			return 0, false
+		}
+		return parseUTCOffset(s)
+	}
+	return 0, false
+}
+
+// parseUTCOffset reads "+01:00". Cameras without a zone write blanks or colons, which fail here.
+func parseUTCOffset(s string) (time.Duration, bool) {
+	t, err := time.Parse("-07:00", strings.TrimSpace(s))
+	if err != nil {
+		return 0, false
+	}
+	_, seconds := t.Zone()
+	offset := time.Duration(seconds) * time.Second
+	return offset, isRealOffset(offset)
 }
 
 // exifWallClock returns the capture time's wall clock, as a time in UTC: DateTimeOriginal, or IFD0
