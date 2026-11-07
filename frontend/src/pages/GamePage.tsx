@@ -12,6 +12,7 @@ import { ZoomableImage } from "@/components/viewer/ZoomableImage";
 import { useVideoDecodeCheck } from "@/lib/video";
 import { FilterPanel } from "@/components/map/FilterPanel";
 import { MiniMapOverlay } from "@/components/map/MiniMapOverlay";
+import { TOP_MARKER_Z_INDEX_OFFSET } from "@/components/map/markers";
 
 // dd-mm-yyyy (a one-digit day or month too) → yyyy-mm-dd, or "" for anything else. An
 // impossible date is "" as well: the backend would drop it without a word.
@@ -394,6 +395,7 @@ export function GamePage() {
             <Marker
               position={[result.actual_lat, result.actual_lng]}
               icon={actualIcon}
+              zIndexOffset={TOP_MARKER_Z_INDEX_OFFSET}
             />
             <Polyline
               positions={[

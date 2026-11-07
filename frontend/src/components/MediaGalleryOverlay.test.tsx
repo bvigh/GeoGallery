@@ -29,9 +29,21 @@ vi.mock("@/api/client", async (importOriginal) => {
 vi.mock("react-leaflet", () => ({
   MapContainer: ({ children }: { children: ReactNode }) => <div data-testid="map">{children}</div>,
   TileLayer: () => null,
-  // A button per marker, so a test can click one.
-  Marker: ({ position, eventHandlers }: { position: [number, number]; eventHandlers?: { click?: () => void } }) => (
-    <button aria-label={`Marker at ${position.join(",")}`} onClick={() => eventHandlers?.click?.()} />
+  // A button per marker, so a test can click one; it carries the marker's stacking offset.
+  Marker: ({
+    position,
+    eventHandlers,
+    zIndexOffset,
+  }: {
+    position: [number, number];
+    eventHandlers?: { click?: () => void };
+    zIndexOffset?: number;
+  }) => (
+    <button
+      aria-label={`Marker at ${position.join(",")}`}
+      data-z-index-offset={zIndexOffset ?? 0}
+      onClick={() => eventHandlers?.click?.()}
+    />
   ),
   useMap: () => leafletMap,
   useMapEvents: () => null,
@@ -467,6 +479,21 @@ describe("MediaGalleryOverlay", () => {
 
     expect(await screen.findByText("2 / 2")).toBeInTheDocument();
     expect(screen.getByText("Shared by Bob")).toBeInTheDocument();
+  });
+
+  // Leaflet stacks markers by screen row, so without an offset a marker below would cover it.
+  it("lifts the current item's marker above the others", async () => {
+    mockApi.get.mockResolvedValue([own, { ...shared, lat: 48.2, lng: 16.4 }]);
+    renderOverlay();
+    await screen.findByText("1 / 2");
+    const offset = (name: string) => screen.getByRole("button", { name }).getAttribute("data-z-index-offset");
+    expect(offset("Marker at 64.1,-21.9")).toBe("1000");
+    expect(offset("Marker at 48.2,16.4")).toBe("0");
+
+    await userEvent.click(screen.getByRole("button", { name: "Marker at 48.2,16.4" }));
+    expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+    expect(offset("Marker at 64.1,-21.9")).toBe("0");
+    expect(offset("Marker at 48.2,16.4")).toBe("1000");
   });
 
   it("shows no map when no item has a location", async () => {

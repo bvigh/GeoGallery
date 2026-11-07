@@ -122,6 +122,19 @@ describe("EditLocationModal", () => {
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(48.8566, 2.3522));
   });
 
+  // Leaflet stacks markers by screen row (z-index = the marker's y + its offset). The editor's map
+  // has one marker today; the offset keeps the picked position on top like every green marker.
+  it("lifts the picked position's marker", async () => {
+    const { container } = render(<EditLocationModal item={item} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Coordinates" }), "48.8566, 2.3522");
+    await userEvent.click(screen.getByRole("button", { name: "Go" }));
+
+    const marker = container.querySelector<HTMLElement>(".leaflet-marker-icon");
+    expect(marker).not.toBeNull();
+    // jsdom's map has no size, so the marker sits on row 0 and its z-index is the offset alone.
+    expect(marker!.style.zIndex).toBe("1000");
+  });
+
   // A portrait phone with the keyboard open is as short as a sideways one; short: excludes it
   // (tailwind.screens.test.ts), so the field keeps the whole width while coordinates are pasted.
   it("puts the bottom bar's rows side by side only on a sideways phone", () => {

@@ -4,6 +4,7 @@ import L from "leaflet";
 import type { MediaItem } from "../types";
 import { api } from "../api/client";
 import { useCloseOnBack } from "@/lib/useCloseOnBack";
+import { TOP_MARKER_Z_INDEX_OFFSET } from "@/components/map/markers";
 import "leaflet/dist/leaflet.css";
 
 function MapClickHandler({ onMapClick }: { onMapClick: (lat: number, lng: number) => void }) {
@@ -140,6 +141,7 @@ export function EditLocationModal({ item, onClose, onSaved }: Props) {
             <Marker
               position={[pickedLat, pickedLng]}
               icon={pickedMarkerIcon}
+              zIndexOffset={TOP_MARKER_Z_INDEX_OFFSET}
               draggable
               eventHandlers={{
                 dragend: (e) => {
