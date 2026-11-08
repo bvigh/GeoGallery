@@ -58,6 +58,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `frontend/public/video-playback.html` | Static guide for browsers that cannot decode HEVC (Chromium on Linux needs GPU decoding through VA-API, or use Firefox ≥ 137); linked from `VideoDecodeNotice` |
 | `frontend/e2e/` | Playwright suite: `playwright.config.ts`, `support.ts` (`E2E_BACKEND_ENV`), `auth.setup.ts`, `*.e2e.ts`; `sharing.e2e.ts` runs in its own `sharing` project after all others |
 | `scripts/e2e-reset-db.sh` | Drops and recreates `geogallery_e2e` via `docker compose exec db` |
+| `.github/workflows/ci.yml` | GitHub Actions on every pull request and push to `main`: the `Backend`, `Frontend` and `E2E` jobs |
 | `ingest/` | Drop media here, then run `server scan --user <id>` |
 
 ## Commands
@@ -312,7 +313,7 @@ Changing `KEYCLOAK_PORT` or `FRONTEND_PORT` requires matching `redirectUris` / `
 
 `docs/roadmap.md` ranks the planned work into milestones, and every item has a GitHub issue with the details. Read the issue before starting on an item, and keep the roadmap's issue table in step when an item is split, dropped or added. `PRD.md` is the original product vision and MLP requirements; where it and the code differ, this file describes the code.
 
-Also out of scope so far: API token scopes, user deletion/export, multi-issuer login, re-link invites after a `sub`-changing provider migration, and CI. For sharing (design: `docs/sharing-albums.md`): direct per-user shares, viewer-only roles, live trip→album links, album invite links, ownership transfer, public links, album cover picking, `server scan --album` and cross-user dedup.
+Also out of scope so far: API token scopes, user deletion/export, multi-issuer login, and re-link invites after a `sub`-changing provider migration. For sharing (design: `docs/sharing-albums.md`): direct per-user shares, viewer-only roles, live trip→album links, album invite links, ownership transfer, public links, album cover picking, `server scan --album` and cross-user dedup.
 
 ## Testing
 
@@ -373,7 +374,14 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - Vitest + React Testing Library. Run with `npm run test`. Limits are sized for a busy machine: 20 s per test (`vite.config.ts`) and 5 s for `findBy*`/`waitFor` (`src/test-setup.ts`). To record what renders after a user action, clear the record and fire the action in one synchronous block (`fireEvent`): `userEvent` yields between its pointer events, and renders from before the action would land in the record.
 - Test components that contain logic; pure utility functions in `src/lib/` get unit tests.
 
-**E2E — Playwright + Keycloak (`frontend/e2e/`, local only, no CI)**
+**CI — GitHub Actions (`.github/workflows/ci.yml`)**
+- Runs on every pull request and every push to `main`. It uses no secrets, so pull requests from forks can run it too.
+- `Backend`: `go test ./...` against a PostGIS service with `TEST_DATABASE_URL`. It installs ffmpeg, because the video tests skip without it.
+- `Frontend`: `npm run lint`, `npm run test` and `npm run build` on Node 22.
+- `E2E`: `npm run e2e` against the compose `db` and `keycloak`. S3 is SeaweedFS (`chrislusf/seaweedfs`, pinned), because the AIStor image needs a license file. It listens on `localhost:9000` with the default `S3_*` credentials and bucket, so the backend runs unchanged. The only S3 calls are `HeadBucket`, upload (multipart included), presigned `GET` and `DeleteObject`; a new kind of call must be checked against both servers. Playwright traces are uploaded when the job fails.
+- Runner clocks are UTC, and there is no `backend/.env`: a test must not depend on either.
+
+**E2E — Playwright + Keycloak (`frontend/e2e/`, locally and in CI)**
 - `npm run e2e`. One-time: `npx playwright install chromium`. Preconditions: see Commands. Only one run at a time.
 - Playwright starts two webServers before setup: the backend (build → `scripts/e2e-reset-db.sh` → serve on `:8091`) and Vite on `:5174`. `auth.setup.ts` then runs `./.e2e/server invite` for alice (admin) and bob, logs each in through Keycloak in a fresh browser context, and saves `e2e/.auth/{alice,bob}.json`.
 - Specs: anonymous sign-in screen, carol not invited, alice uploads `fixtures/gps.jpg`, bob's empty library, admin tab and invites, logout without a Keycloak prompt (fresh context), the API token lifecycle (bob), and sharing (`sharing.e2e.ts`: alice creates an album, adds bob from the members dialog's user list, picks the album on the Upload page, uploads the duplicate `gps.jpg` into it (the page finds it by hash and sends no upload request); bob sees it "Shared by" with no delete button, not on his Trips page, and the album on his Albums page; alice removes bob, bob's map is empty, and alice deletes the album, with an API fallback in a `finally`).

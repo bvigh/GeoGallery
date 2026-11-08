@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  pull_request:
+  # Also on main: a pull request can only restore caches saved by itself or by the default branch.
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: geogallery
+          POSTGRES_PASSWORD: geogallery
+          POSTGRES_DB: geogallery
+        ports:
+          - 5432:5432
+        options: >-
+          --shm-size=256mb
+          --health-cmd "pg_isready -U geogallery"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      # Without ffmpeg and ffprobe the video tests skip instead of failing.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Unit and integration tests
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgres://geogallery:geogallery@localhost:5432/postgres?sslmode=disable
+        run: go test ./...
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests
+        run: npm run test
+      - name: Build
+        run: npm run build
+
+  e2e:
+    name: E2E
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      # MinIO AIStor needs a license file, so CI uses SeaweedFS instead. It answers on the
+      # backend's default S3_ENDPOINT with the default credentials and bucket, so no S3_* is set.
+      s3:
+        image: chrislusf/seaweedfs:4.52
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          S3_BUCKET: geogallery
+        ports:
+          - 9000:8333
+        options: >-
+          --health-cmd "wget -q -O /dev/null http://127.0.0.1:8333/healthz"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Install Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      # Compose, not job services: Keycloak needs a command, and e2e-reset-db.sh uses `docker compose exec db`.
+      - name: Start PostGIS and Keycloak
+        run: docker compose --profile dev up -d --wait db keycloak
+      # Playwright gives its backend command 3 minutes, which a build without a cache could use up.
+      - name: Build backend
+        working-directory: backend
+        run: go build -o ./.e2e/server ./cmd/server
+      - name: E2E tests
+        working-directory: frontend
+        run: npm run e2e
+      - name: Show container logs
+        if: failure()
+        run: docker compose --profile dev logs --no-color --tail 200 db keycloak
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-traces
+          path: frontend/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
