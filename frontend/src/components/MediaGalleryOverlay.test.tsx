@@ -975,6 +975,35 @@ describe("MediaGalleryOverlay", () => {
       expect(mockApi.removeFromAlbum).toHaveBeenCalledWith("a2", { mediaIds: ["own"] });
       expect(screen.getByText("1 / 2")).toBeInTheDocument();
     });
+
+    // Focus falls back to <body> in a browser when the ticked checkbox is disabled while its
+    // request runs; jsdom keeps it, so the test blurs by hand. Keys then go straight to window.
+    it.each([
+      ["inside the dialog", false],
+      ["fallen back to <body>", true],
+    ])("keeps the gallery's keys off the album dialog with focus %s", async (_where, onBody) => {
+      const { props } = renderOverlay();
+      await screen.findByText("1 / 2");
+      await userEvent.click(screen.getByRole("button", { name: "Albums" }));
+      const dialog = await screen.findByRole("dialog");
+      await within(dialog).findByRole("checkbox", { name: "Iceland" });
+      if (onBody) act(() => (document.activeElement as HTMLElement).blur());
+      expect(dialog.contains(document.activeElement)).toBe(!onBody);
+
+      await userEvent.keyboard("{ArrowRight}");
+      expect(screen.getByText("1 / 2")).toBeInTheDocument();
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+      await userEvent.keyboard("{Escape}");
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(props.onClose).not.toHaveBeenCalled();
+
+      // Back in the gallery, its keys work again.
+      await userEvent.keyboard("{ArrowRight}");
+      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      await userEvent.keyboard("{Escape}");
+      expect(props.onClose).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("media URL", () => {

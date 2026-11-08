@@ -4,6 +4,7 @@ import { Marker, useMap } from "react-leaflet";
 import L from "leaflet";
 import type { MediaItem } from "@/types";
 import { api, ApiError } from "@/api/client";
+import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { describeError } from "@/lib/errors";
 import { useCloseOnBack } from "@/lib/useCloseOnBack";
 import { cn } from "@/lib/utils";
@@ -466,6 +467,9 @@ export function MediaGalleryOverlay({
       const tag = (e.target as HTMLElement)?.tagName;
       const editable = (e.target as HTMLElement)?.isContentEditable;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || editable) return;
+      // A dialog over the gallery (the album menu) has the keys, wherever focus is; its Escape
+      // closes only the dialog.
+      if (keyBelongsToDialog(e)) return;
       // An editor covers the gallery: Escape closes only the editor, as back does, and the other
       // keys must not change or play the item under it.
       if (editorOpen) {

@@ -2,6 +2,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { OrientationKeyframe } from "@/types";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import Video360 from "./Video360";
 import { shortToCameraFov } from "./sphereMath";
 import {
@@ -184,6 +185,24 @@ describe("Video360", () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { code: "Space", cancelable: true }));
     });
     expect(pause).toHaveBeenCalledOnce();
+  });
+
+  it("leaves Space to a dialog open over it, wherever focus is", () => {
+    renderVideo();
+    render(
+      <Dialog open>
+        <DialogContent>
+          <DialogTitle>Albums</DialogTitle>
+          <DialogDescription>Pick some</DialogDescription>
+        </DialogContent>
+      </Dialog>
+    );
+    act(() => (document.activeElement as HTMLElement).blur());
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { code: "Space", cancelable: true }));
+    });
+    expect(pause).not.toHaveBeenCalled();
+    expect(play).not.toHaveBeenCalled();
   });
 
   it("does not toggle on a drag", () => {

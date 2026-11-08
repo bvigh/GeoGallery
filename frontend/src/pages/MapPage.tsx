@@ -13,6 +13,7 @@ import Video360 from "../components/viewer/Video360";
 import VideoDecodeNotice from "../components/viewer/VideoDecodeNotice";
 import { useVideoDecodeCheck } from "@/lib/video";
 import { useCloseOnBack } from "@/lib/useCloseOnBack";
+import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { ZoomableImage } from "@/components/viewer/ZoomableImage";
 import { EditViewModal } from "@/components/viewer/EditViewModal";
 
@@ -82,6 +83,7 @@ function FullscreenOverlay({
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if (keyBelongsToDialog(e)) return;
       if (e.key === "Escape") onClose();
       if (e.key === "ArrowLeft") onPrev?.();
       if (e.key === "ArrowRight") onNext?.();
@@ -378,6 +380,8 @@ export function MapPage({ active = true }: { active?: boolean }) {
     const covered = fullscreen || editingView || editingLocation;
     if (!active || covered || clusterPeers.length <= 1) return;
     function onKey(e: KeyboardEvent) {
+      // Behind the item panel's album menu, they would switch the item (and close the menu).
+      if (keyBelongsToDialog(e)) return;
       if (e.key === "ArrowLeft") navigatePeer(-1);
       if (e.key === "ArrowRight") navigatePeer(1);
     }

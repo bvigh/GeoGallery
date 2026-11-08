@@ -240,21 +240,6 @@ describe("AlbumMenu", () => {
     expect(mockApi.listAlbums).not.toHaveBeenCalled();
   });
 
-  it("keeps keys inside the dialog from reaching the viewer behind it", async () => {
-    const onWindowKey = vi.fn();
-    window.addEventListener("keydown", onWindowKey);
-    try {
-      render(<AlbumMenu item={item} isOwn />);
-      const dialog = await openMenu();
-      await within(dialog).findByRole("checkbox", { name: /Family/ });
-
-      await userEvent.keyboard("{ArrowRight}");
-      expect(onWindowKey).not.toHaveBeenCalled();
-    } finally {
-      window.removeEventListener("keydown", onWindowKey);
-    }
-  });
-
   describe("with many albums", () => {
     const many = Array.from({ length: 8 }, (_, i) => makeAlbum({ id: `a${i + 10}`, name: `Album ${i}` }));
 
