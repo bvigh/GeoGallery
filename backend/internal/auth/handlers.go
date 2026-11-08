@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"time"
 
-	"codeberg.org/bvigh/geogallery/internal/config"
+	"github.com/bvigh/geogallery/internal/config"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 )

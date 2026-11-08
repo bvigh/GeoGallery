@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/bvigh/geogallery/internal/auth"
-	"codeberg.org/bvigh/geogallery/internal/gpstrack"
+	"github.com/bvigh/geogallery/internal/auth"
+	"github.com/bvigh/geogallery/internal/gpstrack"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

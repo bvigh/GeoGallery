@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/bvigh/geogallery/internal/auth"
+	"github.com/bvigh/geogallery/internal/auth"
 )
 
 // validateMediaFilters rejects from_date/to_date, trip_id and album_id values that Postgres would

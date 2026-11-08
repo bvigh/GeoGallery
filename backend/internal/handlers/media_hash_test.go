@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"codeberg.org/bvigh/geogallery/internal/ingest"
+	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

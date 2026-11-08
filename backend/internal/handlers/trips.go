@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"codeberg.org/bvigh/geogallery/internal/auth"
+	"github.com/bvigh/geogallery/internal/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

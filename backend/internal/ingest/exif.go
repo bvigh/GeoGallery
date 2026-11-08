@@ -10,7 +10,7 @@ import (
 	"github.com/rwcarlsen/goexif/exif"
 	"github.com/rwcarlsen/goexif/tiff"
 
-	"codeberg.org/bvigh/geogallery/internal/geo"
+	"github.com/bvigh/geogallery/internal/geo"
 )
 
 // Where ExifData.TakenAt's UTC offset came from.

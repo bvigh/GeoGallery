@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/bvigh/geogallery/internal/ingest"
+	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )

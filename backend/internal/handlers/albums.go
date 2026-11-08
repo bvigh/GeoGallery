@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"codeberg.org/bvigh/geogallery/internal/auth"
+	"github.com/bvigh/geogallery/internal/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"

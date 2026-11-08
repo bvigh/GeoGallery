@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/bvigh/geogallery/internal/ingest/exiftest"
+	"github.com/bvigh/geogallery/internal/ingest/exiftest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"codeberg.org/bvigh/geogallery/internal/geo"
+	"github.com/bvigh/geogallery/internal/geo"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )

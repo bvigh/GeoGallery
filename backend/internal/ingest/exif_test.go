@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"codeberg.org/bvigh/geogallery/internal/ingest/exiftest"
+	"github.com/bvigh/geogallery/internal/ingest/exiftest"
 )
 
 func TestDetectMediaType_Filename360_IsPhoto360(t *testing.T) {

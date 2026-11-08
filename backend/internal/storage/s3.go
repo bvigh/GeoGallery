@@ -6,12 +6,12 @@ import (
 	"io"
 	"time"
 
-	"codeberg.org/bvigh/geogallery/internal/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/bvigh/geogallery/internal/config"
 )
 
 type Client struct {
