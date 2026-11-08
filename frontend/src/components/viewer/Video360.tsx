@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 import type { OrientationKeyframe } from "@/types";
-import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { videoDecodeFailed } from "@/lib/video";
+import { listenVideoKeys } from "@/lib/videoKeys";
 import VideoDecodeNotice from "./VideoDecodeNotice";
 import ViewerHeader from "./ViewerHeader";
 import { createTapDetector } from "./gestures";
@@ -128,6 +128,13 @@ export default function Video360({
   const [glFailure, setGlFailure] = useState<SphereFailure | null>(null);
   const [flash, showFlash] = usePlaybackFlash();
 
+  const toggleMute = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = !video.muted;
+    setMuted(video.muted);
+  }, []);
+
   useEffect(() => {
     const mount = mountRef.current!;
 
@@ -243,17 +250,7 @@ export default function Video360({
       }
     };
 
-    const onKeyDown = (e: KeyboardEvent) => {
-      // Not behind a dialog (the gallery's album menu), even with focus fallen back to <body>.
-      if (keyBelongsToDialog(e)) return;
-      const tag = (e.target as HTMLElement)?.tagName;
-      const editable = (e.target as HTMLElement)?.isContentEditable;
-      if (e.code === "Space" && tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT" && !editable) {
-        e.preventDefault();
-        togglePlayback();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
+    const stopVideoKeys = listenVideoKeys(() => ({ togglePlayback, toggleMute }));
     mount.focus();
 
     // A tap or click on the picture plays or pauses; drags and pinches only move the view.
@@ -315,7 +312,7 @@ export default function Video360({
       video.removeEventListener("loadeddata", onDecodeCheck);
       video.removeEventListener("error", onDecodeCheck);
       video.removeEventListener("timeupdate", onTimeUpdate);
-      window.removeEventListener("keydown", onKeyDown);
+      stopVideoKeys();
       canvas.removeEventListener("pointerdown", onTapDown);
       canvas.removeEventListener("pointermove", onTapMove);
       canvas.removeEventListener("pointerup", onTapUp);
@@ -325,7 +322,7 @@ export default function Video360({
       videoRef.current = null;
       view.dispose();
     };
-  }, [url, yaw, pitch, fov, captureRef, captureTimeRef, controlRef, showFlash]);
+  }, [url, yaw, pitch, fov, captureRef, captureTimeRef, controlRef, showFlash, toggleMute]);
 
   const togglePlay = () => {
     const video = videoRef.current;
@@ -335,13 +332,6 @@ export default function Video360({
     } else {
       video.pause();
     }
-  };
-
-  const toggleMute = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.muted = !video.muted;
-    setMuted(video.muted);
   };
 
   const seek = (t: number) => {

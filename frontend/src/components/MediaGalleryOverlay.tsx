@@ -5,6 +5,7 @@ import L from "leaflet";
 import type { MediaItem } from "@/types";
 import { api, ApiError } from "@/api/client";
 import { keyBelongsToDialog } from "@/lib/dialogKeys";
+import { useVideoKeys } from "@/lib/videoKeys";
 import { describeError } from "@/lib/errors";
 import { useCloseOnBack } from "@/lib/useCloseOnBack";
 import { cn } from "@/lib/utils";
@@ -479,18 +480,13 @@ export function MediaGalleryOverlay({
       if (e.key === "Escape") onClose();
       if (e.key === "ArrowLeft") goPrev();
       if (e.key === "ArrowRight") goNext();
-      if (e.code === "Space") {
-        const v = videoRef.current;
-        if (v) {
-          e.preventDefault();
-          if (v.paused) v.play();
-          else v.pause();
-        }
-      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, currentIndex, items.length, editorOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Not under an editor: its keys must not play the item it covers.
+  const videoKeys = useVideoKeys(videoRef, !editorOpen);
 
   function renderMedia() {
     if (!currentItem) return null;
@@ -543,6 +539,7 @@ export function MediaGalleryOverlay({
             autoPlay
             className="absolute inset-0 h-full w-full object-contain"
             {...videoCheck.handlers}
+            {...videoKeys}
           />
           {videoCheck.unsupported && <VideoDecodeNotice />}
         </>

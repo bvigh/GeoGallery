@@ -6,6 +6,7 @@ import { api } from "../api/client";
 import { MapPage, MediaPreview } from "./MapPage";
 import type { FilterPanel } from "@/components/map/FilterPanel";
 import { AuthContext } from "@/components/auth/AuthContext";
+import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
 import { emptyFilters } from "@/lib/filters";
 import { BACK_DEPTH_KEY } from "@/lib/useCloseOnBack";
 import type { Album, CurrentUser, MediaItem, Trip } from "../types";
@@ -838,6 +839,26 @@ describe("MapPage", () => {
       expect(screen.getByRole("dialog")).toBeInTheDocument();
       await userEvent.click(dialog);
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("plays and pauses a video on Space and mutes it on M, with focus on it or not", async () => {
+      const { play, pause } = stubMediaPlayback();
+      await select([{ ...makeItem("v"), media_type: "video" }], "select v");
+      await openFullscreen();
+      const video = screen.getByRole("dialog").querySelector("video")!;
+
+      fireEvent.keyDown(video, { code: "Space", key: " " });
+      expect(play).toHaveBeenCalledOnce();
+      fireEvent.keyDown(document.body, { code: "Space", key: " " });
+      expect(pause).toHaveBeenCalledOnce();
+      expect(play).toHaveBeenCalledOnce();
+
+      fireEvent.keyDown(video, { key: "m" });
+      expect(video.muted).toBe(true);
+      fireEvent.keyDown(document.body, { key: "m" });
+      expect(video.muted).toBe(false);
+      play.mockRestore();
+      pause.mockRestore();
     });
 
     it.each([
