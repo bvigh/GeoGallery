@@ -6,7 +6,7 @@ This guide sets up a hosted GeoGallery instance with these parts:
 - **Hetzner Object Storage**, which replaces MinIO for the media files.
 - **Logto Cloud** for sign-in. See [auth.md](auth.md).
 - **Namecheap** DNS for your domain.
-- **Codeberg Forgejo Actions** for CI and deployments that you trigger.
+- **GitHub Actions** for CI and deployments that you trigger.
 
 Throughout this guide, replace `example.com` with your domain, `geo.example.com` with the app hostname and `auth.example.com` with the Logto custom domain.
 
@@ -249,8 +249,7 @@ Clone the repository as `deploy`:
 
 ```bash
 ssh deploy@<ipv4>
-git clone https://codeberg.org/bvigh/GeoGallery.git /srv/geogallery
-```
+git clone https://github.com/bvigh/GeoGallery.git /srv/geogallery
 
 ---
 
@@ -510,7 +509,7 @@ ssh deploy@geo.example.com 'cd /srv/geogallery && docker compose exec backend ./
 
 ---
 
-## 13. CI and deployments (Codeberg Forgejo Actions)
+## 13. CI and deployments (GitHub Actions)
 
 The plan is in three stages, each more automated than the last:
 
@@ -518,23 +517,15 @@ The plan is in three stages, each more automated than the last:
 |---|---|---|
 | A | Tests, lint and build | every push and PR (automatic) |
 | B | Deploy: SSH to the server, which pulls, builds and restarts | pushing a `v*` tag, or the manual **Run workflow** button |
-| C (later) | Build images in CI, push to the Codeberg registry, the server only pulls | when on-server builds become too slow |
+| C (later) | Build images in CI, push to the GitHub container registry (`ghcr.io`), the server only pulls | when on-server builds become too slow |
 
-**Codeberg-hosted runners:**
+**GitHub-hosted runners:**
+- For a public repository, the standard Linux runner (`ubuntu-latest`: 4 CPUs, 16 GB RAM) is free, without a minutes limit. A job may run up to 6 hours.
+- The runners have a Docker daemon, so service containers and image builds work without workarounds.
+- Actions is on by default. Workflows live in `.github/workflows/`.
+- A pull request from a fork runs `ci` without access to secrets, so it can never deploy.
 
-| Label | CPU | RAM | Max runtime |
-|---|---|---|---|
-| `codeberg-tiny` | 1 | 2 GB | 2 min |
-| `codeberg-small` | 2 | 4 GB | 5 min |
-| `codeberg-medium` | 4 | 8 GB | 10 min |
-
-- Each label also has a `-lazy` variant.
-- Hosted runners require a **public repository under a free licence**, and use is subject to fair use.
-- Running a Docker daemon inside the job is not officially supported.
-
-First enable Actions under **Repository settings → Units → Actions**.
-
-### A. `.forgejo/workflows/ci.yml`
+### A. `.github/workflows/ci.yml`
 
 ```yaml
 name: ci
@@ -543,9 +534,12 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   backend:
-    runs-on: codeberg-medium
+    runs-on: ubuntu-latest
     services:
       db:
         image: postgis/postgis:16-3.4
@@ -553,31 +547,34 @@ jobs:
           POSTGRES_DB: geogallery_test
           POSTGRES_USER: geogallery
           POSTGRES_PASSWORD: geogallery
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd "pg_isready -U geogallery" --health-interval 5s --health-retries 20
     env:
-      TEST_DATABASE_URL: postgres://geogallery:geogallery@db:5432/geogallery_test?sslmode=disable
+      TEST_DATABASE_URL: postgres://geogallery:geogallery@localhost:5432/geogallery_test?sslmode=disable
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
-      - uses: https://code.forgejo.org/actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: cd backend && go vet ./... && go test ./...
 
   frontend:
-    runs-on: codeberg-small
+    runs-on: ubuntu-latest
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
-      - uses: https://code.forgejo.org/actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: cd frontend && npm ci && npm run lint && npm run test -- --run && npm run build
+      - run: cd frontend && npm ci && npm run lint && npm run test && npm run build
 ```
 
-The handler tests read the database from `TEST_DATABASE_URL`. If `services:` turns out to be unreliable on the hosted runners, start with the frontend job and the pure-Go tests, and move the database tests to a self-hosted runner (below).
+The job runs on the runner itself, not in a container, so it reaches the `db` service on `localhost` through the `ports` mapping. The handler tests read the database from `TEST_DATABASE_URL`. The `geogallery` user is a superuser in the PostGIS image, so `testdb` may create its throwaway databases.
 
 ### B. On-demand deployment over SSH
 
@@ -616,7 +613,7 @@ curl -fsS --retry 20 --retry-delay 3 --retry-all-errors "https://$(grep ^SITE_DO
 echo " deployed $ref ($(git rev-parse --short HEAD))"
 ```
 
-The script writes all build output to a log file, not to the SSH session. If the CI job hits its time limit and the connection drops, the deploy therefore still finishes instead of dying halfway.
+The script writes all build output to a log file, not to the SSH session. If the CI job is cancelled and the connection drops, the deploy therefore still finishes instead of dying halfway.
 
 **3. Pin the key to the script** by adding one line to `/home/deploy/.ssh/authorized_keys`:
 
@@ -624,12 +621,14 @@ The script writes all build output to a log file, not to the SSH session. If the
 command="/srv/geogallery/deploy.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... ci-deploy
 ```
 
-**4. In Codeberg**, go to **Repository settings → Actions**:
+**4. On GitHub**, create an environment under **Settings → Environments → New environment** named `production`. Optionally restrict it to the `main` branch and `v*` tags under **Deployment branches and tags**. Add to it:
 - Secret `DEPLOY_SSH_KEY`: the contents of the private key file `ci-deploy`.
 - Variable `DEPLOY_HOST`: `geo.example.com`.
 - Variable `DEPLOY_KNOWN_HOSTS`: the output of `ssh-keyscan geo.example.com`. Compare its fingerprints with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server.
 
-**5. Add `.forgejo/workflows/deploy.yml`:**
+Only jobs that name the `production` environment can read these values; `ci` cannot.
+
+**5. Add `.github/workflows/deploy.yml`:**
 
 ```yaml
 name: deploy
@@ -638,9 +637,15 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency: deploy
+
 jobs:
   deploy:
-    runs-on: codeberg-small
+    runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Deploy over SSH
         env:
@@ -659,20 +664,16 @@ jobs:
 
 **Rollback:** run the workflow again for the previous tag, or run `ssh deploy@geo.example.com v0.0.9` from your laptop with the CI key. Migrations do not run backwards on their own. If a release with a new migration breaks, restore the dump that `deploy.sh` took just before it.
 
-### Self-hosted runner, if the hosted limits get in the way
-
-- Run `forgejo-runner` on a **separate** machine: a home server, or a CAX11 for about €6.
-- **Do not run it on the production server.** CI jobs that can reach the Docker socket there would be root on production.
-- Register it at the repository level under **Settings → Actions → Runners**.
-- Use its label in `runs-on:`.
+**No self-hosted runner.** The hosted runners are enough for this project. A self-hosted runner on a public repository is unsafe: a pull request from a fork can run its own code on it. If one is ever needed, keep it off the production server and restrict it to `push` events.
 
 ### C. Building images in CI (later)
 
 When on-server `--build` takes too long or uses too much CPU:
-1. Build `backend` and `frontend` in CI with buildah or kaniko, since the hosted runners provide no Docker daemon.
-2. Push them to the Codeberg container registry, for example `codeberg.org/bvigh/geogallery-backend:<tag>`.
-3. In `docker-compose.prod.yml`, give each service an `image: codeberg.org/bvigh/geogallery-<svc>:${TAG}`.
-4. In `deploy.sh`, replace `up --build` with `TAG=$ref docker compose pull && docker compose up -d`.
+1. Add a job that logs in with `docker/login-action` (registry `ghcr.io`, user `${{ github.actor }}`, password `${{ secrets.GITHUB_TOKEN }}`) and builds and pushes `backend` and `frontend` with `docker/build-push-action`. The job needs `permissions: packages: write`.
+2. Tag the images `ghcr.io/bvigh/geogallery-backend:<tag>` and `ghcr.io/bvigh/geogallery-frontend:<tag>`.
+3. A new package on `ghcr.io` is private. Make both public under the package's **Package settings**, or run `docker login ghcr.io` on the server with a token that has only `read:packages`.
+4. In `docker-compose.prod.yml`, give each service an `image: ghcr.io/bvigh/geogallery-<svc>:${TAG}`.
+5. In `deploy.sh`, replace `up --build` with `TAG=$ref docker compose pull && docker compose up -d`.
 
 The server then only pulls images, so deploys take seconds and rollbacks only change the tag.
 

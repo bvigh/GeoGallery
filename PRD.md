@@ -2,7 +2,7 @@
 
 *A self-hosted, map-centric media gallery with GPS-track enrichment and a GeoGuessr-style memory game, designed to help individuals and friends and explore their travel history.*
 
-> **Status (2026-11-07).** This document records the product vision and the requirements the MLP was built against. Planned work lives in [docs/roadmap.md](docs/roadmap.md) and the Codeberg issues, not here. Where the code has moved on since the MLP, [AGENTS.md](AGENTS.md) describes the current behaviour.
+> **Status (2026-11-07).** This document records the product vision and the requirements the MLP was built against. Planned work lives in [docs/roadmap.md](docs/roadmap.md) and the GitHub issues, not here. Where the code has moved on since the MLP, [AGENTS.md](AGENTS.md) describes the current behaviour.
 
 ---
 

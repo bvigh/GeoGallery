@@ -12,7 +12,7 @@ import (
 
 	"github.com/labstack/gommon/log"
 
-	"codeberg.org/bvigh/geogallery/internal/geo"
+	"github.com/bvigh/geogallery/internal/geo"
 )
 
 type VideoProbeResult struct {

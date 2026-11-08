@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/bvigh/geogallery/internal/storage"
+	"github.com/bvigh/geogallery/internal/storage"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

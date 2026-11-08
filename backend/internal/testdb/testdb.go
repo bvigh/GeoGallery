@@ -13,7 +13,7 @@ import (
 	"runtime"
 	"testing"
 
-	"codeberg.org/bvigh/geogallery/internal/db"
+	"github.com/bvigh/geogallery/internal/db"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"

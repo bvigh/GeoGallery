@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/bvigh/geogallery/internal/auth"
-	"codeberg.org/bvigh/geogallery/internal/geo"
-	"codeberg.org/bvigh/geogallery/internal/storage"
+	"github.com/bvigh/geogallery/internal/auth"
+	"github.com/bvigh/geogallery/internal/geo"
+	"github.com/bvigh/geogallery/internal/storage"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

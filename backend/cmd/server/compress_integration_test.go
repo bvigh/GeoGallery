@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/bvigh/geogallery/internal/auth"
-	"codeberg.org/bvigh/geogallery/internal/config"
-	"codeberg.org/bvigh/geogallery/internal/handlers"
-	"codeberg.org/bvigh/geogallery/internal/testdb"
+	"github.com/bvigh/geogallery/internal/auth"
+	"github.com/bvigh/geogallery/internal/config"
+	"github.com/bvigh/geogallery/internal/handlers"
+	"github.com/bvigh/geogallery/internal/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

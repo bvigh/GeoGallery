@@ -1,4 +1,4 @@
-module codeberg.org/bvigh/geogallery
+module github.com/bvigh/geogallery
 
 go 1.26.0
 

@@ -3,7 +3,7 @@ package handlers
 import (
 	"net/http"
 
-	"codeberg.org/bvigh/geogallery/internal/auth"
+	"github.com/bvigh/geogallery/internal/auth"
 )
 
 const testOwnerID = "11111111-1111-4111-8111-111111111111"

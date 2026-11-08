@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/bvigh/geogallery/internal/auth"
-	"codeberg.org/bvigh/geogallery/internal/testdb"
+	"github.com/bvigh/geogallery/internal/auth"
+	"github.com/bvigh/geogallery/internal/testdb"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"

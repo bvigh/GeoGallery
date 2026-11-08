@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/bvigh/geogallery/internal/auth/oidctest"
-	"codeberg.org/bvigh/geogallery/internal/config"
+	"github.com/bvigh/geogallery/internal/auth/oidctest"
+	"github.com/bvigh/geogallery/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
