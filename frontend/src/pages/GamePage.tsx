@@ -10,6 +10,7 @@ import Video360 from "@/components/viewer/Video360";
 import VideoDecodeNotice from "@/components/viewer/VideoDecodeNotice";
 import { ZoomableImage } from "@/components/viewer/ZoomableImage";
 import { useVideoDecodeCheck } from "@/lib/video";
+import { useVideoKeys } from "@/lib/videoKeys";
 import { FilterPanel } from "@/components/map/FilterPanel";
 import { MiniMapOverlay } from "@/components/map/MiniMapOverlay";
 import { TOP_MARKER_Z_INDEX_OFFSET } from "@/components/map/markers";
@@ -145,6 +146,8 @@ export function GamePage() {
   const [round, setRound] = useState<GameRound | null>(null);
   const [roundKeyframes, setRoundKeyframes] = useState<OrientationKeyframe[]>([]);
   const videoCheck = useVideoDecodeCheck(round?.url ?? "");
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoKeys = useVideoKeys(videoRef);
   const [guess, setGuess] = useState<{ lat: number; lng: number } | null>(null);
   const [guessDate, setGuessDate] = useState("");
   const [result, setResult] = useState<GuessResult | null>(null);
@@ -310,10 +313,12 @@ export function GamePage() {
             <>
               {/* contain, not cover: on a phone cover crops away much of the frame, and the clues with it. */}
               <video
+                ref={videoRef}
                 src={round.url}
                 controls
                 className="absolute inset-0 h-full w-full object-contain"
                 {...videoCheck.handlers}
+                {...videoKeys}
               />
               {videoCheck.unsupported && <VideoDecodeNotice />}
             </>

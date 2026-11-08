@@ -3,6 +3,19 @@ import { act } from "@testing-library/react";
 import { vi } from "vitest";
 import type * as THREE from "three";
 
+// jsdom has no media playback. Like a real element, `paused` follows these two. Undo with
+// vi.restoreAllMocks() or mockRestore().
+export function stubMediaPlayback() {
+  const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(function (this: HTMLMediaElement) {
+    Object.defineProperty(this, "paused", { value: false, configurable: true });
+    return Promise.resolve();
+  });
+  const pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(function (this: HTMLMediaElement) {
+    Object.defineProperty(this, "paused", { value: true, configurable: true });
+  });
+  return { play, pause };
+}
+
 // What the fake renderer last drew with, and the renderer's lifecycle calls in order.
 export const rendered: {
   count: number;

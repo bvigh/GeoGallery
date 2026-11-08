@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { OrientationKeyframe } from "@/types";
@@ -242,6 +242,44 @@ describe("Video360", () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { code: "Space", cancelable: true }));
     });
     expect(pause).toHaveBeenCalledOnce();
+  });
+
+  it("mutes and unmutes on M, and the control bar follows", () => {
+    renderVideo();
+    expect(video.muted).toBe(true);
+    expect(screen.getByRole("button", { name: "Unmute" })).toBeInTheDocument();
+
+    fireEvent.keyDown(document.body, { key: "m" });
+    expect(video.muted).toBe(false);
+    expect(screen.getByRole("button", { name: "Mute" })).toBeInTheDocument();
+
+    fireEvent.keyDown(document.body, { key: "m" });
+    expect(video.muted).toBe(true);
+    expect(screen.getByRole("button", { name: "Unmute" })).toBeInTheDocument();
+  });
+
+  it("keeps Space and M after a drag on the seek bar", () => {
+    renderVideo();
+    const seekBar = screen.getByRole("slider", { name: "Seek" });
+    fireEvent.keyDown(seekBar, { code: "Space", key: " " });
+    expect(pause).toHaveBeenCalledOnce();
+    fireEvent.keyDown(seekBar, { key: "m" });
+    expect(video.muted).toBe(false);
+  });
+
+  it("leaves Space and M to a text field", () => {
+    render(
+      <>
+        <Video360 url="https://s3.example/v360" onClose={() => {}} contained />
+        <input aria-label="Keyframe time" />
+      </>
+    );
+    pause.mockClear();
+    const field = screen.getByRole("textbox", { name: "Keyframe time" });
+    fireEvent.keyDown(field, { code: "Space", key: " " });
+    fireEvent.keyDown(field, { key: "m" });
+    expect(pause).not.toHaveBeenCalled();
+    expect(video.muted).toBe(true);
   });
 
   it("plays from the control bar without feedback over the picture", async () => {

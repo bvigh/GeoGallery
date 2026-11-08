@@ -5,6 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { api, ApiError } from "@/api/client";
 import { MediaGalleryOverlay } from "@/components/MediaGalleryOverlay";
 import { AuthContext } from "@/components/auth/AuthContext";
+import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
 import { BACK_DEPTH_KEY } from "@/lib/useCloseOnBack";
 import type { Album, CurrentUser, MediaItem } from "@/types";
 
@@ -669,6 +670,48 @@ describe("MediaGalleryOverlay", () => {
       expect(leafletMap.fitBounds).toHaveBeenCalledTimes(1);
       expect(leafletMap.fitBounds).toHaveBeenCalledWith(expect.anything(), { padding: [40, 40], animate: false });
       expect(leafletMap.flyTo).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("video keys", () => {
+    const flat = makeItem("flat", { media_type: "video", taken_at: "2025-06-01T10:00:00Z" });
+
+    async function renderVideo() {
+      mockApi.get.mockResolvedValue([flat]);
+      const { container } = renderOverlay();
+      await waitFor(() => expect(container.querySelector("video")).toHaveAttribute("src"));
+      return container.querySelector("video")!;
+    }
+
+    it("plays and pauses on Space and mutes on M, with focus on the video or not", async () => {
+      const { play, pause } = stubMediaPlayback();
+      const video = await renderVideo();
+
+      fireEvent.keyDown(video, { code: "Space", key: " " });
+      expect(play).toHaveBeenCalledOnce();
+      fireEvent.keyDown(document.body, { code: "Space", key: " " });
+      expect(pause).toHaveBeenCalledOnce();
+      expect(play).toHaveBeenCalledOnce();
+
+      fireEvent.keyDown(video, { key: "m" });
+      expect(video.muted).toBe(true);
+      fireEvent.keyDown(document.body, { key: "m" });
+      expect(video.muted).toBe(false);
+      play.mockRestore();
+      pause.mockRestore();
+    });
+
+    it("leaves the video alone while the location editor covers it", async () => {
+      const { play, pause } = stubMediaPlayback();
+      const video = await renderVideo();
+      await userEvent.click(screen.getByRole("button", { name: "Edit GPS location" }));
+
+      fireEvent.keyDown(document.body, { code: "Space", key: " " });
+      fireEvent.keyDown(document.body, { key: "m" });
+      expect(play).not.toHaveBeenCalled();
+      expect(video.muted).toBe(false);
+      play.mockRestore();
+      pause.mockRestore();
     });
   });
 

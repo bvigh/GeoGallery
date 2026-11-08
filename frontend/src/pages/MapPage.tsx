@@ -14,6 +14,7 @@ import VideoDecodeNotice from "../components/viewer/VideoDecodeNotice";
 import { useVideoDecodeCheck } from "@/lib/video";
 import { useCloseOnBack } from "@/lib/useCloseOnBack";
 import { keyBelongsToDialog } from "@/lib/dialogKeys";
+import { useVideoKeys } from "@/lib/videoKeys";
 import { ZoomableImage } from "@/components/viewer/ZoomableImage";
 import { EditViewModal } from "@/components/viewer/EditViewModal";
 
@@ -78,6 +79,7 @@ function FullscreenOverlay({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoCheck = useVideoDecodeCheck(url ?? "");
+  const videoKeys = useVideoKeys(videoRef);
   // The phone's back gesture closes the view instead of leaving the app.
   useCloseOnBack(onClose);
 
@@ -87,22 +89,10 @@ function FullscreenOverlay({
       if (e.key === "Escape") onClose();
       if (e.key === "ArrowLeft") onPrev?.();
       if (e.key === "ArrowRight") onNext?.();
-      if (e.code === "Space" && item.media_type === "video") {
-        const target = e.target as HTMLElement;
-        if (target === videoRef.current) return; // native controls handle it
-        const tag = target?.tagName;
-        const editable = target?.isContentEditable;
-        if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT" && !editable) {
-          e.preventDefault();
-          const v = videoRef.current;
-          if (v?.paused) v.play();
-          else if (v) v.pause();
-        }
-      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, onPrev, onNext, item.media_type]);
+  }, [onClose, onPrev, onNext]);
 
   if (url && item.media_type === "photo_360") {
     return (
@@ -165,6 +155,7 @@ function FullscreenOverlay({
             autoPlay
             className="max-h-[90vh] supports-[height:100dvh]:max-h-[90dvh] max-w-[90vw] rounded object-contain outline-none"
             {...videoCheck.handlers}
+            {...videoKeys}
           />
           {videoCheck.unsupported && <VideoDecodeNotice />}
         </div>

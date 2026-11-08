@@ -5,6 +5,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { api, ApiError } from "@/api/client";
 import { GamePage } from "@/pages/GamePage";
 import type { FilterPanel } from "@/components/map/FilterPanel";
+import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
 import { emptyFilters } from "@/lib/filters";
 import type { Album } from "@/types";
 
@@ -269,6 +270,53 @@ describe("GamePage", () => {
     mockApi.post.mockResolvedValueOnce(guessResult);
     await userEvent.click(screen.getByRole("button", { name: "Submit" }));
     expect(await screen.findByText("4,000 pts")).toBeInTheDocument();
+  });
+
+  describe("video keys", () => {
+    async function startVideoRound() {
+      mockApi.get.mockImplementation(roundOf("video"));
+      const { container } = render(<GamePage />);
+      await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
+      await screen.findByRole("button", { name: "Submit" });
+      return container.querySelector("video")!;
+    }
+
+    it("plays and pauses on Space and mutes on M, with focus on the video or not", async () => {
+      const { play, pause } = stubMediaPlayback();
+      const video = await startVideoRound();
+
+      fireEvent.keyDown(video, { code: "Space", key: " " });
+      expect(play).toHaveBeenCalledOnce();
+      fireEvent.keyDown(document.body, { code: "Space", key: " " });
+      expect(pause).toHaveBeenCalledOnce();
+      expect(play).toHaveBeenCalledOnce();
+
+      fireEvent.keyDown(video, { key: "m" });
+      expect(video.muted).toBe(true);
+      fireEvent.keyDown(document.body, { key: "m" });
+      expect(video.muted).toBe(false);
+    });
+
+    it("leaves Space and M to the date field", async () => {
+      const { play } = stubMediaPlayback();
+      const video = await startVideoRound();
+      const date = screen.getByRole("textbox", { name: "Date taken (dd-mm-yyyy)" });
+
+      fireEvent.keyDown(date, { code: "Space", key: " " });
+      fireEvent.keyDown(date, { key: "m" });
+      expect(play).not.toHaveBeenCalled();
+      expect(video.muted).toBe(false);
+    });
+
+    it("leaves the keys alone on a photo round", async () => {
+      mockApi.get.mockImplementation(oneRound);
+      render(<GamePage />);
+      await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
+      await screen.findByRole("button", { name: "Submit" });
+
+      // fireEvent returns false when the event was cancelled.
+      expect(fireEvent.keyDown(document.body, { code: "Space", key: " " })).toBe(true);
+    });
   });
 
   describe("guess map", () => {
