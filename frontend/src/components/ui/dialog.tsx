@@ -28,6 +28,8 @@ const DialogContent = React.forwardRef<
     <DialogOverlay />
     <DialogPrimitive.Content
       ref={ref}
+      // Fullscreen views behind it ignore keys while it is open (keyBelongsToDialog in lib/dialogKeys).
+      data-app-dialog=""
       className={cn(
         // Fits a phone: a margin on every side, and long content scrolls inside the dialog.
         // Phones in portrait get it at the top, where the on-screen keyboard does not cover it.

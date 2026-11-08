@@ -149,8 +149,8 @@ export function AlbumMenu({ item, isOwn, variant = "panel", onChange, onAlbumCre
     <>
       {trigger}
       <Dialog open={open} onOpenChange={handleOpenChange}>
-        {/* Keys stay in the dialog: the viewers behind it navigate and close on window keydown. */}
-        <DialogContent className="max-w-sm" onKeyDown={(e) => e.stopPropagation()}>
+        {/* The viewers behind it ignore keys while it is open: keyBelongsToDialog. */}
+        <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle>Albums</DialogTitle>
             <DialogDescription className="break-all">

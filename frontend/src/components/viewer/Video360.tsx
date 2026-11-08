@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 import type { OrientationKeyframe } from "@/types";
+import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { videoDecodeFailed } from "@/lib/video";
 import VideoDecodeNotice from "./VideoDecodeNotice";
 import ViewerHeader from "./ViewerHeader";
@@ -243,6 +244,8 @@ export default function Video360({
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
+      // Not behind a dialog (the gallery's album menu), even with focus fallen back to <body>.
+      if (keyBelongsToDialog(e)) return;
       const tag = (e.target as HTMLElement)?.tagName;
       const editable = (e.target as HTMLElement)?.isContentEditable;
       if (e.code === "Space" && tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT" && !editable) {

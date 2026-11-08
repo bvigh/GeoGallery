@@ -410,6 +410,31 @@ describe("MapPage", () => {
       expect(mockApi.removeFromAlbum).toHaveBeenCalledWith("a1", { mediaIds: ["own"] });
       expect(mediaCalls()).toHaveLength(2);
     });
+
+    // In a browser focus falls back to <body> when a ticked checkbox is disabled while its request
+    // runs; then the arrows reach window, where they would switch the item and close the menu.
+    it("keeps the cluster arrows off the album menu, even with focus on <body>", async () => {
+      mockApi.get.mockImplementation((path: string) => {
+        if (path === "/trips") return Promise.resolve(sampleTrips);
+        return Promise.resolve([makeItem("a"), makeItem("b"), makeItem("c")]);
+      });
+      renderPage(true);
+      await userEvent.click(await screen.findByRole("button", { name: "select cluster" }));
+      await userEvent.click(screen.getByRole("button", { name: "Albums" }));
+      const dialog = await screen.findByRole("dialog");
+      await within(dialog).findByRole("checkbox", { name: /Family/ });
+
+      await userEvent.keyboard("{ArrowRight}");
+      act(() => (document.activeElement as HTMLElement).blur());
+      await userEvent.keyboard("{ArrowRight}");
+      expect(screen.getByText("1 / 3")).toBeInTheDocument();
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+      await userEvent.keyboard("{Escape}");
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      await userEvent.keyboard("{ArrowRight}");
+      expect(screen.getByText("2 / 3")).toBeInTheDocument();
+    });
   });
 
   describe("while another tab is open", () => {
