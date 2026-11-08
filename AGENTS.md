@@ -72,7 +72,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `docker compose exec backend ./server <invite\|users\|scan\|rebind-issuer> …` | The same subcommands in Docker (`./ingest` is mounted at `/ingest`) |
 | `cd frontend && npm install && npm run dev` | Run frontend dev server (proxies `/api` → `VITE_API_TARGET`, default `http://localhost:8080`) |
 | `cd frontend && npm run build` | Production build (`tsc -b && vite build`) |
-| `cd frontend && npm run lint` | ESLint (known broken: no `eslint.config.*`; fix separately) |
+| `cd frontend && npm run lint` | ESLint (`eslint.config.js`: TypeScript, the classic `react-hooks` rules, `react-refresh`); any warning fails it |
 | `cd frontend && npm run test` | Vitest unit tests |
 | `cd frontend && npx playwright install chromium` | One-time browser install for E2E |
 | `cd frontend && npm run e2e` | Playwright E2E against the dev Keycloak (preconditions below) |
@@ -184,6 +184,7 @@ There is no HTTP ingest route. Folder scans are `server scan --user <id>` only.
 - Long lists (filter panel collections, `AlbumMenu`, `AlbumPickerDialog`, the members dialog's user list) get a `SearchInput` once they reach `SEARCH_MIN_ITEMS` and filter with `matchesSearch`. Ticked or chosen items stay listed while searching, so they can always be unticked.
 - The filter panel puts trips under collapsible year headers (`groupTripsByYear`) once they span more than one year; "Unassigned" stays above them and albums stay flat. Only the newest year starts open, and the header counts ticked trips. A search opens every year with a visible trip and hides the rest without changing the user's own expansion, which returns when the query is cleared. Both reset when the panel closes.
 - Vite dev proxy: `/api` → `process.env.VITE_API_TARGET ?? "http://localhost:8080"` (`vite.config.ts`). Auth relies on same-origin `/api`; the backend sends no CORS headers.
+- Lint (`eslint.config.js`) enables only `react-hooks/rules-of-hooks` and `exhaustive-deps`, not the plugin's React Compiler rules (`refs`, `set-state-in-effect`, …): the app does not use the compiler, and those rules flag deliberate patterns like `ref.current = prop` during render. Where an effect deliberately omits a dependency, add `// eslint-disable-line react-hooks/exhaustive-deps` with a comment saying why. A parameter named `_x` may go unused.
 - Path alias `@` resolves to `src/` — use `@/components/...` not relative paths.
 - shadcn/ui components in `src/components/ui/`. Add new ones with `npx shadcn@latest add <component>`.
 - Tailwind CSS variables (colors, radius) defined in `src/index.css`.
@@ -367,7 +368,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `src/components/MediaGalleryOverlay.test.tsx` (incl. the view editor: own 360° items only, waits for keyframes, saves through the API helpers, keys and back), `EditLocationModal.test.tsx`, `CopyField.test.tsx`, `SearchInput.test.tsx`, `src/components/ui/dialog.test.tsx`, `src/components/albums/AlbumMenu.test.tsx`, `AlbumPickerDialog.test.tsx`
 - `src/components/viewer/Video360.test.tsx` (three.js with a stub `WebGLRenderer`; the decode notice, `tapToPlay`), `Panorama360.test.tsx`, `sphereControls.test.ts` (dispose order, WebGL failure, context loss), `gestures.test.ts`, `sphereMath.test.ts`, `ZoomableImage.test.tsx`, `VideoDecodeNotice.test.tsx`; shared fakes in `viewerTestUtils.ts`
 - `src/lib/video.test.ts`, `filters.test.ts`, `errors.test.ts`, `search.test.ts`, `albums.test.ts`, `trips.test.ts`, `uploadBatches.test.ts`, `zoom.test.ts`, `useCloseOnBack.test.tsx`, `mediaHash.test.ts` (Node environment; the shared backend vectors)
-- Vitest + React Testing Library. Run with `npm run test`.
+- Vitest + React Testing Library. Run with `npm run test`. Limits are sized for a busy machine: 20 s per test (`vite.config.ts`) and 5 s for `findBy*`/`waitFor` (`src/test-setup.ts`). To record what renders after a user action, clear the record and fire the action in one synchronous block (`fireEvent`): `userEvent` yields between its pointer events, and renders from before the action would land in the record.
 - Test components that contain logic; pure utility functions in `src/lib/` get unit tests.
 
 **E2E — Playwright + Keycloak (`frontend/e2e/`, local only, no CI)**

@@ -1027,6 +1027,15 @@ describe("MediaGalleryOverlay", () => {
       const first = makeItem("p1", { media_type: "photo_360", taken_at: "2025-06-01T10:00:00Z" });
       const second = makeItem("v2", { media_type: "video_360", taken_at: "2025-06-02T10:00:00Z", keyframes: [] });
 
+      // Records only the viewer renders from the step on. Clearing and clicking happen in one
+      // synchronous block: userEvent.click yields for its pointer events first, and a late render
+      // of the item still current then (correctly with its own URL) would count against the step.
+      function step(name: "Next" | "Previous") {
+        const button = screen.getByRole("button", { name });
+        viewerUrls.length = 0;
+        fireEvent.click(button);
+      }
+
       it("shows the placeholder, not the previous URL, while the next URL loads", async () => {
         const slow = deferred<string>();
         mockApi.get.mockResolvedValue([first, second]);
@@ -1036,9 +1045,8 @@ describe("MediaGalleryOverlay", () => {
         renderOverlay();
         expect(await screen.findByTestId("panorama")).toHaveAttribute("data-url", "https://s3.example/p1");
 
-        viewerUrls.length = 0;
-        await userEvent.click(screen.getByRole("button", { name: "Next" }));
-        expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+        step("Next");
+        expect(screen.getByText("2 / 2")).toBeInTheDocument();
         expect(screen.getByText("Loading…")).toBeInTheDocument();
         expect(screen.queryByTestId("panorama")).not.toBeInTheDocument();
         expect(screen.queryByTestId("video360")).not.toBeInTheDocument();
@@ -1056,13 +1064,11 @@ describe("MediaGalleryOverlay", () => {
         await screen.findByTestId("panorama");
         await waitFor(() => expect(mockApi.getMediaUrl).toHaveBeenCalledWith("v2"));
 
-        viewerUrls.length = 0;
-        await userEvent.click(screen.getByRole("button", { name: "Next" }));
+        step("Next");
         expect(screen.getByTestId("video360")).toHaveAttribute("data-url", "https://s3.example/v2");
         expect(viewerUrls.every((url) => url === "https://s3.example/v2")).toBe(true);
 
-        viewerUrls.length = 0;
-        await userEvent.click(screen.getByRole("button", { name: "Previous" }));
+        step("Previous");
         expect(screen.getByTestId("panorama")).toHaveAttribute("data-url", "https://s3.example/p1");
         expect(viewerUrls.every((url) => url === "https://s3.example/p1")).toBe(true);
       });

@@ -479,7 +479,8 @@ export function MediaGalleryOverlay({
         const v = videoRef.current;
         if (v) {
           e.preventDefault();
-          v.paused ? v.play() : v.pause();
+          if (v.paused) v.play();
+          else v.pause();
         }
       }
     }

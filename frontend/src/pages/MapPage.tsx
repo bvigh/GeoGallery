@@ -93,7 +93,8 @@ function FullscreenOverlay({
         if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT" && !editable) {
           e.preventDefault();
           const v = videoRef.current;
-          if (v) v.paused ? v.play() : v.pause();
+          if (v?.paused) v.play();
+          else if (v) v.pause();
         }
       }
     }
@@ -382,7 +383,8 @@ export function MapPage({ active = true }: { active?: boolean }) {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, fullscreen, editingView, editingLocation, clusterPeers, clusterIndex]);
+    // navigatePeer reads only clusterPeers and clusterIndex, which are listed.
+  }, [active, fullscreen, editingView, editingLocation, clusterPeers, clusterIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="relative h-full w-full">
