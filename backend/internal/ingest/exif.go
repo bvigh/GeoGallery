@@ -7,10 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rwcarlsen/goexif/exif"
-	"github.com/rwcarlsen/goexif/tiff"
-
 	"github.com/bvigh/geogallery/internal/geo"
+	"github.com/bvigh/geogallery/internal/goexif/exif"
+	"github.com/bvigh/geogallery/internal/goexif/tiff"
 )
 
 // Where ExifData.TakenAt's UTC offset came from.
