@@ -26,6 +26,11 @@ type VideoProbeResult struct {
 	Lat, Lng *float64
 }
 
+// videoDemuxers lists the only input formats ffprobe and ffmpeg may open: every container ingest
+// accepts. Left to detect the format from the bytes, they treat a DASH manifest under a video
+// extension as a manifest and fetch the URLs and local files it names, on the server.
+const videoDemuxers = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi"
+
 // NeedsTranscode reports whether the video requires transcoding to H.264 for
 // browser playback. Browsers only support H.264 (avc1), H.265/HEVC, VP8/VP9,
 // and AV1; legacy codecs like MPEG-4 Part 2 (mp4v) are not decoded.
@@ -54,6 +59,7 @@ func TranscodeH264(srcPath string) (*os.File, error) {
 	cmd := exec.Command(
 		"ffmpeg",
 		"-y",
+		"-format_whitelist", videoDemuxers,
 		"-i", srcPath,
 		"-c:v", "libx264",
 		"-preset", "fast",
@@ -92,21 +98,25 @@ func ProbeVideo(r io.Reader) (*os.File, VideoProbeResult, error) {
 		return nil, VideoProbeResult{}, err
 	}
 
-	out, err := exec.Command(
-		"ffprobe",
-		"-v", "quiet",
-		"-print_format", "json",
-		"-show_streams",
-		"-show_format",
-		"-select_streams", "v:0",
-		tmp.Name(),
-	).Output()
+	out, err := exec.Command("ffprobe", ffprobeArgs(tmp.Name())...).Output()
 	if err != nil {
 		log.Print(fmt.Errorf("ffprobe failed: %w", err))
 		return tmp, VideoProbeResult{}, nil
 	}
 
 	return tmp, parseProbeOutput(out), nil
+}
+
+func ffprobeArgs(target string) []string {
+	return []string{
+		"-v", "quiet",
+		"-print_format", "json",
+		"-show_streams",
+		"-show_format",
+		"-select_streams", "v:0",
+		"-format_whitelist", videoDemuxers,
+		target,
+	}
 }
 
 // iso6709Degrees matches ISO 6709 in decimal degrees at the start of a tag: "+47.4979+019.0402/".
