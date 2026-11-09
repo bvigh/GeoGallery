@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -220,6 +221,45 @@ func TestVideoTools_OpenEveryContainerIngestTakes(t *testing.T) {
 			require.NoError(t, err)
 			defer os.Remove(transcoded.Name())
 			defer transcoded.Close()
+		})
+	}
+}
+
+// A video in a container off the list is not refused: the file stays available for the upload, but
+// the probe result is empty, so nothing comes from its container and it is never transcoded.
+func TestProbeVideo_KeepsAnotherContainerUnread(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " not in PATH")
+		}
+	}
+	cases := []struct {
+		format, encoder string
+	}{
+		{"mpegts", "libx264"},
+		{"flv", "flv1"},
+		{"mpeg", "mpeg2video"},
+		{"asf", "wmv2"},
+	}
+	for _, c := range cases {
+		t.Run(c.format, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "clip.mp4")
+			out, err := exec.Command("ffmpeg", "-y", "-v", "error",
+				"-f", "lavfi", "-i", "color=c=black:s=64x48:d=0.4:r=5", "-c:v", c.encoder, "-f", c.format, path).CombinedOutput()
+			require.NoError(t, err, string(out))
+			want, err := os.ReadFile(path)
+			require.NoError(t, err)
+
+			tmp, result, err := ProbeVideo(bytes.NewReader(want))
+
+			require.NoError(t, err)
+			defer os.Remove(tmp.Name())
+			defer tmp.Close()
+			assert.Zero(t, result)
+			assert.False(t, result.NeedsTranscode())
+			got, err := os.ReadFile(tmp.Name())
+			require.NoError(t, err)
+			assert.Equal(t, want, got)
 		})
 	}
 }
