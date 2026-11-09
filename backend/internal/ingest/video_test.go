@@ -1,8 +1,13 @@
 package ingest
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,6 +129,99 @@ func TestParseProbeOutput_H264CodecFields(t *testing.T) {
 	result := parseProbeOutput([]byte(fixture))
 	assert.Equal(t, "h264", result.CodecName)
 	assert.Equal(t, "avc1", result.CodecTag)
+}
+
+func TestFfprobeArgs_AcceptOnlyTheContainersIngestTakes(t *testing.T) {
+	args := ffprobeArgs("target")
+
+	require.Equal(t, "target", args[len(args)-1])
+	assert.Equal(t, []string{"-format_whitelist", videoDemuxers}, args[len(args)-3:len(args)-1])
+}
+
+// dashManifest is a DASH manifest whose only representation is the file at segmentURL.
+func dashManifest(segmentURL string) string {
+	return `<?xml version="1.0" encoding="UTF-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT3S" minBufferTime="PT1S" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">
+<Period><AdaptationSet mimeType="video/mp4" segmentAlignment="true">
+<Representation id="1" bandwidth="100000" width="322" height="122" codecs="avc1.42E00A">
+<BaseURL>` + segmentURL + `</BaseURL>
+</Representation></AdaptationSet></Period></MPD>
+`
+}
+
+// A file needs only a video extension to reach ffprobe at upload. Treated as a manifest, its
+// contents would make the server fetch whatever it names.
+func TestVideoTools_DoNotFollowAManifestInAVideoFile(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " not in PATH")
+		}
+	}
+	var followed atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		followed.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	manifest := dashManifest(srv.URL + "/segment.mp4")
+
+	t.Run("probing an upload", func(t *testing.T) {
+		tmp, _, err := ProbeVideo(strings.NewReader(manifest))
+		require.NoError(t, err)
+		defer os.Remove(tmp.Name())
+		defer tmp.Close()
+		assert.Zero(t, followed.Load())
+	})
+	t.Run("transcoding", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "upload.mp4")
+		require.NoError(t, os.WriteFile(path, []byte(manifest), 0o600))
+
+		_, err := TranscodeH264(path)
+
+		require.Error(t, err)
+		assert.Zero(t, followed.Load())
+	})
+}
+
+func TestVideoTools_OpenEveryContainerIngestTakes(t *testing.T) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not in PATH")
+	}
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not in PATH")
+	}
+	cases := []struct {
+		ext, encoder, codec string
+	}{
+		{".mp4", "libx264", "h264"},
+		{".mov", "libx264", "h264"},
+		{".mkv", "libx264", "h264"},
+		{".webm", "libvpx-vp9", "vp9"},
+		{".avi", "mpeg4", "mpeg4"},
+		{".3gp", "libx264", "h264"},
+	}
+	for _, c := range cases {
+		t.Run(c.ext, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "clip"+c.ext)
+			out, err := exec.Command("ffmpeg", "-y", "-v", "error",
+				"-f", "lavfi", "-i", "color=c=black:s=16x16:d=0.1:r=10", "-c:v", c.encoder, path).CombinedOutput()
+			require.NoError(t, err, string(out))
+			f, err := os.Open(path)
+			require.NoError(t, err)
+			defer f.Close()
+
+			tmp, result, err := ProbeVideo(f)
+			require.NoError(t, err)
+			defer os.Remove(tmp.Name())
+			defer tmp.Close()
+			assert.Equal(t, c.codec, result.CodecName)
+
+			transcoded, err := TranscodeH264(path)
+			require.NoError(t, err)
+			defer os.Remove(transcoded.Name())
+			defer transcoded.Close()
+		})
+	}
 }
 
 func TestVideoProbeResult_NeedsTranscode(t *testing.T) {
