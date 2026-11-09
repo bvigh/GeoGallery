@@ -43,6 +43,8 @@ type roundMedia struct {
 	InitialPitch *float64 `json:"initial_pitch"`
 	InitialFov   *float64 `json:"initial_fov"`
 	MaxDistKm    float64  `json:"max_dist_km"`
+	// [south, west, north, east] of the filtered set, for the guess map; null if not measured.
+	Bounds *[4]float64 `json:"bounds"`
 }
 
 func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
@@ -94,10 +96,10 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	maxDistKm, err := h.computeMaxDistKm(r.Context(), conds, args)
+	maxDistKm, bounds, err := h.measureFilteredSet(r.Context(), conds, args)
 	if err != nil {
-		slog.Warn("game: max_dist_km computation failed, using default", "err", err)
-		maxDistKm = 1.0
+		slog.Warn("game: measuring the filtered set failed, using defaults", "err", err)
+		maxDistKm, bounds = 1.0, nil
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -109,13 +111,17 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 		InitialPitch: m.InitialPitch,
 		InitialFov:   m.InitialFov,
 		MaxDistKm:    maxDistKm,
+		Bounds:       bounds,
 	})
 }
 
-// computeMaxDistKm reuses NewRound's conds and args, so it expects media aliased as m.
-func (h *GameHandler) computeMaxDistKm(ctx context.Context, conds []string, args []any) (float64, error) {
+// measureFilteredSet returns the longest distance across the set and its bounds for the guess map
+// (nil if the set emptied since the round was picked). It reuses NewRound's conds and args, so it
+// expects media aliased as m.
+func (h *GameHandler) measureFilteredSet(ctx context.Context, conds []string, args []any) (float64, *[4]float64, error) {
 	// ST_LongestLine finds the two farthest points (degree-space, fast via convex hull).
 	// Casting the resulting linestring to geography gives geodesic length in meters.
+	// The bounds are plain degrees too: a set across the antimeridian gets a box around the world.
 	sql := fmt.Sprintf(`
 		SELECT COALESCE(
 			ST_Length(
@@ -125,18 +131,47 @@ func (h *GameHandler) computeMaxDistKm(ctx context.Context, conds []string, args
 				)::geography
 			) / 1000.0,
 			0
-		)
+		),
+		MIN(ST_Y(m.location::geometry)), MIN(ST_X(m.location::geometry)),
+		MAX(ST_Y(m.location::geometry)), MAX(ST_X(m.location::geometry))
 		FROM media m
 		WHERE %s
 	`, strings.Join(conds, " AND "))
 	var maxDist float64
-	if err := h.db.QueryRow(ctx, sql, args...).Scan(&maxDist); err != nil {
-		return 1.0, err
+	var south, west, north, east *float64
+	if err := h.db.QueryRow(ctx, sql, args...).Scan(&maxDist, &south, &west, &north, &east); err != nil {
+		return 1.0, nil, err
 	}
 	if maxDist < 1.0 {
 		maxDist = 1.0
 	}
-	return maxDist, nil
+	if south == nil {
+		return maxDist, nil, nil
+	}
+	return maxDist, guessMapBounds(*south, *west, *north, *east), nil
+}
+
+// boundsGridDeg is the grid a round's bounds are rounded out to: about 55 km north to south.
+const boundsGridDeg = 0.5
+
+// guessMapBounds rounds a bounding box out to the grid, so a set at one place (or a tiny one)
+// opens on an area instead of street level. Grid lines, not a margin around the set: a margin
+// would put a single photo at the exact centre of the map.
+func guessMapBounds(south, west, north, east float64) *[4]float64 {
+	south, north = roundOutToGrid(south, north, 90)
+	west, east = roundOutToGrid(west, east, 180)
+	return &[4]float64{south, west, north, east}
+}
+
+// roundOutToGrid returns the grid lines at or below lo and strictly above hi, so a point on a line
+// still gets a whole cell. Only at limit is there no line above, and the cell below it is used.
+func roundOutToGrid(lo, hi, limit float64) (float64, float64) {
+	lo = math.Floor(lo/boundsGridDeg) * boundsGridDeg
+	hi = (math.Floor(hi/boundsGridDeg) + 1) * boundsGridDeg
+	if hi > limit {
+		return math.Min(lo, limit-boundsGridDeg), limit
+	}
+	return lo, hi
 }
 
 type guessRequest struct {

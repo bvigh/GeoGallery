@@ -160,6 +160,78 @@ describe("GamePage", () => {
     vi.restoreAllMocks();
   });
 
+  describe("guess map view", () => {
+    const bounds = [47, 16, 48.5, 19.5];
+    const fitArgs = [
+      [
+        [47, 16],
+        [48.5, 19.5],
+      ],
+      { padding: [12, 12], animate: false },
+    ];
+
+    function roundWith(roundBounds: number[] | null) {
+      return (path: string) =>
+        Promise.resolve(path === "/trips" ? [] : { ...round, bounds: roundBounds });
+    }
+
+    async function startRound() {
+      render(<GamePage />);
+      await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
+      await screen.findByRole("button", { name: "Submit" });
+    }
+
+    it("opens on the bounds of the filtered media", async () => {
+      mockApi.get.mockImplementation(roundWith(bounds));
+      await startRound();
+      expect(leaflet.map.fitBounds).toHaveBeenCalledTimes(1);
+      expect(leaflet.map.fitBounds).toHaveBeenCalledWith(...fitArgs);
+    });
+
+    it("keeps the default view when the set could not be measured", async () => {
+      mockApi.get.mockImplementation(roundWith(null));
+      await startRound();
+      expect(leaflet.map.fitBounds).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { name: "unmeasured", size: { x: 0, y: 0 } },
+      { name: "no room inside the padding", size: { x: 288, y: 24 } },
+    ])("does not fit a map without room ($name)", async ({ size }) => {
+      leaflet.size = size;
+      mockApi.get.mockImplementation(roundWith(bounds));
+      await startRound();
+      expect(leaflet.map.fitBounds).not.toHaveBeenCalled();
+    });
+
+    it("does not fit again while the player makes a guess", async () => {
+      mockApi.get.mockImplementation(roundWith(bounds));
+      await startRound();
+      act(() => guessMap.click!({ latlng: { lat: 47.5, lng: 19 } }));
+      expect(leaflet.map.fitBounds).toHaveBeenCalledTimes(1);
+    });
+
+    it("fits the next round to its own bounds", async () => {
+      const next = [-34, -71, -33.5, -70.5];
+      mockApi.get.mockImplementation(roundWith(bounds));
+      mockApi.post.mockResolvedValue(guessResult);
+      await startRound();
+      act(() => guessMap.click!({ latlng: { lat: 47.5, lng: 19 } }));
+      await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+      mockApi.get.mockImplementation(roundWith(next));
+      await userEvent.click(await screen.findByRole("button", { name: "Next Round" }));
+      await screen.findByRole("button", { name: "Submit" });
+      expect(leaflet.map.fitBounds).toHaveBeenLastCalledWith(
+        [
+          [-34, -71],
+          [-33.5, -70.5],
+        ],
+        { padding: [12, 12], animate: false },
+      );
+    });
+  });
+
   it("passes albums to FilterPanel", async () => {
     mockApi.get.mockImplementation(noRounds);
     render(<GamePage />);

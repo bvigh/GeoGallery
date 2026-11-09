@@ -265,6 +265,44 @@ func TestSharing_Filters(t *testing.T) {
 	}
 }
 
+// The guess map opens on exactly the set a round is drawn from, shared items included when the
+// filters include them. Budapest and Vienna are one cell each, rounded out to the 0.5° grid.
+func TestSharing_RoundBoundsFollowFilters(t *testing.T) {
+	f := newSharingFixture(t)
+	budapest := [4]float64{47, 19, 47.5, 19.5}
+	vienna := [4]float64{48, 16, 48.5, 16.5}
+	both := [4]float64{47, 16, 48.5, 19.5}
+
+	tests := []struct {
+		name  string
+		user  string
+		query string
+		want  [4]float64
+	}{
+		{"own and shared", f.userB, "", both},
+		{"owner=mine", f.userB, "owner=mine", vienna},
+		{"owner=shared", f.userB, "owner=shared", budapest},
+		{"a sharer does not see what was not shared", f.userA, "", budapest},
+		{"album", f.userB, "album_id=" + f.family, budapest},
+		{"trip or album", f.userB, "trip_id=" + f.tripB + "&album_id=" + f.family, both},
+		{"owner narrows the union", f.userB, "trip_id=" + f.tripB + "&album_id=" + f.family + "&owner=shared", budapest},
+		{"foreign album adds nothing", f.userB, "owner=mine&album_id=" + f.private + "&trip_id=" + f.tripB, vienna},
+		{"date", f.userB, "from_date=2024-05-03", vienna},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A round picks one item at random; the bounds must not depend on which.
+			for range 10 {
+				rec := do(t, f.router, tt.user, http.MethodGet, "/api/game/round?"+tt.query, "")
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				var round roundMedia
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &round))
+				assert.Equal(t, &tt.want, round.Bounds)
+			}
+		})
+	}
+}
+
 func TestSharing_ListOwnerFields(t *testing.T) {
 	f := newSharingFixture(t)
 	list := func(t *testing.T, user string) map[string]mediaItem {
