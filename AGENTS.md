@@ -223,6 +223,8 @@ Both ingest paths follow the same order:
 2. The video container's `creation_time` (ffprobe, UTC)
 3. File modification time (scan: `DirEntry.Info().ModTime()`; upload: `file_mtime[]` form field in ms-since-epoch sent by the browser)
 
+Whatever the source, a time whose UTC year falls outside 1–9998 is dropped and `taken_at` stays `NULL`; the next source is not tried. `time.Time` marshals only the years 0–9999, and one year is kept in reserve at each end because pgx returns a time in the server's zone.
+
 **The EXIF time is a wall clock without a zone.** `takenAt` in `exif.go` picks the offset and never uses the server's own zone:
 - The photo's GPS clock: `GPSDateStamp` + `GPSTimeStamp` (UTC). It is used when wall minus GPS lands within `gpsClockTolerance` (2 min) of a real UTC offset (whole hours, or the fractional offsets in `fractionalOffsets`). A stale fix (minutes or days old, 1970-01-01) falls through.
 - Otherwise `OffsetTimeOriginal`, trusted unless the photo's make is in `offsetIgnoredMakes`. It follows a phone abroad, and many phones (the Galaxy S24 on every photo) write no GPS timestamp. The Panasonic DC-TZ200 is exempt: it writes `+01:00` all year, even while its clock shows summer time. The value alone cannot separate it from a phone in London, so the exemption goes by make. An offset that is blank or not in real use (`isRealOffset`) falls through.
@@ -338,7 +340,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `internal/handlers/admin_test.go` — admin handlers
 - `internal/handlers/gps_matcher_test.go`, `gps_matcher_handler_test.go` — GPS matcher logic and handler
 - `internal/handlers/gps_tracks_test.go` — GPS track import and upload endpoints (per-file source, failed and empty files, one matcher run)
-- `internal/handlers/register_exif_time_test.go` — `registerMedia` stores the EXIF time in the camera zone (or by the GPS clock or `OffsetTimeOriginal`), on the row and on the `exif` track point
+- `internal/handlers/register_exif_time_test.go` — `registerMedia` stores the EXIF time in the camera zone (or by the GPS clock or `OffsetTimeOriginal`), on the row and on the `exif` track point; the years `jsonCanCarry` lets through
 - `internal/handlers/register_video_location_test.go` — `registerMedia` with real ffmpeg and ffprobe: a video's location tag becomes its location, zeros and no tag leave none, never a track point
 - `internal/handlers/media_test.go`, `upload_scan_matcher_test.go` — media list/upload/scan/dedup flow, owner propagation, opaque keys, owner fields and `trip_id` only on own rows, `rows.Err()` → 500, upload `?album_id` (refused before the body, duplicates added), `registerMedia` looking up the hash before uploading (a duplicate is never uploaded; a concurrent one is deleted again) and waiting for an EXIF decode slot (the wait ends when the request is cancelled), `KnownHashes` validation and owner scoping
 - `internal/handlers/media_hash_test.go` — `mediaHash` equals the original streaming hash at every size edge, tail read errors, and the shared vectors in `frontend/src/lib/mediaHash.vectors.json`
@@ -361,7 +363,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `internal/handlers/albums_integration_test.go` — every album route: create/list (incl. the caller's `last_added_at`), rename, delete keeps media, members, remove/leave, disabled users keep memberships, album media add/remove, `/api/media/{id}/albums`, `/api/users`
 - `internal/handlers/sharing_integration_test.go` — read access follows membership, members cannot write shared media, filters on shared rows, round bounds follow the owner and album filters, owner fields, GPS isolation, trip detection ignores shared media
 - `internal/handlers/filters_integration_test.go` — `/api/media` and `/api/game/round` filters, canonical ID binding, OFFSET pages hold every item once
-- `internal/handlers/upload_album_integration_test.go` — upload `?album_id` refused before the body is read, new files and duplicates added (duplicates never reach S3), `registerMedia` returns the existing ID
+- `internal/handlers/upload_album_integration_test.go` — upload `?album_id` refused before the body is read, new files and duplicates added (duplicates never reach S3), `registerMedia` returns the existing ID, a capture time JSON cannot carry stored as `NULL` with the list still working for every member
 - Use `testing` + [testify](https://github.com/stretchr/testify) (`assert`/`require`). Test files live alongside source.
 - Pure logic tests use no external deps. Handler tests use `net/http/httptest`.
 - Use table-driven tests (`[]struct{ input ...; want ... }`).

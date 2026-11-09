@@ -71,3 +71,25 @@ func TestRegisterMedia_ExifTimeZone(t *testing.T) {
 		})
 	}
 }
+
+func TestJSONCanCarry(t *testing.T) {
+	east, west := time.FixedZone("", 14*3600), time.FixedZone("", -12*3600)
+	tests := []struct {
+		name string
+		t    time.Time
+		want bool
+	}{
+		{"an ordinary date", time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC), true},
+		{"the first instant of year 1", time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC), true},
+		{"the last second of year 0", time.Date(0, 12, 31, 23, 59, 59, 0, time.UTC), false},
+		{"the last second of year 9998", time.Date(9998, 12, 31, 23, 59, 59, 0, time.UTC), true},
+		{"the first instant of year 9999", time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), false},
+		{"west of UTC, past the end in UTC", time.Date(9998, 12, 31, 23, 0, 0, 0, west), false},
+		{"east of UTC, still inside in UTC", time.Date(9999, 1, 1, 0, 0, 0, 0, east), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, jsonCanCarry(tt.t))
+		})
+	}
+}

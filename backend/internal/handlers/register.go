@@ -157,6 +157,10 @@ func (r *MediaRegistrar) registerMedia(
 	if takenAt == nil {
 		takenAt = fallbackMtime
 	}
+	if takenAt != nil && !jsonCanCarry(*takenAt) {
+		slog.Warn("register: capture time outside the years JSON can carry, storing none", "filename", filename, "year", takenAt.UTC().Year())
+		takenAt = nil
+	}
 
 	// EXIF position, or a video's own location tag (probe is empty for a photo).
 	lat, lng := exifData.Lat, exifData.Lng
@@ -205,6 +209,14 @@ func (r *MediaRegistrar) registerMedia(
 		}
 	}
 	return mediaID, true, nil
+}
+
+// jsonCanCarry reports whether t can be sent as JSON wherever it is read back. time.Time marshals
+// only the years 0-9999. One year is kept in reserve at each end, because pgx returns a time in the
+// server's zone.
+func jsonCanCarry(t time.Time) bool {
+	y := t.UTC().Year()
+	return y >= 1 && y <= 9998
 }
 
 // deleteObject removes an uploaded object that no media row references. A failure only leaves an
