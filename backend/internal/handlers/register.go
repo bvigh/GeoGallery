@@ -39,6 +39,23 @@ type MediaRegistrar struct {
 	cameraZone *time.Location
 }
 
+// exifDecodeSlots is how many files this process can have their EXIF decoded at once, so what
+// decoding can take in memory and CPU follows this number and not the number of uploads running.
+// server scan is a process of its own, with its own slots. Decoding a normal photo is quick, so
+// nothing queues in normal use.
+var exifDecodeSlots = make(chan struct{}, 4)
+
+// extractExif is ingest.ExtractExif in one of the exifDecodeSlots.
+func (r *MediaRegistrar) extractExif(ctx context.Context, head []byte) (ingest.ExifData, error) {
+	select {
+	case exifDecodeSlots <- struct{}{}:
+	case <-ctx.Done():
+		return ingest.ExifData{}, ctx.Err()
+	}
+	defer func() { <-exifDecodeSlots }()
+	return ingest.ExtractExif(bytes.NewReader(head), r.cameraZone), nil
+}
+
 // registerMedia stores one media file for ownerID and returns its media ID. inserted is false when
 // the file is a duplicate by (owner_id, file_hash): mediaID is then the existing row's ID, so the
 // caller can still add it to an album. The hash only needs the head and the tail of the file, so a
@@ -62,7 +79,10 @@ func (r *MediaRegistrar) registerMedia(
 	}
 
 	ext := strings.ToLower(filepath.Ext(filename))
-	exifData := ingest.ExtractExif(bytes.NewReader(head), r.cameraZone)
+	exifData, err := r.extractExif(ctx, head)
+	if err != nil {
+		return "", false, fmt.Errorf("wait to read exif: %w", err)
+	}
 	// Insta360 and similar cameras write moov at end of file, so EXIF dimension extraction from
 	// the head alone fails, and the video is probed with ffprobe instead.
 	probeVideo := ingest.IsVideoExt(ext) && exifData.WidthPx == nil
