@@ -2,12 +2,15 @@ package ingest
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bvigh/geogallery/internal/goexif/exif"
+	"github.com/bvigh/geogallery/internal/goexif/goexiftest"
 	"github.com/bvigh/geogallery/internal/ingest/exiftest"
 )
 
@@ -279,4 +282,58 @@ func TestExtractExif_IndependentOfProcessZone(t *testing.T) {
 	}
 	assert.Equal(t, "2018-10-23T09:50:53Z", withZone.UTC().Format(time.RFC3339))
 	assert.Equal(t, "2018-10-23T11:50:53Z", withNil.UTC().Format(time.RFC3339))
+}
+
+// decodesPerFile is IFD0 and its chain, the three sub-IFDs, and offsetTimeOriginal's read of the
+// Exif IFD.
+const decodesPerFile = 5
+
+func TestExtractExif_StopsEarlyOnBadStructures(t *testing.T) {
+	for _, in := range goexiftest.Inputs() {
+		forms := map[string][]byte{"tiff": in.TIFF, "jpeg": in.JPEG}
+		for form, data := range forms {
+			if data == nil {
+				continue
+			}
+			t.Run(in.Name+"/"+form, func(t *testing.T) {
+				var got ExifData
+				goexiftest.Bounded(t, goexiftest.MaxAlloc(len(data), decodesPerFile), func() {
+					got = ExtractExif(bytes.NewReader(data), time.UTC)
+				})
+				assert.Equal(t, ExifData{}, got)
+			})
+		}
+	}
+}
+
+func TestExtractExif_BadExifIFDKeepsIFD0(t *testing.T) {
+	zone := mustZone(t, "Europe/Warsaw")
+	for _, in := range goexiftest.BadExifIFDs() {
+		t.Run(in.Name, func(t *testing.T) {
+			var got ExifData
+			goexiftest.Bounded(t, goexiftest.MaxAlloc(len(in.TIFF), decodesPerFile), func() {
+				got = ExtractExif(bytes.NewReader(in.TIFF), zone)
+			})
+
+			require.NotNil(t, got.TakenAt)
+			assert.True(t, time.Date(2021, 3, 4, 5, 6, 7, 0, zone).Equal(*got.TakenAt), "got %v", *got.TakenAt)
+			assert.Equal(t, ZoneCamera, got.TakenAtZone)
+			assert.Equal(t, goexiftest.Model, got.CameraModel)
+		})
+	}
+}
+
+func TestExtractExif_ZeroDenominatorIsNoPosition(t *testing.T) {
+	data := exiftest.TIFF(exiftest.Photo{DateTime: "2021:03:04 05:06:07", GPS: &exiftest.GPS{Lat: 10, Lng: 20}})
+	x, err := exif.Decode(bytes.NewReader(data))
+	require.NoError(t, err)
+	lat, err := x.Get(exif.GPSLatitude)
+	require.NoError(t, err)
+	binary.LittleEndian.PutUint64(data[lat.ValOffset:], 0) // the degrees become 0/0
+
+	got := ExtractExif(bytes.NewReader(data), time.UTC)
+
+	assert.Nil(t, got.Lat)
+	assert.Nil(t, got.Lng)
+	assert.NotNil(t, got.TakenAt)
 }

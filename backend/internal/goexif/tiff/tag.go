@@ -114,6 +114,11 @@ type Tag struct {
 // generally be relative to the beginning of the tiff structure (not relative
 // to the beginning of the tag).
 func DecodeTag(r ReadAtReader, order binary.ByteOrder) (*Tag, error) {
+	return decodeTag(r, order, newBudget(r))
+}
+
+// decodeTag is DecodeTag spending from b.
+func decodeTag(r ReadAtReader, order binary.ByteOrder, b *budget) (*Tag, error) {
 	t := new(Tag)
 	t.order = order
 
@@ -138,7 +143,8 @@ func DecodeTag(r ReadAtReader, order binary.ByteOrder) (*Tag, error) {
 		return t, errors.New("invalid Count offset in tag")
 	}
 
-	valLen := typeSize[t.Type] * t.Count
+	// In 64 bits, so that a Count which overflows uint32 cannot look like a short value.
+	valLen := uint64(typeSize[t.Type]) * uint64(t.Count)
 	if valLen == 0 {
 		return t, errors.New("zero length tag value")
 	}
@@ -146,17 +152,11 @@ func DecodeTag(r ReadAtReader, order binary.ByteOrder) (*Tag, error) {
 	if valLen > 4 {
 		binary.Read(r, order, &t.ValOffset)
 
-		// Use a bytes.Buffer so we don't allocate a huge slice if the tag
-		// is corrupt.
-		var buff bytes.Buffer
-		sr := io.NewSectionReader(r, int64(t.ValOffset), int64(valLen))
-		n, err := io.Copy(&buff, sr)
+		val, err := readValue(r, t.ValOffset, valLen)
 		if err != nil {
-			return t, errors.New("tiff: tag value read failed: " + err.Error())
-		} else if n != int64(valLen) {
-			return t, ErrShortReadTagValue
+			return t, err
 		}
-		t.Val = buff.Bytes()
+		t.Val = val
 
 	} else {
 		val := make([]byte, valLen)
@@ -171,7 +171,39 @@ func DecodeTag(r ReadAtReader, order binary.ByteOrder) (*Tag, error) {
 		t.Val = val
 	}
 
+	// After the read, so a value running past the end of the data is still ErrShortReadTagValue.
+	// A successful read means len(t.Val) == valLen, which bounds what convertVals allocates.
+	if err := b.spend(12 + valLen); err != nil {
+		return t, err
+	}
+
 	return t, t.convertVals()
+}
+
+// readValue returns the n bytes at off. When the reader reports a size and the value lies inside
+// it, the result holds exactly those n bytes, which a bytes.Buffer would not: it allocates 512
+// bytes and then 1024 for any value, however short. Otherwise n is unconfirmed, and a bytes.Buffer
+// grows only as far as the data goes.
+func readValue(r ReadAtReader, off uint32, n uint64) ([]byte, error) {
+	sr := io.NewSectionReader(r, int64(off), int64(n))
+	if size, ok := dataSize(r); ok && uint64(off)+n <= size {
+		val := make([]byte, n)
+		if _, err := io.ReadFull(sr, val); errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, ErrShortReadTagValue
+		} else if err != nil {
+			return nil, errors.New("tiff: tag value read failed: " + err.Error())
+		}
+		return val, nil
+	}
+
+	var buff bytes.Buffer
+	copied, err := io.Copy(&buff, sr)
+	if err != nil {
+		return nil, errors.New("tiff: tag value read failed: " + err.Error())
+	} else if copied != int64(n) {
+		return nil, ErrShortReadTagValue
+	}
+	return buff.Bytes(), nil
 }
 
 func (t *Tag) convertVals() error {
@@ -326,12 +358,15 @@ func (t *Tag) typeErr(to Format) error {
 }
 
 // Rat returns the tag's i'th value as a rational number. It returns a nil and
-// an error if this tag's Format is not RatVal.  It panics for zero deminators
-// or if i is out of range.
+// an error if this tag's Format is not RatVal or its denominator is zero.
+// It panics if i is out of range.
 func (t *Tag) Rat(i int) (*big.Rat, error) {
 	n, d, err := t.Rat2(i)
 	if err != nil {
 		return nil, err
+	}
+	if d == 0 {
+		return nil, errors.New("tiff: rational with a zero denominator")
 	}
 	return big.NewRat(n, d), nil
 }

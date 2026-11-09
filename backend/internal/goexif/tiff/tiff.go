@@ -69,6 +69,7 @@ func Decode(r io.Reader) (*Tiff, error) {
 	// load IFD's
 	var d *Dir
 	prev := offset
+	b := newBudget(buf) // shared by the whole chain of IFDs
 	for offset != 0 {
 		// seek to offset
 		_, err := buf.Seek(int64(offset), 0)
@@ -81,7 +82,7 @@ func Decode(r io.Reader) (*Tiff, error) {
 		}
 
 		// load the dir
-		d, offset, err = DecodeDir(buf, t.Order)
+		d, offset, err = decodeDir(buf, t.Order, b)
 		if err != nil {
 			return nil, err
 		}
@@ -117,6 +118,11 @@ type Dir struct {
 // byte of the IFD. ReadAt offsets should generally be relative to the
 // beginning of the tiff structure (not relative to the beginning of the IFD).
 func DecodeDir(r ReadAtReader, order binary.ByteOrder) (d *Dir, offset int32, err error) {
+	return decodeDir(r, order, newBudget(r))
+}
+
+// decodeDir is DecodeDir spending from b.
+func decodeDir(r ReadAtReader, order binary.ByteOrder, b *budget) (d *Dir, offset int32, err error) {
 	d = new(Dir)
 
 	// get num of tags in ifd
@@ -125,10 +131,13 @@ func DecodeDir(r ReadAtReader, order binary.ByteOrder) (d *Dir, offset int32, er
 	if err != nil {
 		return nil, 0, errors.New("tiff: failed to read IFD tag count: " + err.Error())
 	}
+	if err = b.spend(6); err != nil {
+		return nil, 0, err
+	}
 
 	// load tags
 	for n := 0; n < int(nTags); n++ {
-		t, err := DecodeTag(r, order)
+		t, err := decodeTag(r, order, b)
 		if err != nil {
 			return nil, 0, err
 		}

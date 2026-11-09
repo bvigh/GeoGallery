@@ -576,6 +576,10 @@ func (x *Exif) JpegThumbnail() ([]byte, error) {
 		return nil, err
 	}
 
+	if start < 0 || l < 0 || start > len(x.Raw) || l > len(x.Raw)-start {
+		return nil, errors.New("exif: thumbnail offset or length out of range")
+	}
+
 	return x.Raw[start : start+l], nil
 }
 
