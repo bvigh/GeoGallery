@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -436,6 +438,29 @@ func TestList_RowsError_Returns500(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.NotContains(t, w.Body.String(), "[]")
+}
+
+// A row stored before registerMedia refused such times can still hold a year time.Time does not
+// marshal. Nothing can be sent then, and the reason has to reach the log.
+func TestList_EncodeError_IsLogged(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	takenAt := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	db := &mockDB{queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+		return &mockRows{rows: [][]any{
+			{"id-1", "a.jpg", "photo", nil, nil, nil, nil, takenAt, "media/k1.jpg",
+				nil, testOwnerID, nil, nil, nil, nil},
+		}}, nil
+	}}
+
+	h := &MediaHandler{db: db, storage: &mockStorage{}}
+	h.List(httptest.NewRecorder(), withTestUser(httptest.NewRequest("GET", "/api/media", nil)))
+
+	assert.Contains(t, logs.String(), "media: encode list failed")
+	assert.Contains(t, logs.String(), "year outside of range")
 }
 
 func TestList_EmptyResult_ReturnsEmptyArray(t *testing.T) {

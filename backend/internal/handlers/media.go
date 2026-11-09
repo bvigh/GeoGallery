@@ -151,7 +151,9 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(items)
+	if err := json.NewEncoder(w).Encode(items); err != nil {
+		slog.Warn("media: encode list failed", "err", err)
+	}
 }
 
 var maxUploadBodyBytes int64 = 4 << 30 // var so tests can lower it
