@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -833,4 +834,75 @@ func TestRunIngestScan_MissingDir_ReturnsWalkError(t *testing.T) {
 
 	assert.ErrorContains(t, err, "walk")
 	assert.False(t, matcherCalled)
+}
+
+// takeExifSlots occupies every EXIF decode slot until the returned function, or the end of the
+// test, frees them.
+func takeExifSlots(t *testing.T) (release func()) {
+	t.Helper()
+	for range cap(exifDecodeSlots) {
+		exifDecodeSlots <- struct{}{}
+	}
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			for range cap(exifDecodeSlots) {
+				<-exifDecodeSlots
+			}
+		})
+	}
+	t.Cleanup(release)
+	return release
+}
+
+func TestRegisterMedia_WaitsForAnExifSlot(t *testing.T) {
+	release := takeExifSlots(t)
+	reg := &MediaRegistrar{db: &mockRegistrarDB{}, storage: &mockUploadStorage{}}
+	photo := []byte("a small photo")
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := reg.registerMedia(context.Background(), testOwnerID, bytes.NewReader(photo), int64(len(photo)), "a.jpg", nil)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("finished while every slot was taken: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("still waiting after the slots were freed")
+	}
+	assert.Empty(t, exifDecodeSlots, "the slot is given back")
+}
+
+func TestRegisterMedia_StopsWaitingForAnExifSlotWhenCancelled(t *testing.T) {
+	takeExifSlots(t)
+	db := &mockRegistrarDB{}
+	store := &mockUploadStorage{}
+	reg := &MediaRegistrar{db: db, storage: store}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	photo := []byte("a small photo")
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := reg.registerMedia(ctx, testOwnerID, bytes.NewReader(photo), int64(len(photo)), "a.jpg", nil)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("still waiting after the context was cancelled")
+	}
+	assert.Empty(t, db.sqls, "the database is not reached")
+	assert.Empty(t, store.keys, "nothing is stored")
 }
