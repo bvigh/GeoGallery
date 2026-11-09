@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, type RefObject } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, type RefObject } from "react";
 import { MapContainer, TileLayer, Marker, Polyline, useMapEvents, useMap } from "react-leaflet";
 import type { Album, GameRound, GuessResult, OrientationKeyframe, Trip, FilterState } from "@/types";
 import { api, ApiError } from "@/api/client";
@@ -73,6 +73,29 @@ function ClickMarker({
       onPick(e.latlng.lat, e.latlng.lng);
     },
   });
+  return null;
+}
+
+const GUESS_MAP_PADDING = 12;
+
+// Opens the guess map on the region of the filtered media. Before paint, so the world view never
+// flashes. Only once per round: the player's own zooming and panning stand.
+function FitGuessMap({ bounds }: { bounds: NonNullable<GameRound["bounds"]> }) {
+  const map = useMap();
+  const [south, west, north, east] = bounds;
+
+  useLayoutEffect(() => {
+    const { x, y } = map.getSize();
+    // Leaflet throws on the NaN zoom of a map with no room left inside the padding.
+    if (x <= 2 * GUESS_MAP_PADDING || y <= 2 * GUESS_MAP_PADDING) return;
+    map.fitBounds(
+      [
+        [south, west],
+        [north, east],
+      ],
+      { padding: [GUESS_MAP_PADDING, GUESS_MAP_PADDING], animate: false },
+    );
+  }, [map, south, west, north, east]);
   return null;
 }
 
@@ -371,6 +394,7 @@ export function GamePage() {
               </div>
             }
           >
+            {round.bounds && <FitGuessMap bounds={round.bounds} />}
             <ClickMarker onPick={(lat, lng) => setGuess({ lat, lng })} />
             {guess && <Marker position={[guess.lat, guess.lng]} icon={guessIcon} />}
           </MiniMapOverlay>

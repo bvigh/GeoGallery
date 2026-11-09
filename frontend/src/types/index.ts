@@ -83,6 +83,8 @@ export interface GameRound {
   initial_pitch?: number;
   initial_fov?: number;
   max_dist_km: number;
+  // [south, west, north, east] of the filtered media the round was drawn from.
+  bounds: [number, number, number, number] | null;
 }
 
 export interface CurrentUser {
