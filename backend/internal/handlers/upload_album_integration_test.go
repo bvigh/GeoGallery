@@ -10,7 +10,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/bvigh/geogallery/internal/ingest/exiftest"
 	"github.com/bvigh/geogallery/internal/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -236,4 +238,66 @@ func TestRegisterMedia_Integration_ReturnsExistingIDForDuplicates(t *testing.T) 
 	assert.Len(t, store.keys, 2, "A's and B's one.jpg: the duplicate is never uploaded")
 	assert.Empty(t, store.deleted)
 	assertNoOrphans(t, pool, store)
+}
+
+// TestUpload_CaptureTimeJSONCannotCarry uploads into a shared album: the file is stored without a
+// capture time and is listed for the owner and the other member.
+func TestUpload_CaptureTimeJSONCannotCarry(t *testing.T) {
+	f := newSharingFixture(t)
+	tests := []struct {
+		name    string
+		file    string
+		content []byte
+		mtime   string
+	}{
+		{"EXIF time past the last year", "late.jpg",
+			exiftest.JPEG(exiftest.Photo{DateTimeOriginal: "9999:12:31 23:59:59", OffsetTimeOriginal: "-12:00"}), ""},
+		{"EXIF time before the first year", "early.jpg",
+			exiftest.JPEG(exiftest.Photo{DateTimeOriginal: "0000:01:01 00:00:00", OffsetTimeOriginal: "+14:00"}), ""},
+		{"file time past the last year", "mtime.jpg", []byte("a photo without EXIF"), "253402300800000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			mw := multipart.NewWriter(&buf)
+			fw, err := mw.CreateFormFile("files", tt.file)
+			require.NoError(t, err)
+			_, err = fw.Write(tt.content)
+			require.NoError(t, err)
+			if tt.mtime != "" {
+				require.NoError(t, mw.WriteField("file_mtime", tt.mtime))
+			}
+			require.NoError(t, mw.Close())
+			req := httptest.NewRequest(http.MethodPost, "/api/media/upload?album_id="+f.family, &buf)
+			req.Header.Set("Content-Type", mw.FormDataContentType())
+			req.Header.Set(testUserHeader, f.userB)
+			rec := httptest.NewRecorder()
+			f.router.ServeHTTP(rec, req)
+			assert.Equal(t, []string{tt.file}, decodeUpload(t, rec).Uploaded)
+
+			id := mediaIDByName(t, f.pool, f.userB, tt.file)
+			var stored *time.Time
+			require.NoError(t, f.pool.QueryRow(context.Background(),
+				`SELECT taken_at FROM media WHERE id = $1`, id).Scan(&stored))
+			assert.Nil(t, stored)
+
+			for _, user := range []string{f.userA, f.userB} {
+				rec := do(t, f.router, user, http.MethodGet, "/api/media", "")
+				require.Equal(t, http.StatusOK, rec.Code)
+				var items []struct {
+					ID      string  `json:"id"`
+					TakenAt *string `json:"taken_at"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &items), rec.Body.String())
+				var found bool
+				for _, it := range items {
+					if it.ID == id {
+						found = true
+						assert.Nil(t, it.TakenAt)
+					}
+				}
+				assert.True(t, found, "the item is listed")
+			}
+		})
+	}
 }

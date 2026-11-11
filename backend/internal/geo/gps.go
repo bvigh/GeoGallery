@@ -96,7 +96,8 @@ func toRad(deg float64) float64 {
 // IsValidGPS returns false for coordinates that indicate no real GPS fix:
 // exact or near-zero (Null Island placeholder), or out-of-range values.
 func IsValidGPS(lat, lng float64) bool {
-	if math.Abs(lat) > 90 || math.Abs(lng) > 180 {
+	// Written this way round so that NaN, which compares false with everything, is refused too.
+	if !(math.Abs(lat) <= 90 && math.Abs(lng) <= 180) {
 		return false
 	}
 	// Cameras with no fix typically write 0,0. Reject anything within ~1 km of

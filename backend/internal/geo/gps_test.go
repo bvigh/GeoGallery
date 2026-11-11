@@ -1,6 +1,7 @@
 package geo
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -77,6 +78,11 @@ func TestIsValidGPS(t *testing.T) {
 		{-33.9, 18.4, true}, // Cape Town
 		{91, 0, false},      // lat out of range
 		{0, 181, false},     // lng out of range
+		{math.NaN(), 20, false},
+		{20, math.NaN(), false},
+		{math.NaN(), math.NaN(), false},
+		{math.Inf(1), 20, false},
+		{20, math.Inf(-1), false},
 	}
 	for _, c := range cases {
 		got := IsValidGPS(c.lat, c.lng)
