@@ -29,7 +29,7 @@ Media files (photos, videos, 360° content) are stored in MinIO AIStore (S3-comp
 | `backend/internal/ingest/exiftest/` | Test helper: builds small JPEGs with chosen EXIF tags (make, capture time, offset, GPS position and timestamp) and optionally an Exif IFD goexif rejects |
 | `backend/internal/gpstrack/` | Track file parsers for `POST /api/gps-tracks/upload`: `Parse(name, r)` picks GPX, TCX, KML/KMZ, GeoJSON, NMEA, esoko `.log` or a `.json` format (Google Timeline object; Samsung Health or GeoGallery array) by extension, any of them `.gz`. Unreadable and out-of-range points are skipped |
 | `backend/internal/geo/gps.go` | GPS interpolation (Haversine + confidence scoring) |
-| `backend/internal/storage/s3.go` | S3/MinIO client wrapper (presigned GETs, 15 min) |
+| `backend/internal/storage/s3.go` | S3/MinIO client wrapper (presigned GETs, 15 min, signed for `S3_PUBLIC_ENDPOINT`; every other call goes to `S3_ENDPOINT`) |
 | `backend/migrations/` | golang-migrate SQL, numbered `000001_…`; `000009_albums` adds `albums`, `album_members`, `album_media` and `media_id_owner_key` |
 | `deploy/keycloak/geogallery-realm.json` | Dev/E2E Keycloak realm (client + test users alice/bob/carol, self-registration on). Dev only |
 | `docs/auth.md` | Identity provider setup (Logto, other providers, production Keycloak), API tokens, port hardening |
@@ -249,7 +249,8 @@ Only `DATABASE_URL` has no default:
 
 ```
 DATABASE_URL              # required — no default
-S3_ENDPOINT               # default: http://localhost:9000 — presigned URLs point here, so browsers must reach it
+S3_ENDPOINT               # default: http://localhost:9000 — where the backend reaches S3
+S3_PUBLIC_ENDPOINT        # default: = S3_ENDPOINT — presigned URLs are signed for this host, so browsers must reach it; a reverse proxy in front must keep the Host header
 S3_ACCESS_KEY             # default: minioadmin (refused when PUBLIC_URL is https)
 S3_SECRET_KEY             # default: minioadmin (refused when PUBLIC_URL is https)
 S3_BUCKET                 # default: geogallery
@@ -271,7 +272,7 @@ SESSION_TTL_HOURS         # default: 720 — absolute session lifetime, no slidi
 CAMERA_TIMEZONE           # IANA zone camera clocks show, e.g. Europe/Warsaw. Required when PUBLIC_URL is https (the backend refuses to start without it). Over http, unset means the server's zone (TZ or /etc/localtime; UTC in Docker) and a UTC server logs a warning. An unknown name fails startup
 ```
 
-Docker Compose only (root `.env`): `POSTGRES_*`, `MINIO_*`, `FRONTEND_PORT` (default 5173), `KEYCLOAK_PORT` (default 8180, bound to 127.0.0.1), `KEYCLOAK_ADMIN` / `KEYCLOAK_ADMIN_PASSWORD` (default `admin`/`admin`). The compose backend service does **not** pass through `OIDC_SCOPES`, `SESSION_TTL_HOURS`, `GPS_MATCH_WINDOW_HOURS`, `TRIP_GAP_HOURS`, `LOG_LEVEL` or `LOG_FORMAT`. It passes `CAMERA_TIMEZONE`, which is empty (so unset) unless the root `.env` sets it. A production compose file must pass it too: over https the backend refuses to start without it. With a managed IdP, set `OIDC_DISCOVERY_URL` equal to `OIDC_ISSUER_URL`. `S3_ENDPOINT` is hard-coded to `http://minio:9000` in `docker-compose.yml`, a container-only hostname, so presigned URLs do not resolve in browsers. For a hosted instance, edit it there to a browser-reachable S3 host (known gap). The `db` service sets `shm_size: 256mb`: Docker's default 64 MB `/dev/shm` is too small for a parallel `VACUUM` of `gps_tracks` at the default 64 MB `maintenance_work_mem`.
+Docker Compose only (root `.env`): `POSTGRES_*`, `MINIO_*`, `FRONTEND_PORT` (default 5173), `KEYCLOAK_PORT` (default 8180, bound to 127.0.0.1), `KEYCLOAK_ADMIN` / `KEYCLOAK_ADMIN_PASSWORD` (default `admin`/`admin`). The compose backend service does **not** pass through `OIDC_SCOPES`, `SESSION_TTL_HOURS`, `GPS_MATCH_WINDOW_HOURS`, `TRIP_GAP_HOURS`, `LOG_LEVEL` or `LOG_FORMAT`. It passes `CAMERA_TIMEZONE`, which is empty (so unset) unless the root `.env` sets it. A production compose file must pass it too: over https the backend refuses to start without it. With a managed IdP, set `OIDC_DISCOVERY_URL` equal to `OIDC_ISSUER_URL`. `S3_ENDPOINT` is hard-coded to `http://minio:9000` in `docker-compose.yml`, a container-only hostname, so the backend signs presigned URLs for `S3_PUBLIC_ENDPOINT` instead: from the root `.env`, default `http://localhost:${MINIO_API_PORT:-9000}`. For a hosted instance, set it to the browser-reachable S3 host. The `db` service sets `shm_size: 256mb`: Docker's default 64 MB `/dev/shm` is too small for a parallel `VACUUM` of `gps_tracks` at the default 64 MB `maintenance_work_mem`.
 
 Copy `.env.example` to `backend/.env` for local development. The backend loads it with godotenv, which fills only variables that are unset.
 
@@ -326,7 +327,8 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
 - `internal/ingest/exif_test.go`, `video_test.go` — EXIF extraction, capture time (camera zone with DST, the GPS clock abroad and at fractional offsets, stale and 1970 GPS fixes rejected, `OffsetTimeOriginal` trusted except for exempt makes, a broken Exif IFD, the result independent of the process's own zone), media type detection, video probing, ISO 6709 location tags, a DASH manifest under a video extension never followed (upload, transcode), every accepted container opening, any other container stored unread
 - `internal/geo/gps_test.go` — GPS interpolation
 - `internal/gpstrack/*_test.go` — every track format, extension dispatch, `.gz`, the expansion limit, the Google Timeline activity start/end times, headerless esoko logs
-- `internal/config/config_test.go` — `PUBLIC_URL` normalisation, refusing dev secrets over https, `CAMERA_TIMEZONE` (unknown zone fails, the UTC fallback check, refusal over https without it)
+- `internal/storage/s3_test.go` — presigned URLs signed for `S3_PUBLIC_ENDPOINT` (path-style), requests sent to `S3_ENDPOINT`
+- `internal/config/config_test.go` — `PUBLIC_URL` normalisation, `S3_PUBLIC_ENDPOINT` defaulting to `S3_ENDPOINT`, refusing dev secrets over https, `CAMERA_TIMEZONE` (unknown zone fails, the UTC fallback check, refusal over https without it)
 - `internal/httplog/httplog_test.go` — logged line has the path, never the query
 - `internal/auth/handlers_test.go` — login/callback/logout against `oidctest` + in-memory fake store (`fakestore_test.go`): state/nonce/signature, `return_to`, invites, prompt rules, userinfo fallback, session rotation, logout hint
 - `internal/auth/middleware_test.go` — cookie and Bearer cases, `RequireSession`, `RequireAdmin`
