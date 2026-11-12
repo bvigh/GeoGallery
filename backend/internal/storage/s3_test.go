@@ -89,29 +89,39 @@ func testConfig(endpoint, public string) *config.Config {
 	}
 }
 
-func TestPresignGet_SignsForPublicEndpoint(t *testing.T) {
+// PresignGet signs for the host browsers use, PresignGetInternal for the one the backend uses.
+func TestPresignGet_SignsForEachEndpoint(t *testing.T) {
 	tests := []struct {
-		name, endpoint, public string
-		wantHost               string
+		name, endpoint, public           string
+		wantPublicHost, wantInternalHost string
 	}{
-		{"container-only endpoint", "http://minio:9000", "http://localhost:9000", "localhost:9000"},
-		{"public unset", "http://minio:9000", "", "minio:9000"},
-		{"same endpoint", "https://s3.example.com", "https://s3.example.com", "s3.example.com"},
+		{"container-only endpoint", "http://minio:9000", "http://localhost:9000", "localhost:9000", "minio:9000"},
+		{"public unset", "http://minio:9000", "", "minio:9000", "minio:9000"},
+		{"same endpoint", "https://s3.example.com", "https://s3.example.com", "s3.example.com", "s3.example.com"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c, err := NewClient(testConfig(tt.endpoint, tt.public))
 			require.NoError(t, err)
 
-			raw, err := c.PresignGet(context.Background(), "media/u/abc.jpg")
-			require.NoError(t, err)
-			u, err := url.Parse(raw)
-			require.NoError(t, err)
+			for _, presign := range []struct {
+				name     string
+				fn       func(context.Context, string) (string, error)
+				wantHost string
+			}{
+				{"PresignGet", c.PresignGet, tt.wantPublicHost},
+				{"PresignGetInternal", c.PresignGetInternal, tt.wantInternalHost},
+			} {
+				raw, err := presign.fn(context.Background(), "media/u/abc.jpg")
+				require.NoError(t, err, presign.name)
+				u, err := url.Parse(raw)
+				require.NoError(t, err, presign.name)
 
-			assert.Equal(t, tt.wantHost, u.Host)
-			assert.Equal(t, "/geogallery/media/u/abc.jpg", u.Path, "path-style, as MinIO needs")
-			assert.Equal(t, "host", u.Query().Get("X-Amz-SignedHeaders"), "the signature covers the host")
-			assert.Equal(t, "900", u.Query().Get("X-Amz-Expires"))
+				assert.Equal(t, presign.wantHost, u.Host, presign.name)
+				assert.Equal(t, "/geogallery/media/u/abc.jpg", u.Path, "%s: path-style, as MinIO needs", presign.name)
+				assert.Equal(t, "host", u.Query().Get("X-Amz-SignedHeaders"), "%s: the signature covers the host", presign.name)
+				assert.Equal(t, "900", u.Query().Get("X-Amz-Expires"), presign.name)
+			}
 		})
 	}
 }

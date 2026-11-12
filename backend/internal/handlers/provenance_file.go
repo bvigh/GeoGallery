@@ -57,9 +57,10 @@ const (
 )
 
 // rereadStorage is what a re-read needs from object storage. A presigned URL must never reach a
-// log, and that includes the one handed to ffprobe.
+// log, and that includes the one handed to ffprobe. ffprobe runs here, so its URL is signed for
+// S3_ENDPOINT: PresignGet signs for S3_PUBLIC_ENDPOINT, which the backend may not reach.
 type rereadStorage interface {
-	PresignGet(ctx context.Context, key string) (string, error)
+	PresignGetInternal(ctx context.Context, key string) (string, error)
 	ReadHead(ctx context.Context, key string, n int64) ([]byte, error)
 }
 
@@ -293,7 +294,7 @@ func newPhotoRead(head []byte, zone ingest.CameraZone) fileRead {
 // readVideo runs ffprobe on a presigned URL. A head-only read cannot work for a video, because moov
 // is often at the end.
 func (h *ProvenanceHandler) readVideo(ctx context.Context, key string) (fileRead, error) {
-	url, err := h.storage.PresignGet(ctx, key)
+	url, err := h.storage.PresignGetInternal(ctx, key)
 	if err != nil {
 		return fileRead{}, err
 	}
