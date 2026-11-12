@@ -2,13 +2,18 @@ package ingest
 
 import (
 	"bytes"
+	"cmp"
+	"fmt"
 	"io"
+	"math"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
-	"github.com/rwcarlsen/goexif/exif"
-	"github.com/rwcarlsen/goexif/tiff"
+	"github.com/bep/imagemeta"
 
 	"github.com/bvigh/geogallery/internal/geo"
 )
@@ -20,29 +25,112 @@ const (
 	ZoneCamera = "camera" // the camera timezone (CAMERA_TIMEZONE)
 )
 
+// The tags a wall clock can come from (RawExif.WallTag), under EXIF's names. imagemeta calls IFD0's
+// DateTime ModifyDate, as ExifTool does.
+const (
+	WallTagOriginal = "DateTimeOriginal"
+	WallTagIFD0     = "DateTime"
+)
+
 type ExifData struct {
 	Lat         *float64
 	Lng         *float64
 	TakenAt     *time.Time
 	TakenAtZone string // ZoneGPS, ZoneOffset or ZoneCamera; empty without TakenAt
-	CameraModel string
+	CameraModel string // after CleanTag
 	WidthPx     *int
 	HeightPx    *int
+	Raw         RawExif
 }
 
-// ExtractExif reads the EXIF block at the start of r. cameraZone is the timezone camera clocks are
-// assumed to show (CAMERA_TIMEZONE); nil means UTC. takenAt explains how the capture time is read.
-func ExtractExif(r io.Reader, cameraZone *time.Location) ExifData {
-	x, err := exif.Decode(r)
-	// A non-critical error means one sub-IFD was unreadable; the tags read from the rest are good.
-	// Old Sony cameras write an Exif IFD goexif rejects, and their IFD0 DateTime is still right.
-	if err != nil && (x == nil || exif.IsCriticalError(err)) {
-		return ExifData{}
-	}
+// RawExif is what the file said about its capture time, including what takenAt could not use or
+// chose to ignore. It is filled whether or not takenAt succeeds, and ingest keeps it in
+// media.capture_evidence. Text is after CleanTag, so it is safe to store; parsing uses the original.
+type RawExif struct {
+	WallClock     string         // the wall clock as written, even when it does not parse
+	WallTag       string         // WallTagOriginal or WallTagIFD0; empty when the file has neither
+	GPSStamp      *time.Time     // GPSDateStamp + GPSTimeStamp (UTC), whenever they parse
+	WallMinusGPS  *time.Duration // the wall clock minus GPSStamp, before rounding; nil unless both parse
+	OffsetTag     string         // OffsetTimeOriginal as written, even when it is ignored
+	OffsetIgnored bool           // the tag exists and the make is in offsetIgnoredMakes
+	Make          string
+	Partial       bool // the decoder stopped at an error, and the tags read before it were kept
+}
 
+// CameraZone is the zone camera clocks are assumed to show, with what ingest records about where it
+// came from. time.Local's name is "Local", which would hide a container running in UTC. A zero
+// CameraZone reads wall clocks as UTC.
+type CameraZone struct {
+	Loc         *time.Location // CAMERA_TIMEZONE, or time.Local when unset
+	Set         bool           // CAMERA_TIMEZONE was set
+	UTCFallback bool           // unset, and the server's zone is UTC all year
+}
+
+// Name returns the IANA name when Set, otherwise "server zone (unset)".
+func (z CameraZone) Name() string {
+	if z.Set {
+		return z.Loc.String()
+	}
+	return "server zone (unset)"
+}
+
+// maxTagRunes caps one text value read from a file. The figure is a judgement.
+const maxTagRunes = 200
+
+// tagJunk is what CleanTag removes wherever it is: NUL, and U+FFFD, which a decoder (imagemeta
+// included) writes in place of bytes that were not UTF-8.
+var tagJunk = strings.NewReplacer("\x00", "", "�", "")
+
+// CleanTag removes invalid UTF-8, U+FFFD and NUL bytes, trims surrounding space and cuts the result
+// to 200 runes. An empty result means the value is absent: NULL in a column, null in
+// capture_evidence. PostgreSQL refuses invalid UTF-8 in TEXT and a NUL in jsonb, so an unclean value
+// would fail the INSERT, and with it an upload that would otherwise work.
+func CleanTag(s string) string {
+	s = strings.TrimSpace(tagJunk.Replace(strings.ToValidUTF8(s, "")))
+	if utf8.RuneCountInString(s) > maxTagRunes {
+		s = string([]rune(s)[:maxTagRunes])
+	}
+	return s
+}
+
+// What one decode may read. imagemeta's defaults (5000 tags of 10 KB) let a 60 KB file cost about
+// 900 MB of allocation, because every byte of a byte-typed value is boxed on its own. With these,
+// the worst file found costs about 6 MB. Real files are nowhere near: in a library of 13,476
+// JPEGs the most tags in one file was 68, and the tags read here are a few dozen bytes each.
+const (
+	exifTagLimit     = 1000
+	exifTagSizeLimit = 256
+)
+
+// The IFDs ExtractExif reads from, as imagemeta names them. A new imagemeta that renames one fails
+// the tests.
+const (
+	exifIFD0 = "IFD0"
+	exifIFD  = "IFD0/ExifIFDP"
+	gpsIFD   = "IFD0/GPSInfoIFD"
+)
+
+// exifTagsRead maps each tag ExtractExif uses to its IFD. The names are imagemeta's, which are
+// ExifTool's. The IFD matters: tags are numbered per IFD, and imagemeta names the Interoperability
+// IFD's 0x0001 and 0x0002 GPSLatitudeRef and GPSLatitude. Most phones write that IFD, and it comes
+// before the real GPS tags.
+var exifTagsRead = map[string]string{
+	"Make": exifIFD0, "Model": exifIFD0, "ModifyDate": exifIFD0,
+	"DateTimeOriginal": exifIFD, "OffsetTimeOriginal": exifIFD,
+	"ExifImageWidth": exifIFD, "ExifImageHeight": exifIFD,
+	"GPSDateStamp": gpsIFD, "GPSTimeStamp": gpsIFD,
+	"GPSLatitude": gpsIFD, "GPSLatitudeRef": gpsIFD, "GPSLongitude": gpsIFD, "GPSLongitudeRef": gpsIFD,
+}
+
+// ExtractExif reads the EXIF block of the image at the start of r, which may be only the head of
+// the file. Anything that is not a supported image gives an empty result. cameraZone is the
+// timezone camera clocks are assumed to show (CAMERA_TIMEZONE); nil means UTC. takenAt explains
+// how the capture time is read, and Raw keeps what it read it from.
+func ExtractExif(r io.ReadSeeker, cameraZone *time.Location) ExifData {
+	tags, err := readExifTags(r)
 	var result ExifData
 
-	if lat, lng, err := x.LatLong(); err == nil && geo.IsValidGPS(lat, lng) {
+	if lat, lng, ok := tags.position(); ok {
 		result.Lat = &lat
 		result.Lng = &lng
 	}
@@ -50,26 +138,139 @@ func ExtractExif(r io.Reader, cameraZone *time.Location) ExifData {
 	if cameraZone == nil {
 		cameraZone = time.UTC
 	}
-	result.TakenAt, result.TakenAtZone = takenAt(x, cameraZone)
+	result.TakenAt, result.TakenAtZone = tags.takenAt(cameraZone)
+	result.Raw = tags.raw()
+	result.Raw.Partial = err != nil && len(tags) > 0
 
-	if tag, err := x.Get(exif.Model); err == nil {
-		if s, err := tag.StringVal(); err == nil {
-			result.CameraModel = s
-		}
+	if s, ok := tags.text("Model"); ok {
+		result.CameraModel = CleanTag(s)
 	}
-
-	if tag, err := x.Get(exif.PixelXDimension); err == nil {
-		if v, err := tag.Int(0); err == nil {
-			result.WidthPx = &v
-		}
-	}
-	if tag, err := x.Get(exif.PixelYDimension); err == nil {
-		if v, err := tag.Int(0); err == nil {
-			result.HeightPx = &v
-		}
-	}
+	result.WidthPx = tags.dimension("ExifImageWidth")
+	result.HeightPx = tags.dimension("ExifImageHeight")
 
 	return result
+}
+
+// exifTags holds the tags of one file by name. The values come from the file, so every read below checks the type. That is why imagemeta's Tags.GetLatLong is not
+// used: it panics on a GPSLatitudeRef that is not text, outside Decode's recovery.
+type exifTags map[string]any
+
+// readExifTags returns the tags in exifTagsRead. The error ends the walk, but the tags read before
+// it are good: an old Motorola writes a broken tag after its model and position.
+func readExifTags(r io.ReadSeeker) (exifTags, error) {
+	tags := exifTags{}
+	err := decodeExif(r,
+		func(t imagemeta.TagInfo) bool { return exifTagsRead[t.Tag] == t.Namespace },
+		func(t imagemeta.TagInfo) { tags[t.Tag] = t.Value },
+	)
+	return tags, err
+}
+
+// decodeExif walks the EXIF of the image at the start of r within the limits above, and gives handle
+// every tag that want accepts. Anything that is not a supported image is walked over with no error.
+func decodeExif(r io.ReadSeeker, want func(imagemeta.TagInfo) bool, handle func(imagemeta.TagInfo)) error {
+	format, ok := imageFormat(r)
+	if !ok {
+		return nil
+	}
+	_, err := imagemeta.Decode(imagemeta.Options{
+		R:               r,
+		ImageFormat:     format,
+		Sources:         imagemeta.EXIF,
+		LimitNumTags:    exifTagLimit,
+		LimitTagSize:    exifTagSizeLimit,
+		ShouldHandleTag: want,
+		HandleTag: func(t imagemeta.TagInfo) error {
+			handle(t)
+			return nil
+		},
+	})
+	return err
+}
+
+// imageFormat tells from the first bytes of r which decoder it needs, and leaves r at its start.
+// The extension is not used: a file's name says nothing about what it holds.
+func imageFormat(r io.ReadSeeker) (imagemeta.ImageFormat, bool) {
+	var buf [12]byte
+	n, _ := io.ReadFull(r, buf[:])
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return 0, false
+	}
+	b := buf[:n]
+	switch {
+	case bytes.HasPrefix(b, []byte{0xFF, 0xD8, 0xFF}):
+		return imagemeta.JPEG, true
+	case bytes.HasPrefix(b, []byte("II*\x00")), bytes.HasPrefix(b, []byte("MM\x00*")):
+		return imagemeta.TIFF, true
+	case bytes.HasPrefix(b, []byte("\x89PNG\r\n\x1a\n")):
+		return imagemeta.PNG, true
+	case n == len(buf) && string(b[:4]) == "RIFF" && string(b[8:]) == "WEBP":
+		return imagemeta.WebP, true
+	case n == len(buf) && string(b[4:8]) == "ftyp" && heifBrands[string(b[8:])]:
+		return imagemeta.HEIF, true
+	}
+	return 0, false
+}
+
+// heifBrands are the major brands of HEIC and HEIF files. MP4 and QuickTime files have an ftyp box
+// too, with other brands.
+var heifBrands = map[string]bool{
+	"heic": true, "heix": true, "heim": true, "heis": true,
+	"hevc": true, "hevx": true, "hevm": true, "hevs": true,
+	"mif1": true, "msf1": true,
+}
+
+func (t exifTags) text(name string) (string, bool) {
+	s, ok := t[name].(string)
+	return s, ok
+}
+
+// dimension returns a pixel count, or nil when it is missing or does not fit the database column.
+func (t exifTags) dimension(name string) *int {
+	var v int64
+	switch n := t[name].(type) {
+	case uint16:
+		v = int64(n)
+	case uint32:
+		v = int64(n)
+	case int32:
+		v = int64(n)
+	default:
+		return nil
+	}
+	if v < 0 || v > math.MaxInt32 {
+		return nil
+	}
+	i := int(v)
+	return &i
+}
+
+func (t exifTags) position() (lat, lng float64, ok bool) {
+	if lat, ok = t.coordinate("GPSLatitude", "GPSLatitudeRef", "S"); !ok {
+		return 0, 0, false
+	}
+	if lng, ok = t.coordinate("GPSLongitude", "GPSLongitudeRef", "W"); !ok {
+		return 0, 0, false
+	}
+	return lat, lng, geo.IsValidGPS(lat, lng)
+}
+
+// coordinate returns one signed coordinate. Exactly 0 counts as unreadable: imagemeta reads a
+// rational with a zero denominator as 0, and a real position is not exactly on the equator or the
+// prime meridian. A zero denominator in only the minutes or seconds cannot be told apart.
+func (t exifTags) coordinate(value, ref, negative string) (float64, bool) {
+	v, ok := t[value].(float64)
+	if !ok || v == 0 {
+		return 0, false
+	}
+	hemisphere, ok := t.text(ref)
+	if !ok {
+		return 0, false
+	}
+	if hemisphere == negative {
+		v = -v
+	}
+	return v, true
 }
 
 const exifTimeLayout = "2006:01:02 15:04:05"
@@ -82,21 +283,46 @@ const exifTimeLayout = "2006:01:02 15:04:05"
 //  2. the photo's OffsetTimeOriginal, unless its make is in offsetIgnoredMakes. A phone writes the
 //     offset its clock really shows, abroad too, and many phones write no GPS timestamp;
 //  3. otherwise cameraZone, with its daylight saving rules on that date.
-func takenAt(x *exif.Exif, cameraZone *time.Location) (*time.Time, string) {
-	wall, ok := exifWallClock(x)
-	if !ok {
+func (t exifTags) takenAt(cameraZone *time.Location) (*time.Time, string) {
+	clock := t.wallClock()
+	if !clock.parsed {
 		return nil, ""
 	}
-	if offset, ok := gpsClockOffset(x, wall); ok {
-		t := wallAtOffset(wall, offset)
-		return &t, ZoneGPS
+	wall := clock.time
+	if offset, ok := t.gpsClockOffset(wall); ok {
+		at := wallAtOffset(wall, offset)
+		return &at, ZoneGPS
 	}
-	if offset, ok := offsetTimeOriginal(x); ok {
-		t := wallAtOffset(wall, offset)
-		return &t, ZoneOffset
+	if offset, ok := t.offsetTimeOriginal(); ok {
+		at := wallAtOffset(wall, offset)
+		return &at, ZoneOffset
 	}
-	t := time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, cameraZone)
-	return &t, ZoneCamera
+	at := time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, cameraZone)
+	return &at, ZoneCamera
+}
+
+// raw collects RawExif through the helpers takenAt uses.
+func (t exifTags) raw() RawExif {
+	clock := t.wallClock()
+	cameraMake, _ := t.text("Make")
+	raw := RawExif{
+		WallClock: CleanTag(clock.text),
+		WallTag:   clock.tag,
+		Make:      CleanTag(cameraMake),
+	}
+	if stamp, ok := t.gpsTimestamp(); ok {
+		raw.GPSStamp = &stamp
+		if clock.parsed {
+			diff := clock.time.Sub(stamp)
+			raw.WallMinusGPS = &diff
+		}
+	}
+	if _, found := t["OffsetTimeOriginal"]; found {
+		offsetTag, _ := t.text("OffsetTimeOriginal")
+		raw.OffsetTag = CleanTag(offsetTag)
+		raw.OffsetIgnored = t.offsetMakeIgnored()
+	}
+	return raw
 }
 
 // wallAtOffset reads wall, a clock reading held as a time in UTC, at a UTC offset.
@@ -111,44 +337,23 @@ func wallAtOffset(wall time.Time, offset time.Duration) time.Time {
 // wrong offset, add its make here. Photos it already ingested keep their stored times until repaired.
 var offsetIgnoredMakes = map[string]bool{"panasonic": true}
 
-// offsetTimeOriginalTag is EXIF's OffsetTimeOriginal in the Exif IFD. goexif has no field for it.
-const offsetTimeOriginalTag = 0x9011
-
 // offsetTimeOriginal returns the photo's OffsetTimeOriginal when it is a UTC offset in real use and
 // its make is trusted.
-func offsetTimeOriginal(x *exif.Exif) (time.Duration, bool) {
-	if tag, err := x.Get(exif.Make); err == nil {
-		if cameraMake, err := tag.StringVal(); err == nil && offsetIgnoredMakes[strings.ToLower(strings.TrimSpace(cameraMake))] {
-			return 0, false
-		}
-	}
-	ptr, err := x.Get(exif.ExifIFDPointer)
-	if err != nil {
+func (t exifTags) offsetTimeOriginal() (time.Duration, bool) {
+	if t.offsetMakeIgnored() {
 		return 0, false
 	}
-	at, err := ptr.Int64(0)
-	if err != nil {
+	s, ok := t.text("OffsetTimeOriginal")
+	if !ok {
 		return 0, false
 	}
-	r := bytes.NewReader(x.Raw)
-	if _, err := r.Seek(at, io.SeekStart); err != nil {
-		return 0, false
-	}
-	dir, _, err := tiff.DecodeDir(r, x.Tiff.Order)
-	if err != nil {
-		return 0, false
-	}
-	for _, tag := range dir.Tags {
-		if tag.Id != offsetTimeOriginalTag {
-			continue
-		}
-		s, err := tag.StringVal()
-		if err != nil {
-			return 0, false
-		}
-		return parseUTCOffset(s)
-	}
-	return 0, false
+	return parseUTCOffset(s)
+}
+
+// offsetMakeIgnored reports whether the photo's make is in offsetIgnoredMakes.
+func (t exifTags) offsetMakeIgnored() bool {
+	cameraMake, _ := t.text("Make")
+	return offsetIgnoredMakes[strings.ToLower(strings.TrimSpace(cameraMake))]
 }
 
 // parseUTCOffset reads "+01:00". Cameras without a zone write blanks or colons, which fail here.
@@ -162,21 +367,33 @@ func parseUTCOffset(s string) (time.Duration, bool) {
 	return offset, isRealOffset(offset)
 }
 
-// exifWallClock returns the capture time's wall clock, as a time in UTC: DateTimeOriginal, or IFD0
-// DateTime only when that tag is missing. The tags and parsing match goexif's DateTime, which
-// ingest used before: only the zone differs.
-func exifWallClock(x *exif.Exif) (time.Time, bool) {
-	tag, err := x.Get(exif.DateTimeOriginal)
-	if err != nil {
-		if tag, err = x.Get(exif.DateTime); err != nil {
-			return time.Time{}, false
+// wallClock is the capture time's wall clock tag.
+type wallClock struct {
+	tag    string    // WallTagOriginal or WallTagIFD0; empty when the file has neither
+	text   string    // the value as imagemeta read it; empty when it is not text
+	time   time.Time // the reading, held as a time in UTC, when parsed is true
+	parsed bool
+}
+
+// wallClock reads DateTimeOriginal, or IFD0 ModifyDate (EXIF's DateTime) only when that tag is
+// missing, so a DateTimeOriginal that does not parse is still the tag reported.
+func (t exifTags) wallClock() wallClock {
+	clock := wallClock{tag: WallTagOriginal}
+	name := "DateTimeOriginal"
+	if t[name] == nil {
+		clock.tag, name = WallTagIFD0, "ModifyDate"
+		if t[name] == nil {
+			return wallClock{}
 		}
 	}
-	if tag.Format() != tiff.StringVal {
-		return time.Time{}, false
+	s, ok := t.text(name)
+	if !ok {
+		return clock
 	}
-	t, err := time.Parse(exifTimeLayout, strings.TrimRight(string(tag.Val), "\x00"))
-	return t, err == nil
+	clock.text = s
+	wall, err := time.Parse(exifTimeLayout, s)
+	clock.time, clock.parsed = wall, err == nil
+	return clock
 }
 
 // gpsClockTolerance is how far the camera clock may sit from a whole UTC offset against the GPS
@@ -187,8 +404,8 @@ const gpsClockTolerance = 2 * time.Minute
 
 // gpsClockOffset returns the camera clock's UTC offset, measured as wall minus the GPS timestamp
 // and rounded to a quarter hour, when that is a real offset within gpsClockTolerance.
-func gpsClockOffset(x *exif.Exif, wall time.Time) (time.Duration, bool) {
-	gpsUTC, ok := gpsTimestamp(x)
+func (t exifTags) gpsClockOffset(wall time.Time) (time.Duration, bool) {
+	gpsUTC, ok := t.gpsTimestamp()
 	if !ok {
 		return 0, false
 	}
@@ -215,33 +432,118 @@ func isRealOffset(d time.Duration) bool {
 	return d%time.Hour == 0 || (d%time.Minute == 0 && fractionalOffsets[d/time.Minute])
 }
 
-// gpsTimestamp returns GPSDateStamp + GPSTimeStamp, which EXIF defines as UTC.
-func gpsTimestamp(x *exif.Exif) (time.Time, bool) {
-	dateTag, err := x.Get(exif.GPSDateStamp)
+// gpsTimestamp returns GPSDateStamp + GPSTimeStamp, which EXIF defines as UTC. imagemeta gives the
+// time as text, "10:13:14" or "10:13:14.5".
+func (t exifTags) gpsTimestamp() (time.Time, bool) {
+	date, ok := t.text("GPSDateStamp")
+	if !ok {
+		return time.Time{}, false
+	}
+	at, err := time.Parse("2006:01:02", strings.TrimSpace(date))
 	if err != nil {
 		return time.Time{}, false
 	}
-	date, err := dateTag.StringVal()
-	if err != nil {
+	stamp, ok := t.text("GPSTimeStamp")
+	if !ok {
 		return time.Time{}, false
 	}
-	day, err := time.Parse("2006:01:02", strings.TrimSpace(strings.TrimRight(date, "\x00")))
-	if err != nil {
+	parts := strings.Split(strings.TrimSpace(stamp), ":")
+	if len(parts) != 3 {
 		return time.Time{}, false
 	}
-	timeTag, err := x.Get(exif.GPSTimeStamp)
-	if err != nil || timeTag.Count != 3 {
-		return time.Time{}, false
-	}
-	t := day
 	for i, unit := range []time.Duration{time.Hour, time.Minute, time.Second} {
-		num, den, err := timeTag.Rat2(i)
-		if err != nil || den <= 0 || num < 0 {
+		v, err := strconv.ParseFloat(parts[i], 64)
+		if err != nil || !(v >= 0) { // written this way round so that NaN is refused too
 			return time.Time{}, false
 		}
-		t = t.Add(time.Duration(float64(num) / float64(den) * float64(unit)))
+		at = at.Add(time.Duration(v * float64(unit)))
 	}
-	return t, true
+	return at, true
+}
+
+// Tag is one tag of a file as written, for display.
+type Tag struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// maxListedTags caps one file's tag list. The figure is a judgement.
+const maxListedTags = 200
+
+// maxRenderedValues is the longest array tagText spells out. Two characters each already fill the
+// 200 that a listed value keeps.
+const maxRenderedValues = 100
+
+// listedIFDs are the IFDs ReadTags lists. The Interoperability IFD is left out, because imagemeta
+// names its tags 0x0001 and 0x0002 GPSLatitudeRef and GPSLatitude, and so is IFD1, the thumbnail's.
+var listedIFDs = map[string]bool{exifIFD0: true, exifIFD: true, gpsIFD: true}
+
+// ReadTags lists the tags of IFD0 and the Exif and GPS sub-IFDs for display, sorted by name, under
+// imagemeta's names (ExifTool's); a tag it has no name for is shown by id. It decodes within
+// ExtractExif's limits, so a value over exifTagSizeLimit bytes is left out. imagemeta reports no
+// tag types, so a binary value shows its printable characters as text, and one with none is
+// dropped. The list is empty, and not nil, when the head holds no readable EXIF.
+func ReadTags(head []byte) []Tag {
+	var tags []Tag
+	_ = decodeExif(bytes.NewReader(head),
+		func(t imagemeta.TagInfo) bool { return listedIFDs[t.Namespace] },
+		func(t imagemeta.TagInfo) { tags = append(tags, Tag{Name: tagName(t.Tag), Value: tagText(t.Value)}) },
+	)
+	return finishTags(tags)
+}
+
+// tagName is imagemeta's name for a tag, or "0x9C9B" for an id it has no name for.
+func tagName(name string) string {
+	if id, ok := strings.CutPrefix(name, imagemeta.UnknownPrefix); ok {
+		if n, err := strconv.ParseUint(strings.TrimPrefix(id, "0x"), 16, 16); err == nil {
+			return fmt.Sprintf("0x%04X", n)
+		}
+	}
+	return name
+}
+
+// tagText is a tag's value as text: a string as imagemeta gives it, a number as 2, a rational as
+// 1/100, an array as [2,3,0,0]. A long array reads as its length: rendering it costs more than it
+// shows, and the list keeps only the first 200 characters anyway.
+func tagText(v any) string {
+	values, ok := v.([]any)
+	if !ok {
+		return fmt.Sprint(v)
+	}
+	if len(values) > maxRenderedValues {
+		return fmt.Sprintf("%d values", len(values))
+	}
+	parts := make([]string, len(values))
+	for i, value := range values {
+		parts[i] = fmt.Sprint(value)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+// TagsFromMap is ReadTags for a video's VideoProbeResult.RawTags.
+func TagsFromMap(raw map[string]string) []Tag {
+	tags := make([]Tag, 0, len(raw))
+	for name, value := range raw {
+		tags = append(tags, Tag{Name: name, Value: value})
+	}
+	return finishTags(tags)
+}
+
+// finishTags applies what every tag list promises: clean text with values of at most 200 characters,
+// a tag with nothing left of it dropped, sorted by name, at most maxListedTags entries. The value
+// breaks ties so that the order, and with it the cap, is the same on every request.
+func finishTags(tags []Tag) []Tag {
+	clean := make([]Tag, 0, len(tags))
+	for _, tag := range tags {
+		tag.Name, tag.Value = CleanTag(tag.Name), CleanTag(tag.Value)
+		if tag.Name != "" && tag.Value != "" {
+			clean = append(clean, tag)
+		}
+	}
+	slices.SortFunc(clean, func(a, b Tag) int {
+		return cmp.Or(strings.Compare(a.Name, b.Name), strings.Compare(a.Value, b.Value))
+	})
+	return clean[:min(len(clean), maxListedTags)]
 }
 
 // DetectMediaType returns "photo", "video", "photo_360", or "video_360".

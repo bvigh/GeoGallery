@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/bvigh/geogallery/internal/storage"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -23,7 +24,7 @@ type IngestDeps struct {
 	runTripDetect func(ctx context.Context, db tripDetectDB, ownerID string, gapHours int) error
 }
 
-func NewIngestDeps(pool *pgxpool.Pool, s *storage.Client, matchWindow time.Duration, gapHours int, cameraZone *time.Location) IngestDeps {
+func NewIngestDeps(pool *pgxpool.Pool, s *storage.Client, matchWindow time.Duration, gapHours int, cameraZone ingest.CameraZone) IngestDeps {
 	return IngestDeps{
 		registrar:     &MediaRegistrar{db: pool, storage: s, cameraZone: cameraZone},
 		matcherPool:   pool,

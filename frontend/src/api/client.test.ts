@@ -297,6 +297,79 @@ describe("api client", () => {
     });
   });
 
+  describe("provenance", () => {
+    const signal = new AbortController().signal;
+
+    it("mediaProvenance() fetches the item's provenance", async () => {
+      const body = { item: { id: "m1" } };
+      fetchMock.mockResolvedValue(response(200, body));
+      await expect(api.mediaProvenance("m1")).resolves.toEqual(body);
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/media/m1/provenance");
+    });
+
+    it("mediaProvenanceFile() passes the abort signal to fetch", async () => {
+      const body = { basis: "reread_now" };
+      fetchMock.mockResolvedValue(response(200, body));
+      await expect(api.mediaProvenanceFile("m1", signal)).resolves.toEqual(body);
+      expect(fetchMock).toHaveBeenCalledWith("/api/media/m1/provenance/file", { signal });
+    });
+
+    it("mediaProvenanceFile() lets an abort reach the caller", async () => {
+      const aborted = new DOMException("Aborted", "AbortError");
+      fetchMock.mockRejectedValue(aborted);
+      await expect(api.mediaProvenanceFile("m1", signal)).rejects.toBe(aborted);
+    });
+
+    it("runMatcher() posts without a body and ignores the reply", async () => {
+      fetchMock.mockResolvedValue(response(200, { ok: true }));
+      await expect(api.runMatcher()).resolves.toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledWith("/api/gps-matcher/run", { method: "POST" });
+    });
+
+    it.each([
+      {
+        name: "mediaProvenance() for a foreign item",
+        call: () => api.mediaProvenance("m9"),
+        status: 404,
+        message: "GET /media/m9/provenance failed: 404",
+      },
+      {
+        name: "mediaProvenanceFile() when storage fails",
+        call: () => api.mediaProvenanceFile("m1", signal),
+        status: 502,
+        message: "GET /media/m1/provenance/file failed: 502",
+      },
+      {
+        name: "mediaProvenanceFile() on a timeout",
+        call: () => api.mediaProvenanceFile("m1", signal),
+        status: 504,
+        message: "GET /media/m1/provenance/file failed: 504",
+      },
+      {
+        name: "runMatcher() when the matcher stops",
+        call: () => api.runMatcher(),
+        status: 500,
+        message: "POST /gps-matcher/run failed: 500",
+      },
+    ])("$name rejects with the status", async ({ call, status, message }) => {
+      fetchMock.mockResolvedValue(response(status));
+      const error = await call().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status, message });
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { name: "mediaProvenance()", call: () => api.mediaProvenance("m1") },
+      { name: "mediaProvenanceFile()", call: () => api.mediaProvenanceFile("m1", signal) },
+      { name: "runMatcher()", call: () => api.runMatcher() },
+    ])("$name redirects to login on 401", async ({ call }) => {
+      fetchMock.mockResolvedValue(response(401));
+      await expect(call()).rejects.toBeInstanceOf(ApiError);
+      expect(assign).toHaveBeenCalledWith("/api/auth/login?return_to=" + encodeURIComponent("/trips?x=1"));
+    });
+  });
+
   it("revokeToken() sends DELETE and rejects on failure", async () => {
     fetchMock.mockResolvedValueOnce({ status: 204, ok: true, json: async () => { throw new Error("no body"); } });
     await expect(api.revokeToken("t1")).resolves.toBeUndefined();

@@ -6,8 +6,10 @@ import type {
   CreatedApiToken,
   CurrentUser,
   DirectoryUser,
+  FileReread,
   GpsUploadResult,
   OrientationKeyframe,
+  ProvenanceResponse,
 } from "@/types";
 
 // What to add to or remove from an album: explicit media, or a trip's current media.
@@ -238,6 +240,24 @@ function listUsers(): Promise<DirectoryUser[]> {
   return getList<DirectoryUser>("/users");
 }
 
+function mediaProvenance(id: string): Promise<ProvenanceResponse> {
+  return get<ProvenanceResponse>(`/media/${id}/provenance`);
+}
+
+// The signal cancels the request when the item changes: for a video it stops an ffprobe process.
+async function mediaProvenanceFile(id: string, signal: AbortSignal): Promise<FileReread> {
+  const path = `/media/${id}/provenance/file`;
+  const res = await request(path, { signal });
+  if (!res.ok) throw new ApiError(`GET ${path} failed: ${res.status}`, res.status);
+  return res.json();
+}
+
+// Re-matches the caller's whole library.
+async function runMatcher(): Promise<void> {
+  const res = await request("/gps-matcher/run", { method: "POST" });
+  if (!res.ok) throw new ApiError(`POST /gps-matcher/run failed: ${res.status}`, res.status);
+}
+
 export const api = {
   get,
   post,
@@ -270,4 +290,7 @@ export const api = {
   removeFromAlbum,
   mediaAlbums,
   listUsers,
+  mediaProvenance,
+  mediaProvenanceFile,
+  runMatcher,
 };

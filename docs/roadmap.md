@@ -1,6 +1,6 @@
 # GeoGallery roadmap
 
-As of 2026-11-07. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
+As of 2026-11-09. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
 
 Sizes: **XS** < 2 h, **S** ≤ 1 day, **M** 2–4 days, **L** a week or more.
 
@@ -53,6 +53,11 @@ Mostly frontend. Small enough to ship as two or three bundled PRs.
 | #28 | Make 360° auto-detection more reliable | S |
 | #29 | Spike: does GPS survive uploads from a phone? | S |
 | #30 | Capture time from the filename as a last fallback | S |
+| #61 | "Why here?": explain one item's position and capture time | L |
+| #62 | Checks page: find suspect track files, formats and items | M |
+| #63 | Clock check: test camera clocks against GPS data | L |
+
+#61, #62, #32 and #63 are the four steps of `docs/gps-debugging.md`, in that order. That note also keeps everything the design left for later.
 
 360° is the owner's decision (#27). Ingest still makes a first guess, and #28 makes that guess better for new files, but a manual choice always wins.
 
@@ -63,7 +68,7 @@ Data repairs on the existing deployments are operator work, not issues: the far 
 | Issue | Item | Size |
 |---|---|---|
 | #31 | Keep navigation state in the URL | M |
-| #32 | Trip GPS track overlay (PRD F6.R1) | M |
+| #32 | Trip GPS track overlay (PRD F6.R1), scope in `docs/gps-debugging.md` Step 3 | M |
 | #33 | Keyboard navigation in searchable lists | M |
 | #34 | Labels | M, design |
 | #35 | Search by name, date, label and place | L, design |
@@ -116,6 +121,8 @@ Each needs a design note before it can be estimated.
 - Location suggestions (#40) → keyframe suggestions (#41).
 - Lint fix (#21) → CI (#47).
 - Track overlay (#32) → trip video (#55), perhaps.
+- "Why here?" (#61) → Checks page (#62), track overlay (#32), clock check (#63).
+- Clock check (#63) finds what #24 and #26 repair.
 
 ## Next PRs
 
@@ -124,3 +131,4 @@ Each needs a design note before it can be estimated.
 3. #15: the view editor in the galleries.
 4. #22, #23: matcher and parser guards.
 5. #24 with the `retime` port, then the local repair.
+6. #61: "Why here?", as one pull request. Its design planned four, but the parts share files.

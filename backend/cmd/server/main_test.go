@@ -14,6 +14,7 @@ import (
 	"github.com/bvigh/geogallery/internal/auth"
 	"github.com/bvigh/geogallery/internal/config"
 	"github.com/bvigh/geogallery/internal/handlers"
+	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -72,13 +73,14 @@ func newTestRouter(t *testing.T) http.Handler {
 	require.NoError(t, cop.AddTrustedOrigin(cfg.PublicOrigin))
 	store := routeStore{}
 	h := routeHandlers{
-		media:      handlers.NewMediaHandler(nil, nil, time.Hour, 24, time.UTC),
+		media:      handlers.NewMediaHandler(nil, nil, time.Hour, 24, ingest.CameraZone{}),
 		trips:      handlers.NewTripHandler(nil, 24),
 		game:       handlers.NewGameHandler(nil, nil),
 		gpsTracks:  handlers.NewGPSTrackHandler(nil, time.Hour),
 		gpsMatcher: handlers.NewGPSMatcherHandler(nil, time.Hour),
 		albums:     handlers.NewAlbumHandler(nil),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
+		provenance: handlers.NewProvenanceHandler(nil, nil, time.Hour, ingest.CameraZone{}),
 	}
 	return newRouter(cop, auth.New(store, nil, cfg), h)
 }
@@ -115,6 +117,13 @@ func TestRouter_AuthWiring(t *testing.T) {
 		{"token add album member", http.MethodPost, "/api/albums/" + mediaID + "/members", true, "", nil, http.StatusForbidden},
 		{"token remove album member", http.MethodDelete, "/api/albums/" + mediaID + "/members/" + mediaID, true, "", nil, http.StatusForbidden},
 		{"token user directory", http.MethodGet, "/api/users", true, "", nil, http.StatusForbidden},
+		{"token provenance", http.MethodGet, "/api/media/" + mediaID + "/provenance", true, "", nil, http.StatusForbidden},
+		{"token provenance file", http.MethodGet, "/api/media/" + mediaID + "/provenance/file", true, "", nil, http.StatusForbidden},
+		{"anonymous provenance", http.MethodGet, "/api/media/" + mediaID + "/provenance", false, "", nil, http.StatusUnauthorized},
+		{"anonymous provenance file", http.MethodGet, "/api/media/" + mediaID + "/provenance/file", false, "", nil, http.StatusUnauthorized},
+		// No DB here either: a malformed ID is 404 from the handler's own check.
+		{"session provenance, malformed id", http.MethodGet, "/api/media/" + badID + "/provenance", false, userSession, nil, http.StatusNotFound},
+		{"session provenance file, malformed id", http.MethodGet, "/api/media/" + badID + "/provenance/file", false, userSession, nil, http.StatusNotFound},
 
 		// The album handler has no DB here: these statuses come from its input checks, which shows
 		// the request got past the auth middleware.
@@ -163,6 +172,26 @@ func TestRouter_AuthWiring(t *testing.T) {
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
 			assert.Equal(t, tt.wantStatus, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+func TestCameraZone(t *testing.T) {
+	warsaw, err := time.LoadLocation("Europe/Warsaw")
+	require.NoError(t, err)
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want ingest.CameraZone
+	}{
+		{"set", config.Config{CameraTimezone: warsaw, CameraTimezoneSet: true}, ingest.CameraZone{Loc: warsaw, Set: true}},
+		{"set to UTC is not a fallback", config.Config{CameraTimezone: time.UTC, CameraTimezoneSet: true}, ingest.CameraZone{Loc: time.UTC, Set: true}},
+		{"unset on a server with a zone", config.Config{CameraTimezone: warsaw}, ingest.CameraZone{Loc: warsaw}},
+		{"unset on a UTC server", config.Config{CameraTimezone: time.UTC}, ingest.CameraZone{Loc: time.UTC, UTCFallback: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, cameraZone(&tt.cfg))
 		})
 	}
 }

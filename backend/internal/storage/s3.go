@@ -85,6 +85,28 @@ func (c *Client) PresignGet(ctx context.Context, key string) (string, error) {
 	return req.URL, nil
 }
 
+// ReadHead returns the object's first n bytes (fewer when the object is shorter) with one ranged
+// GET, so re-reading a photo's EXIF never downloads the whole file.
+func (c *Client) ReadHead(ctx context.Context, key string, n int64) ([]byte, error) {
+	if n <= 0 {
+		return nil, fmt.Errorf("read head of %s: n must be positive, got %d", key, n)
+	}
+	out, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+		Range:  aws.String(fmt.Sprintf("bytes=0-%d", n-1)),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get %s: %w", key, err)
+	}
+	defer out.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(out.Body, n))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", key, err)
+	}
+	return b, nil
+}
+
 func (c *Client) Delete(ctx context.Context, key string) error {
 	_, err := c.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(c.bucket),

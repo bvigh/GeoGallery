@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bvigh/geogallery/internal/auth"
+	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/bvigh/geogallery/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -47,7 +48,7 @@ type MediaHandler struct {
 	runTripDetect func(ctx context.Context, db tripDetectDB, ownerID string, gapHours int) error
 }
 
-func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Duration, tripGapHours int, cameraZone *time.Location) *MediaHandler {
+func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Duration, tripGapHours int, cameraZone ingest.CameraZone) *MediaHandler {
 	return &MediaHandler{
 		db:            db,
 		pool:          db,
@@ -151,7 +152,9 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(items)
+	if err := json.NewEncoder(w).Encode(items); err != nil {
+		slog.Warn("media: encode list failed", "err", err)
+	}
 }
 
 var maxUploadBodyBytes int64 = 4 << 30 // var so tests can lower it

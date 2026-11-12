@@ -169,7 +169,7 @@ Every route except those marked *public* needs a session cookie or an API token 
 | `POST` | `/api/auth/logout` | public | End the session; returns `{"redirect_url": ...}` |
 | `GET` | `/api/auth/me` | user | Current user `{id, email, display_name, role}` |
 | `GET` | `/api/media` | user | List media (latest 500); filters: `from_date`, `to_date` (`YYYY-MM-DD`), `trip_id[]`, `media_type[]`; malformed values → 400 |
-| `POST` | `/api/media/upload` | user | Upload files (multipart, field `files[]`, `file_mtime[]`) |
+| `POST` | `/api/media/upload` | user | Upload files (multipart, fields `files` and `file_mtime`) |
 | `GET` | `/api/media/{id}/url` | user | Get presigned URL for a media item |
 | `PATCH` | `/api/media/{id}/location` | user | Set a manual location `{"lat":..,"lng":..}` |
 | `PATCH` | `/api/media/{id}/view-settings` | user | Set 360° default view (`initial_yaw`, `initial_pitch`, `initial_fov`) |

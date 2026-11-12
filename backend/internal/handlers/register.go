@@ -7,10 +7,12 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,9 +36,35 @@ type registrarStorage interface {
 type MediaRegistrar struct {
 	db      registrarDB
 	storage registrarStorage
-	// cameraZone is CAMERA_TIMEZONE, the zone EXIF capture times are read in when the photo's GPS
-	// clock does not say otherwise (ingest.ExtractExif). nil reads them as UTC.
-	cameraZone *time.Location
+	// cameraZone is the zone EXIF capture times are read in when the photo's own clocks do not say
+	// otherwise (ingest.ExtractExif). A zero value reads them as UTC.
+	cameraZone ingest.CameraZone
+}
+
+// exifDecodeSlots is how many files this process can have their EXIF decoded at once, so what
+// decoding can take in memory and CPU follows this number and not the number of uploads running.
+// server scan is a process of its own, with its own slots. Decoding a normal photo is quick, so
+// nothing queues in normal use.
+var exifDecodeSlots = make(chan struct{}, 4)
+
+// inExifDecodeSlot runs decode in one of the exifDecodeSlots. Waiting for a slot ends with ctx; the
+// decode itself cannot be cancelled.
+func inExifDecodeSlot[T any](ctx context.Context, decode func() T) (T, error) {
+	select {
+	case exifDecodeSlots <- struct{}{}:
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
+	}
+	defer func() { <-exifDecodeSlots }()
+	return decode(), nil
+}
+
+// extractExif is ingest.ExtractExif in one of the exifDecodeSlots.
+func (r *MediaRegistrar) extractExif(ctx context.Context, head []byte) (ingest.ExifData, error) {
+	return inExifDecodeSlot(ctx, func() ingest.ExifData {
+		return ingest.ExtractExif(bytes.NewReader(head), r.cameraZone.Loc)
+	})
 }
 
 // registerMedia stores one media file for ownerID and returns its media ID. inserted is false when
@@ -62,7 +90,10 @@ func (r *MediaRegistrar) registerMedia(
 	}
 
 	ext := strings.ToLower(filepath.Ext(filename))
-	exifData := ingest.ExtractExif(bytes.NewReader(head), r.cameraZone)
+	exifData, err := r.extractExif(ctx, head)
+	if err != nil {
+		return "", false, fmt.Errorf("wait to read exif: %w", err)
+	}
 	// Insta360 and similar cameras write moov at end of file, so EXIF dimension extraction from
 	// the head alone fails, and the video is probed with ffprobe instead.
 	probeVideo := ingest.IsVideoExt(ext) && exifData.WidthPx == nil
@@ -99,7 +130,7 @@ func (r *MediaRegistrar) registerMedia(
 	if tmpFile != nil {
 		if probe.NeedsTranscode() {
 			slog.Info("register: transcoding to H.264", "filename", filename, "codec", probe.CodecName)
-			transcoded, terr := ingest.TranscodeH264(tmpFile.Name())
+			transcoded, terr := ingest.TranscodeH264(tmpFile.Name(), probe.CreatedAt)
 			tmpFile.Close()
 			os.Remove(tmpFile.Name())
 			if terr != nil {
@@ -137,6 +168,12 @@ func (r *MediaRegistrar) registerMedia(
 	if takenAt == nil {
 		takenAt = fallbackMtime
 	}
+	evidence := newCaptureEvidence(exifData, probe, fallbackMtime, r.cameraZone)
+	if takenAt != nil && !jsonCanCarry(*takenAt) {
+		slog.Warn("register: capture time outside the years JSON can carry, storing none", "filename", filename, "year", takenAt.UTC().Year())
+		takenAt = nil
+		evidence = evidence.timeDropped()
+	}
 
 	// EXIF position, or a video's own location tag (probe is empty for a photo).
 	lat, lng := exifData.Lat, exifData.Lng
@@ -145,10 +182,11 @@ func (r *MediaRegistrar) registerMedia(
 	}
 
 	err = r.db.QueryRow(ctx, `
-		INSERT INTO media (owner_id, filename, media_type, location, gps_confidence, gps_source, taken_at, storage_key, file_hash)
+		INSERT INTO media (owner_id, filename, media_type, location, gps_confidence, gps_source, taken_at, storage_key, file_hash,
+		                   camera_model, width_px, height_px, duration_sec, capture_evidence)
 		VALUES ($1, $2, $3,
 		        CASE WHEN $4::float8 IS NOT NULL THEN ST_SetSRID(ST_MakePoint($5, $4), 4326) END,
-		        $6, $7, $8, $9, $10)
+		        $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		ON CONFLICT (owner_id, file_hash) DO NOTHING
 		RETURNING id
 	`,
@@ -157,6 +195,11 @@ func (r *MediaRegistrar) registerMedia(
 		nil, // confidence populated by background GPS matcher
 		gpsSource(lat),
 		takenAt, key, fileHash,
+		nilIfEmpty(exifData.CameraModel),
+		dimension(exifData.WidthPx, probe.WidthPx),
+		dimension(exifData.HeightPx, probe.HeightPx),
+		probe.DurationS,
+		evidence.encode(),
 	).Scan(&mediaID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// A concurrent call stored the same file after the lookup above. DO NOTHING returns no row,
@@ -185,6 +228,164 @@ func (r *MediaRegistrar) registerMedia(
 		}
 	}
 	return mediaID, true, nil
+}
+
+// The years time.Time marshals to JSON.
+const (
+	jsonFirstYear = 0
+	jsonLastYear  = 9999
+)
+
+// jsonCanCarry reports whether t can be sent as JSON wherever it is read back. One year is kept in
+// reserve at each end of what time.Time marshals, because pgx returns a time in the server's zone.
+func jsonCanCarry(t time.Time) bool {
+	y := t.UTC().Year()
+	return y > jsonFirstYear && y < jsonLastYear
+}
+
+// What produced taken_at (captureEvidence.Src).
+const (
+	captureSrcExifOriginal = "exif_original"
+	captureSrcExifIFD0     = "exif_ifd0"
+	captureSrcContainer    = "container"
+	captureSrcMtime        = "mtime"
+	captureSrcNone         = "none"
+)
+
+// captureEvidence is media.capture_evidence: how taken_at was derived, with the inputs that lost.
+// Those are computed at ingest and cannot be recovered later. Every key is always present.
+type captureEvidence struct {
+	V                     int      `json:"v"`
+	By                    string   `json:"by"`
+	Src                   string   `json:"src"`
+	Zone                  *string  `json:"zone"`
+	Wall                  *string  `json:"wall"`
+	GPSUTC                *string  `json:"gps_utc"`
+	WallMinusGPSS         *float64 `json:"wall_minus_gps_s"`
+	OffsetTag             *string  `json:"offset_tag"`
+	OffsetIgnored         bool     `json:"offset_ignored"`
+	OffsetUsedMin         *int     `json:"offset_used_min"`
+	CameraZone            string   `json:"camera_zone"`
+	CameraZoneUTCFallback bool     `json:"camera_zone_utc_fallback"`
+	Make                  *string  `json:"make"`
+	Model                 *string  `json:"model"`
+	ExifPartial           bool     `json:"exif_partial"`
+	CreationTime          *string  `json:"creation_time"`
+	FileMtime             *string  `json:"file_mtime"`
+	DurationS             *float64 `json:"duration_s"`
+	Encoder               *string  `json:"encoder"`
+	Codec                 *string  `json:"codec"`
+	Transcoded            bool     `json:"transcoded"`
+}
+
+// newCaptureEvidence records how registerMedia derived taken_at. mtime is the caller's fallback
+// time. A wall tag that exists but does not parse records the origin that actually applied, while
+// Wall still shows its text.
+func newCaptureEvidence(e ingest.ExifData, probe ingest.VideoProbeResult, mtime *time.Time, zone ingest.CameraZone) captureEvidence {
+	ev := captureEvidence{
+		V:                     1,
+		By:                    "ingest",
+		Src:                   captureSource(e, probe, mtime),
+		Wall:                  nilIfEmpty(e.Raw.WallClock),
+		GPSUTC:                rfc3339UTC(e.Raw.GPSStamp),
+		OffsetTag:             nilIfEmpty(e.Raw.OffsetTag),
+		OffsetIgnored:         e.Raw.OffsetIgnored,
+		CameraZone:            zone.Name(),
+		CameraZoneUTCFallback: zone.UTCFallback,
+		Make:                  nilIfEmpty(e.Raw.Make),
+		Model:                 nilIfEmpty(e.CameraModel),
+		ExifPartial:           e.Raw.Partial,
+		CreationTime:          rfc3339UTC(probe.CreatedAt),
+		FileMtime:             rfc3339UTC(mtime),
+		DurationS:             probe.DurationS,
+		Encoder:               nilIfEmpty(probe.Encoder),
+		Codec:                 nilIfEmpty(ingest.CleanTag(probe.CodecName)),
+		Transcoded:            probe.NeedsTranscode(),
+	}
+	if ev.GPSUTC != nil && e.Raw.WallMinusGPS != nil {
+		seconds := e.Raw.WallMinusGPS.Seconds()
+		ev.WallMinusGPSS = &seconds
+	}
+	if e.TakenAt != nil {
+		zoneRule := e.TakenAtZone
+		ev.Zone = &zoneRule
+		_, seconds := e.TakenAt.Zone()
+		minutes := seconds / 60
+		ev.OffsetUsedMin = &minutes
+	}
+	return ev
+}
+
+// captureSource names what produced taken_at, in the order registerMedia picks it.
+func captureSource(e ingest.ExifData, probe ingest.VideoProbeResult, mtime *time.Time) string {
+	switch {
+	case e.TakenAt != nil && e.Raw.WallTag == ingest.WallTagIFD0:
+		return captureSrcExifIFD0
+	case e.TakenAt != nil:
+		return captureSrcExifOriginal
+	case probe.CreatedAt != nil:
+		return captureSrcContainer
+	case mtime != nil:
+		return captureSrcMtime
+	default:
+		return captureSrcNone
+	}
+}
+
+// timeDropped records that no taken_at was stored although a source gave one, because JSON could not
+// carry its year (jsonCanCarry). No source applied, so none is named, while the inputs stay: wall,
+// creation_time and file_mtime still show what was refused.
+func (c captureEvidence) timeDropped() captureEvidence {
+	c.Src = captureSrcNone
+	c.Zone = nil
+	c.OffsetUsedMin = nil
+	return c
+}
+
+// encode returns the column value. It is NULL in the case that should not happen, because a debug
+// field must never fail an upload.
+func (c captureEvidence) encode() []byte {
+	b, err := json.Marshal(c)
+	if err != nil {
+		slog.Error("register: encode capture evidence failed", "err", err)
+		return nil
+	}
+	return b
+}
+
+// dimension picks a stored pixel size: EXIF, else the probe, where 0 means unknown. A value the INT
+// column cannot hold counts as unknown too, because a debug field must never fail an upload.
+func dimension(fromExif *int, fromProbe int) *int {
+	if fromExif != nil && validDimension(*fromExif) {
+		return fromExif
+	}
+	if validDimension(fromProbe) {
+		return &fromProbe
+	}
+	return nil
+}
+
+func validDimension(v int) bool {
+	return v > 0 && v <= math.MaxInt32
+}
+
+// nilIfEmpty turns a value cleaned by ingest.CleanTag into a NULL when nothing is left of it.
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// rfc3339UTC formats t in UTC. A year RFC 3339 cannot express (a client can send any file_mtime)
+// gives nil.
+func rfc3339UTC(t *time.Time) *string {
+	u := utcTime(t)
+	if u == nil {
+		return nil
+	}
+	s := u.Format(time.RFC3339Nano)
+	return &s
 }
 
 // deleteObject removes an uploaded object that no media row references. A failure only leaves an

@@ -425,6 +425,48 @@ func TestSharing_GPSIsolation(t *testing.T) {
 	})
 }
 
+// Bracket points are the owner's location history, and tracks are never shared through albums: an
+// album member can read the item but gets 404 and no track data from its provenance.
+func TestSharing_ProvenanceIsOwnerOnly(t *testing.T) {
+	f := newSharingFixture(t)
+	const label = "gpx:owners-private-track.gpx"
+	insertTrack(t, f.pool, f.userA, label, "2024-05-02T11:50:00Z", budapestLat, budapestLng)
+
+	require.Equal(t, http.StatusOK, do(t, f.router, f.userB, http.MethodGet, "/api/media/"+f.mediaA+"/url", "").Code,
+		"B can read the shared item, so a 404 below comes from the owner check")
+
+	routes := []string{"/provenance", "/provenance/file"}
+	for _, route := range routes {
+		for _, item := range []struct{ name, id string }{{"located", f.mediaA}, {"unlocated", f.mediaAUnlocated}} {
+			t.Run(item.name+" "+route, func(t *testing.T) {
+				path := "/api/media/" + item.id + route
+				headsBefore := len(f.store.heads)
+
+				rec := do(t, f.router, f.userB, http.MethodGet, path, "")
+				assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), label)
+				assert.NotContains(t, rec.Body.String(), "google_timeline")
+				assert.Len(t, f.store.heads, headsBefore, "a member's request never reaches the object")
+
+				owner := do(t, f.router, f.userA, http.MethodGet, path, "")
+				assert.Equal(t, http.StatusOK, owner.Code, "the owner still gets it: %s", owner.Body.String())
+			})
+		}
+	}
+
+	for _, route := range routes {
+		t.Run("a stranger gets the same "+route, func(t *testing.T) {
+			assert.Equal(t, http.StatusNotFound, do(t, f.router, f.carol, http.MethodGet, "/api/media/"+f.mediaA+route, "").Code)
+		})
+	}
+
+	t.Run("the owner's response really carries the track", func(t *testing.T) {
+		rec := do(t, f.router, f.userA, http.MethodGet, "/api/media/"+f.mediaA+"/provenance", "")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), label, "so the NotContains above can fail")
+	})
+}
+
 func TestSharing_TripDetectIgnoresSharedMedia(t *testing.T) {
 	f := newSharingFixture(t)
 	ctx := context.Background()

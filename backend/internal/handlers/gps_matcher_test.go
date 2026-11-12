@@ -5,6 +5,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -91,16 +92,21 @@ type noRowsRow struct{}
 
 func (noRowsRow) Scan(...any) error { return pgx.ErrNoRows }
 
-// trackPointRow is a pgx.Row that returns a single GPS track point.
+// trackPointRow is a pgx.Row that returns a single GPS track point, with bracketingPoints' columns.
 type trackPointRow struct {
-	lat, lng   float64
-	recordedAt time.Time
+	lat, lng             float64
+	recordedAt           time.Time
+	source               string
+	accuracyM, altitudeM *float64
 }
 
 func (r trackPointRow) Scan(dest ...any) error {
 	*dest[0].(*float64) = r.lat
 	*dest[1].(*float64) = r.lng
 	*dest[2].(*time.Time) = r.recordedAt
+	*dest[3].(*string) = r.source
+	*dest[4].(**float64) = r.accuracyM
+	*dest[5].(**float64) = r.altitudeM
 	return nil
 }
 
@@ -339,9 +345,120 @@ func TestRunGPSMatcher_ScopesQueriesToOwner(t *testing.T) {
 			require.Len(t, rowSQLs, 2)
 			for i := range rowSQLs {
 				assert.Contains(t, rowSQLs[i], "owner_id = $3")
-				require.Len(t, rowArgs[i], 3)
+				require.Len(t, rowArgs[i], 4)
 				assert.Equal(t, testOwnerID, rowArgs[i][2])
+				assert.Equal(t, []string{}, rowArgs[i][3], "the matcher excludes nothing")
 			}
+		})
+	}
+}
+
+// --- bracketingPoints: the column list, the tie-break and the exclusions ---
+
+// recordBracketQueries answers both bracket queries with rows and records what they were sent.
+func recordBracketQueries(rows ...pgx.Row) (db *mockMatcherDB, sqls *[]string, args *[][]any) {
+	sqls, args = &[]string{}, &[][]any{}
+	db = &mockMatcherDB{
+		queryRowFn: func(_ context.Context, sql string, a ...any) pgx.Row {
+			*sqls = append(*sqls, sql)
+			*args = append(*args, a)
+			return rows[len(*sqls)-1]
+		},
+	}
+	return db, sqls, args
+}
+
+func TestBracketingPoints_ReturnsEveryColumn(t *testing.T) {
+	at := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	accuracy, altitude := 4.5, 120.0
+	beforeRow := trackPointRow{lat: 10, lng: 20, recordedAt: at.Add(-time.Minute), source: "gpx:ride.gpx", accuracyM: &accuracy, altitudeM: &altitude}
+	afterRow := trackPointRow{lat: 11, lng: 21, recordedAt: at.Add(time.Minute), source: "exif"}
+	db, _, _ := recordBracketQueries(beforeRow, afterRow)
+
+	before, after, err := bracketingPoints(context.Background(), db, testOwnerID, at, time.Hour, bracketOptions{})
+
+	require.NoError(t, err)
+	require.NotNil(t, before)
+	require.NotNil(t, after)
+	assert.Equal(t, 10.0, before.Lat)
+	assert.Equal(t, 20.0, before.Lng)
+	assert.Equal(t, at.Add(-time.Minute), before.At)
+	assert.Equal(t, "gpx:ride.gpx", before.Source)
+	assert.Equal(t, &accuracy, before.AccuracyM)
+	assert.Equal(t, &altitude, before.AltitudeM)
+	assert.Equal(t, "exif", after.Source)
+	assert.Nil(t, after.AccuracyM)
+	assert.Nil(t, after.AltitudeM)
+}
+
+func TestBracketingPoints_TieBreakIsDeterministic(t *testing.T) {
+	db, sqls, _ := recordBracketQueries(noRowsRow{}, noRowsRow{})
+
+	_, _, err := bracketingPoints(context.Background(), db, testOwnerID, time.Now(), time.Hour, bracketOptions{})
+
+	require.NoError(t, err)
+	require.Len(t, *sqls, 2)
+	assert.Contains(t, (*sqls)[0], "ORDER BY recorded_at DESC, source ASC")
+	assert.Contains(t, (*sqls)[1], "ORDER BY recorded_at ASC, source ASC")
+	for _, sql := range *sqls {
+		assert.Contains(t, sql, "LIMIT 1")
+		assert.Contains(t, sql, "accuracy_m, altitude_m")
+	}
+}
+
+func TestBracketingPoints_Exclusions(t *testing.T) {
+	tests := []struct {
+		name string
+		opts bracketOptions
+		want []string
+	}{
+		// x <> ALL(NULL) matches nothing, so nil must arrive as an empty, non-nil list.
+		{"nil is normalised", bracketOptions{}, []string{}},
+		{"empty stays empty", bracketOptions{excludeFormats: []string{}}, []string{}},
+		{"formats are passed through", bracketOptions{excludeFormats: []string{"exif", "manual"}}, []string{"exif", "manual"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, sqls, args := recordBracketQueries(noRowsRow{}, noRowsRow{})
+
+			_, _, err := bracketingPoints(context.Background(), db, testOwnerID, time.Now(), time.Hour, tt.opts)
+
+			require.NoError(t, err)
+			require.Len(t, *sqls, 2)
+			for i := range *sqls {
+				assert.Contains(t, (*sqls)[i], "split_part(source, ':', 1) <> ALL($4::text[])")
+				require.Len(t, (*args)[i], 4)
+				got, ok := (*args)[i][3].([]string)
+				require.True(t, ok)
+				assert.NotNil(t, got)
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+type errRow struct{ err error }
+
+func (r errRow) Scan(...any) error { return r.err }
+
+func TestBracketingPoints_QueryErrorIsReturned(t *testing.T) {
+	boom := errors.New("boom")
+	tests := []struct {
+		name string
+		rows []pgx.Row
+	}{
+		{"before query", []pgx.Row{errRow{boom}, noRowsRow{}}},
+		{"after query", []pgx.Row{noRowsRow{}, errRow{boom}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, _, _ := recordBracketQueries(tt.rows...)
+
+			before, after, err := bracketingPoints(context.Background(), db, testOwnerID, time.Now(), time.Hour, bracketOptions{})
+
+			require.ErrorIs(t, err, boom)
+			assert.Nil(t, before)
+			assert.Nil(t, after)
 		})
 	}
 }
