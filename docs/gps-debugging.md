@@ -395,6 +395,19 @@ interface OutsidePoint {
 
 interface OtherFormat {
   format: string;                       // the raw prefix, so an unknown one is shown as written
+  before: OtherPoint | null;            // this format's nearest point at or before the item's time, within W
+  after: OtherPoint | null;             // the same row as before when it is at the exact time
+  alone: {                              // where this format's points alone place the item (geo.Explain)
+    lat: number;
+    lng: number;
+    shape: "two_sided" | "one_sided" | "exact";
+    confidence: number;
+    distance_m: number | null;          // from the position on the map
+  };
+  used: boolean;                        // one of its points is the estimate's before or after point
+}
+
+interface OtherPoint {
   source: string;
   t: string;
   lat: number;
@@ -402,7 +415,8 @@ interface OtherFormat {
   gap_s: number;
   accuracy_m: number | null;
   distance_m: number | null;            // from the position on the map
-  used: boolean;                        // the row is this estimate's before or after point
+  used: boolean;                        // the estimate's before or after point
+  self: boolean;                        // the item's own exif or manual point
 }
 
 interface Warning {
@@ -441,14 +455,17 @@ Why `stale` can appear: a track row was deleted, moved, or inserted by SQL or th
 - **`now`** is the recompute, with no exclusions. It is non-null for `current`, `stale` and `pending`, and null otherwise. An item in `own_position` or `manual` would never be re-matched, so "what the matcher would do now" does not apply to it.
 - **`independent`** re-runs `bracketingPoints` with `excludeFormats: ["exif", "manual"]` whenever `taken_at` is set, and is null when that finds nothing. `moved_m` is measured from the stored position, or from `now` when there is no stored position. For an own position it answers how far the logs were at that moment.
 - **`nearest_outside`** is set for `no_bracket` and `no_support`, and null otherwise. It is the nearest point earlier than `taken_at - W` and the nearest later than `taken_at + W`, by two indexed `LIMIT 1` lookups with the same tie-break. Of 1,667 unlocated items, 171 missed the window by under an hour, so this line has real use.
-- **`others`** has one row per raw format prefix, nearest to the item's time, from one scan of the window. Two unknown prefixes therefore stay two rows, each shown as written rather than as `other`. `distance_m` is measured from the stored position when there is one, otherwise from `now`. The handler orders the rows by `gap_s` ascending, then by prefix. Mean cost was measured at 15 ms per item:
+- **`others`** has one row per raw format prefix with a point in the window, so that formats the matcher passed over show beside the ones it used. Two unknown prefixes stay two rows, each shown as written rather than as `other`. One scan of the window lists the prefixes, nearest to the item's time first. Each row's `before` and `after` come from `bracketingPoints` with every other prefix in the window excluded, so they are the matcher's own query on that format alone, and `alone` is `geo.Explain` on them. `self` marks the item's own `exif` or `manual` point: the item's own derived format, at its exact time and within 1 m of its stored position. `distance_m` is measured from the stored position when there is one, otherwise from `now`; for an own position it is that format's error at that moment. Rows are ordered by how closely each format surrounds the item: formats with a point on each side first, by the longer of the two gaps, then formats with one side, by that gap, then by prefix. At most 16 rows are returned, the nearest formats kept, because each costs two bracket lookups; a format beyond the cap is still excluded from the others' brackets. On one real library this cost a median 1.5 ms and a 95th percentile of 14 ms per item, against 2.1 ms and 19 ms for the single nearest-point query it replaced.
 
   ```sql
-  SELECT DISTINCT ON (split_part(source, ':', 1))
-         source, recorded_at, ST_Y(location::geometry), ST_X(location::geometry), accuracy_m
-  FROM gps_tracks
-  WHERE owner_id = $1 AND recorded_at BETWEEN $2 AND $3
-  ORDER BY split_part(source, ':', 1), abs(extract(epoch FROM recorded_at - $4)), recorded_at, source
+  SELECT prefix FROM (
+    SELECT DISTINCT ON (split_part(source, ':', 1))
+           split_part(source, ':', 1) AS prefix, abs(extract(epoch FROM recorded_at - $4::timestamptz)) AS gap_s
+    FROM gps_tracks
+    WHERE owner_id = $1 AND recorded_at BETWEEN $2 AND $3
+    ORDER BY split_part(source, ':', 1), gap_s
+  ) formats
+  ORDER BY gap_s, prefix
   ```
 
 - **`origin`** for an `exif` or `manual` bracket point joins `media` on `owner_id`, `taken_at = recorded_at` and `gps_source IN ('exif', 'manual')`, capped at 6 rows. Zero rows is `orphan`, one is `linked`, more is `burst`. There is no foreign key, so `orphan` is an inference. On the measured library, 18% of estimates rest on at least one derived point and 12% rest only on derived points.
@@ -633,7 +650,7 @@ Downsampling keeps one row per format, so a per-source line in a downsampled con
 1. **Lead:** a state badge and one plain sentence (below).
 2. **Time** (`TimeCard.tsx`): the capture time's three clocks; a time origin chip; a zone chip; for a video its duration and that its time can be the end of the clip; the checks; a disclosure with the file's tags. With `recorded = "not_recorded"`, the file re-read loads once the item has been current for 400 ms, and the card reads "Read now with today's rules. The rule used at upload was not recorded." With recorded facts, the re-read is behind a button.
 3. **Points** (`PlacementCard.tsx`, `PointCard.tsx`): the bracket points of `now`, headed "What a re-match would use" in `stale`. An `exact` bracket lists its one point once. For each point its format, file, UTC and browser time, gap, accuracy or "not recorded", altitude, a bracket kind chip, and the format's time note. Then span, distance, position along the pair, time factor, distance factor, and confidence last.
-4. **Others:** one row per format with gap, accuracy and distance, the used rows marked. Each format's point is a small dot on the map. Below the rows comes one independence line (table below), when one applies.
+4. **Others:** one row per format, "Each format on its own": the gap to its nearest point before and after, and how far its points alone would place the item (Alone), the used rows marked and each row in its format's map colour. On the map, each format's own points are dots joined by a thin dashed line, with a diamond at its own estimate. Below the rows comes one independence line (table below), when one applies.
 5. **Actions:** Re-match my library, Place by hand.
 
 **Zone chip wording.** `gps`: the GPS clock, with its residual. `offset`: `OffsetTimeOriginal`. `camera`: the zone name and "nothing in the file confirms this". With `offset_ignored`: "The file declares {tag}, which is ignored for this make." With `camera_zone` unset: "the server's own zone, because `CAMERA_TIMEZONE` is unset", and with `camera_zone_utc_fallback`: a warning that this time was read as UTC.
@@ -742,7 +759,7 @@ The independence line:
 
 **Backend, integration** (`testdb`).
 
-- `internal/handlers/provenance_integration_test.go`: every placement state; `others` one row per format; exclusions; `origin` linked, orphan and burst; the context budget; a non-UTC process still sends UTC; 404 on a foreign item.
+- `internal/handlers/provenance_integration_test.go`: every placement state; `others` one row per format, each with its own bracket and estimate, other formats skipped, and the cap; exclusions; `origin` linked, orphan and burst; the context budget; a non-UTC process still sends UTC; 404 on a foreign item.
 - Beside `TestSharing_GPSIsolation` in `sharing_integration_test.go`: an album member gets 404 and no track data on both new routes.
 - An integration test that `GET /api/media` and the Game payload never return `capture_evidence`.
 - `internal/db/migrations_integration_test.go`: migration 10 up, down and up again.
@@ -772,7 +789,7 @@ No Playwright spec is required in Step 1.
 
 ### Pull requests and rollout
 
-The plan was four pull requests: recording (migration, ingest, `-map_metadata 0`, camera zone); time labels (`lib/time.ts`, the Map card and gallery labels, the lint rule); the file re-read route with the S3 check; then the matcher, `geo.Explain`, `loadTrack`, provenance and the evidence view. Step 1 ships as one pull request instead, in three commits (backend, frontend, docs), because the four parts share files: `exif.go`, `video.go`, `main.go`, the Map page and the gallery.
+The plan was four pull requests: recording (migration, ingest, `-map_metadata 0`, camera zone); time labels (`lib/time.ts`, the Map card and gallery labels, the lint rule); the file re-read route with the S3 check; then the matcher, `geo.Explain`, `loadTrack`, provenance and the evidence view. Step 1 ships as one pull request instead, because the four parts share files: `exif.go`, `video.go`, `main.go`, the Map page and the gallery. Its first three commits are Step 1 (backend, frontend, docs). The last two give each format its own points and estimate in the others table, as "Computing the fields" describes, and add the measured reliability entry under deferred work.
 
 After deploying the matcher change, run the re-match once per owner, so a tie that flips does not read as `stale`. The route acts only on the caller, so an operator runs it with `server scan --user <id> --dir <empty dir>`, which runs the matcher after an empty walk; alternatively the owner presses Re-match or uploads something, and stale rows are expected until then. Measure the tie aggregate on the hosted instance first, since it has been measured on only one library.
 
@@ -790,6 +807,7 @@ Where the code differs from the specification above, or settles something it lef
 - `HaversineKm` clamps its haversine term to at most 1. Exact antipodes give half the circumference, with distance factor and confidence 0, never `NaN`.
 - `capture_evidence` is `NULL` if it cannot be encoded at all. `parseProbeOutput` never produces such a value.
 - `offset_ignored` is true for a blank offset tag on an exempt make, and `offset_tag` is then `null`.
+- `others` was first one row per format with its single nearest point. A follow-up gave each format both sides and its own estimate, as "Computing the fields" now describes.
 - `ReadTags` lists only IFD0 and the Exif and GPS IFDs, because imagemeta names the Interoperability IFD's tags 1 and 2 `GPSLatitudeRef` and `GPSLatitude`.
 - EXIF is read through imagemeta, which replaced goexif (#66) after this note was written. On one real library of 14,188 objects, `ExtractExif` and `Raw` agreed with the goexif version on all but 13, and each of those gained a value. 3 files are partial, all of them files goexif could not read at all.
 - A `by` other than `ingest` or `backfill` counts as not recorded.
@@ -803,6 +821,7 @@ Where the code differs from the specification above, or settles something it lef
 - Lone points of a dashed source are drawn as a second, solid line, because Chromium paints no zero-length subpath in a dashed path with several subpaths.
 - After a failed step or jump the view shows neither the previous item's name nor its map.
 - `nearest_outside` points are drawn as hollow dots and can be picked. The bracket has its own pane at z 460.
+- Each format's own points are filled dots in its colour, joined by a thin dashed line, with a diamond where that format alone would place the item; points the estimate used, and the item's own point, are not drawn twice. The table gives each row the same colour. A picked point says which side of the capture time it is on.
 - `independenceLine` says nothing for `own_position` or `manual` with no time, since no comparison ran.
 - `burst` shows at most 6 items, because the backend caps the list.
 - `formatInstant` takes an optional third argument, `{ seconds?, locale? }`, and appends the IANA name without a numeric offset. In the repeated autumn hour, two instants an hour apart can print the same. The evidence view shows UTC beside it, the Map card and the gallery label do not.
@@ -1185,7 +1204,7 @@ Everything below came up during the design and is deliberately left out. Each en
 - **A confidence circle on the map.** A lightweight visual companion to the arithmetic. It needs nothing new from the backend. Worthwhile if the numbers alone prove hard to read.
 - **A pin's error measurement.** "This pin replaced an estimate 640 m away" is a free accuracy measurement, but it needs the replaced estimate stored at save time, which no longer happens without a snapshot. Worthwhile if it is wanted enough to add a field.
 - **Speed in the Step 1 `PointCard`.** Added in Step 3, where neighbours are loaded.
-- **Per-format estimates and support ranking in the others table.** A route, first proposed as `GET /api/media/{id}/provenance/alternatives?exclude=`, would give each format its own before and after points and its own estimate through `geo.Explain`, the gap before and the gap after, a support class (`dense`, `sparse` or `one_sided`), and ticks on the formats actually chosen. Tapping a row draws that estimate on the map. Any exclusion by label must follow invariant 9, so it needs a POST body or `access_log off`. Rows within 5 m collapse into "same as …", and rows are ordered by how closely each format surrounds the item. On 514 sampled estimates, 353 had at least two log formats in the window and the widest alternative was a median 618 m away. With two well-supported formats (66 items) the median disagreement was 0 m, 10 exceeded 100 m and 2 exceeded 500 m. Worthwhile if the plain table reads as constant false alarms. Size: S.
+- **Per-format estimates and support ranking in the others table.** Partly built after Step 1: each row of `others` now has its format's own before and after points and its own estimate, the map draws them all, and rows are ordered by how closely each format surrounds the item (see "Computing the fields"). Still open from this entry: tapping a row to draw only that estimate, rows within 5 m collapsing into "same as …", support classes, and what-if exclusions. The original entry follows. A route, first proposed as `GET /api/media/{id}/provenance/alternatives?exclude=`, would give each format its own before and after points and its own estimate through `geo.Explain`, the gap before and the gap after, a support class (`dense`, `sparse` or `one_sided`), and ticks on the formats actually chosen. Tapping a row draws that estimate on the map. Any exclusion by label must follow invariant 9, so it needs a POST body or `access_log off`. Rows within 5 m collapse into "same as …", and rows are ordered by how closely each format surrounds the item. On 514 sampled estimates, 353 had at least two log formats in the window and the widest alternative was a median 618 m away. With two well-supported formats (66 items) the median disagreement was 0 m, 10 exceeded 100 m and 2 exceeded 500 m. Worthwhile if the plain table reads as constant false alarms. Size: S.
 - **Section chips on a phone.** Sticky chips (Time, Points, Others, Clock, Near) that jump between sections, where tapping a section also fits the map to that section's geometry. It was the first proposed answer to phone density. Worthwhile if real use shows the scroll is too long.
 - **A zone-at-location chip.** Compare the offset actually used with the legal offset at the item's position on that date, worded for example "read as UTC+1, local zone at this place UTC+2", as a chip on the item. It needs a location-to-zone source: a new dependency, or Timeline's per-point offsets where they exist (open question 11). The neighbours entry above is a different signal, from other photos' measured offsets rather than from the place. Worthwhile if the neighbours line proves too sparse.
 - **A video's clip span on the evidence map.** For a video with a duration, draw the track between `taken_at` minus the duration and `taken_at`, with the note that `taken_at` can be the end of the clip. Step 1 states the duration in text only. Needs `duration_sec`, so it applies to new rows until the backfill.
@@ -1228,6 +1247,21 @@ Everything below came up during the design and is deliberately left out. Each en
 - **Anchor sync.** "I was here when I took this": tap the track to infer a clock offset for an item no automated test can reach, or enter a known true time with an explicit zone. It reads out "this means the clock was N min behind" and offers the shift preview for the camera group, so it depends on the deferred server preview and on Step 3's points. Writes nothing. Needs a track near the moment, the owner recognising the place, and attention item by item. Anchors could later be stored as a further clock board mark. Size: S.
 - **SQL recipes** for rare library-wide questions, as an appendix to this note: future-dated points by format, orphan points, estimates with no point left in the window, rows dated after upload, equal-time ties, per-source residuals, the per-camera shift test. Queries only. Size: S.
 - **A flag when a dense log disagrees with a video's location tag.** The matcher leaves `exif` rows alone. 51 videos on the measured library use their own tag.
+
+- **Choosing points by measured source reliability.** The matcher takes the nearest point on each side in time, whatever its format, so a coarse source can win over a precise one a few seconds further away. A leave-one-out run on one real library estimated the 1,606 photos that have their own position and a log point within the hour from the logs alone, and measured the distance from each photo's own position under several rules:
+
+  | Rule | p50 | p75 | p90 | p95 | Better / worse than today by over 10 m |
+  |---|---|---|---|---|---|
+  | Today: the nearest point of any log format | 148 m | 483 m | 1.3 km | 2.5 km | |
+  | The format that surrounds the photo most tightly | 146 m | 470 m | 1.2 km | 2.3 km | 34 / 59 |
+  | Today, without sparse formats (one side only, or a side over 30 minutes) when a dense one exists | 147 m | 485 m | 1.3 km | 2.5 km | 4 / 16 |
+  | #22: KML, KMZ and GeoJSON only when no other format is in the window | 137 m | 470 m | 1.2 km | 1.9 km | 83 / 18 |
+  | Google Timeline only when no other log format is in the window | 200 m | 630 m | 1.5 km | 2.8 km | 156 / 340 |
+  | The format with the lowest typical error for its coverage, learnt on the other half of the photos | 117 m | 349 m | 1.2 km | 2.1 km | 364 / 267 |
+
+  Each format alone, with a point within a minute on each side: `gpx` and `samsung_health` a median of 10 m, `nmea` 31 m, `google_timeline` 130 m, `kml` 234 m, `geojson` 310 m, `esoko` 339 m. With a point on one side only, every format did several times worse, `google_timeline` worst: a median of 1.2 km and 37 km at the 90th percentile. A long gap on each side did not: `google_timeline` with a side over 30 minutes still had a median of 137 m, most likely because its long gaps are visits, during which nothing moved. A Timeline point snapped to a visited place can still be the nearest in time while the photo was taken elsewhere, and rows carry no kind that would tell a visit from a path point (see "A per-row time kind" below).
+
+  So the signal is the format and whether it surrounds the item, not how sparse the format is overall. A design that follows: learn each format's typical error by coverage (both sides within 1, 5 or 30 minutes, longer, one side only) from the owner's own photos, as in the calibration entry above, and choose per item the format or pair with the lowest expected error, falling back to today's rule where too few photos back a cell. Show the expected error beside each row of the others table first, so that the owner can judge it before the matcher acts on it. Caveats: photos with their own position are mostly phone photos, taken where phone logs exist; a photo with a wrong clock counts against every format; and the learnt rule made 267 photos worse while improving 364. #22 is simpler and best at the 95th percentile, so it comes first, and this is measured again after it. Size: M.
 
 **Richer input data**
 
