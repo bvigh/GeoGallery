@@ -5,10 +5,15 @@ import (
 	"time"
 )
 
+// Point is one track point. Source, AccuracyM and AltitudeM are carried along for the provenance
+// view; the arithmetic reads only Lat, Lng and At.
 type Point struct {
-	Lat float64
-	Lng float64
-	At  time.Time
+	Lat       float64
+	Lng       float64
+	At        time.Time
+	Source    string
+	AccuracyM *float64
+	AltitudeM *float64
 }
 
 type InterpolationResult struct {
@@ -18,51 +23,99 @@ type InterpolationResult struct {
 	Source     string  // "exif", "interpolated", "none"
 }
 
-// Interpolate returns a GPS position for the given timestamp using the two
-// bracketing track points. Confidence decays with time gap and distance jump.
-func Interpolate(before, after *Point, at time.Time, maxWindow time.Duration) InterpolationResult {
+// Shape says how a bracket produced a position.
+type Shape string
+
+const (
+	ShapeTwoSided Shape = "two_sided" // interpolated between two points
+	ShapeOneSided Shape = "one_sided" // copied from the only point
+	ShapeExact    Shape = "exact"     // a point at the same instant
+)
+
+// Explanation is the arithmetic of one bracket, with its intermediate values.
+type Explanation struct {
+	OK             bool // false where Interpolate returns Source "none"
+	Lat, Lng       float64
+	Shape          Shape
+	PairGapS       float64
+	PairKm         float64
+	T              *float64 // position along the pair, two_sided only
+	TimeFactor     float64
+	DistanceFactor *float64 // nil for one_sided: there is no distance term
+	Confidence     float64
+	ImpliedKmh     *float64 // two_sided only
+}
+
+// Explain computes the position and confidence for at from its two bracketing track points. It is
+// the only copy of this arithmetic: Interpolate wraps it, so the matcher and the "Why here?" panel
+// cannot drift apart.
+func Explain(before, after *Point, at time.Time, window time.Duration) Explanation {
 	if before == nil && after == nil {
-		return InterpolationResult{Source: "none"}
+		return Explanation{}
 	}
-	if before == nil {
-		gap := after.At.Sub(at).Abs()
-		if gap > maxWindow {
-			return InterpolationResult{Source: "none"}
+	if before == nil || after == nil {
+		only := before
+		if only == nil {
+			only = after
 		}
-		return InterpolationResult{
-			Lat:        after.Lat,
-			Lng:        after.Lng,
-			Confidence: timeConfidence(gap, maxWindow),
-			Source:     "interpolated",
+		gap := only.At.Sub(at).Abs()
+		if gap > window {
+			return Explanation{}
 		}
-	}
-	if after == nil {
-		gap := at.Sub(before.At).Abs()
-		if gap > maxWindow {
-			return InterpolationResult{Source: "none"}
-		}
-		return InterpolationResult{
-			Lat:        before.Lat,
-			Lng:        before.Lng,
-			Confidence: timeConfidence(gap, maxWindow),
-			Source:     "interpolated",
+		confidence := timeConfidence(gap, window)
+		return Explanation{
+			OK:         true,
+			Lat:        only.Lat,
+			Lng:        only.Lng,
+			Shape:      ShapeOneSided,
+			TimeFactor: confidence,
+			Confidence: confidence,
 		}
 	}
 
 	total := after.At.Sub(before.At).Seconds()
 	if total == 0 {
-		return InterpolationResult{Lat: before.Lat, Lng: before.Lng, Confidence: 1.0, Source: "interpolated"}
+		distanceFactor := 1.0
+		return Explanation{
+			OK:             true,
+			Lat:            before.Lat,
+			Lng:            before.Lng,
+			Shape:          ShapeExact,
+			TimeFactor:     1,
+			DistanceFactor: &distanceFactor,
+			Confidence:     1,
+		}
 	}
 
 	t := at.Sub(before.At).Seconds() / total
-	lat := before.Lat + t*(after.Lat-before.Lat)
-	lng := before.Lng + t*(after.Lng-before.Lng)
+	km := HaversineKm(before.Lat, before.Lng, after.Lat, after.Lng)
+	timeFactor := timeConfidence(after.At.Sub(before.At), window)
+	distanceFactor := distanceConfidence(km)
+	impliedKmh := km / (total / 3600)
 
-	timeFactor := timeConfidence(after.At.Sub(before.At), maxWindow)
-	distFactor := distanceConfidence(HaversineKm(before.Lat, before.Lng, after.Lat, after.Lng))
-	confidence := timeFactor * distFactor
+	return Explanation{
+		OK:             true,
+		Lat:            before.Lat + t*(after.Lat-before.Lat),
+		Lng:            before.Lng + t*(after.Lng-before.Lng),
+		Shape:          ShapeTwoSided,
+		PairGapS:       total,
+		PairKm:         km,
+		T:              &t,
+		TimeFactor:     timeFactor,
+		DistanceFactor: &distanceFactor,
+		Confidence:     timeFactor * distanceFactor,
+		ImpliedKmh:     &impliedKmh,
+	}
+}
 
-	return InterpolationResult{Lat: lat, Lng: lng, Confidence: confidence, Source: "interpolated"}
+// Interpolate returns a GPS position for the given timestamp using the two
+// bracketing track points. Confidence decays with time gap and distance jump.
+func Interpolate(before, after *Point, at time.Time, maxWindow time.Duration) InterpolationResult {
+	e := Explain(before, after, at, maxWindow)
+	if !e.OK {
+		return InterpolationResult{Source: "none"}
+	}
+	return InterpolationResult{Lat: e.Lat, Lng: e.Lng, Confidence: e.Confidence, Source: "interpolated"}
 }
 
 func timeConfidence(gap, maxWindow time.Duration) float64 {
@@ -86,6 +139,7 @@ func HaversineKm(lat1, lng1, lat2, lng2 float64) float64 {
 	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
 		math.Cos(toRad(lat1))*math.Cos(toRad(lat2))*
 			math.Sin(dLng/2)*math.Sin(dLng/2)
+	a = math.Min(1, a) // rounding can pass 1 at exact antipodes, and 1-a under the root would be NaN
 	return R * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }
 

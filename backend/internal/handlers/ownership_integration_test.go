@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bvigh/geogallery/internal/auth"
+	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/bvigh/geogallery/internal/testdb"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -28,6 +29,26 @@ type fakeObjectStore struct {
 	mu      sync.Mutex
 	keys    []string
 	deleted []string
+	objects map[string][]byte // what ReadHead returns, by key
+	heads   []string          // the keys ReadHead was asked for
+	probe   ingest.VideoProbeResult
+}
+
+// probeURL stands in for ffprobe on a presigned URL from this store.
+func (s *fakeObjectStore) probeURL(context.Context, string) (ingest.VideoProbeResult, error) {
+	return s.probe, nil
+}
+
+// ReadHead returns the bytes a test put in objects, or bytes that hold no EXIF.
+func (s *fakeObjectStore) ReadHead(_ context.Context, key string, n int64) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.heads = append(s.heads, key)
+	body, ok := s.objects[key]
+	if !ok {
+		return []byte("this object holds no EXIF"), nil
+	}
+	return body[:min(n, int64(len(body)))], nil
 }
 
 func (s *fakeObjectStore) Upload(_ context.Context, key string, body io.Reader, _ int64, _ string) error {
@@ -66,6 +87,11 @@ func newOwnershipRouter(pool *pgxpool.Pool, store *fakeObjectStore) http.Handler
 	game := &GameHandler{db: pool, storage: store}
 	tracks := &GPSTrackHandler{db: pool, matcherPool: pool, matchWindow: time.Hour, runMatcher: RunGPSMatcher}
 	matcher := &GPSMatcherHandler{matcherPool: pool, matchWindow: time.Hour, runMatcher: RunGPSMatcher}
+	provenance := &ProvenanceHandler{
+		db: pool, storage: store, matchWindow: time.Hour,
+		probeURL: store.probeURL, probeSlots: make(chan struct{}, maxConcurrentProbes),
+		photoSlots: make(chan struct{}, maxConcurrentPhotoReads),
+	}
 
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
@@ -84,6 +110,8 @@ func newOwnershipRouter(pool *pgxpool.Pool, store *fakeObjectStore) http.Handler
 		r.Get("/media/{id}/keyframes", media.GetKeyframes)
 		r.Put("/media/{id}/keyframes", media.ReplaceKeyframes)
 		r.Delete("/media/{id}", media.Delete)
+		r.Get("/media/{id}/provenance", provenance.Get)
+		r.Get("/media/{id}/provenance/file", provenance.File)
 		r.Get("/trips", trips.List)
 		r.Patch("/trips/{id}", trips.Update)
 		r.Delete("/trips/{id}", trips.Delete)

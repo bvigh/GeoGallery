@@ -18,18 +18,30 @@ type Photo struct {
 	DateTimeOriginal   string // Exif IFD 0x9003, "2006:01:02 15:04:05"
 	DateTime           string // IFD0 0x0132 (ModifyDate), the fallback when DateTimeOriginal is missing
 	OffsetTimeOriginal string // Exif IFD 0x9011, e.g. "+01:00"
+	PixelX, PixelY     uint32 // Exif IFD 0xA002 and 0xA003; zero leaves a tag out
 	GPS                *GPS
 	// InteropIFD adds an Interoperability IFD to the Exif IFD, as most phones write. Its tags 1 and
 	// 2 have the numbers of GPSLatitudeRef and GPSLatitude.
 	InteropIFD bool
 	// BrokenExifIFD adds a zero-length tag to the Exif IFD, as old Sony cameras write.
 	BrokenExifIFD bool
+	Extra         []RawTag // added to the Exif IFD
+}
+
+// RawTag is a tag written as given, for what Photo has no field for: an id the decoder has no name
+// for, or a binary type.
+type RawTag struct {
+	ID    uint16
+	Type  uint16 // TIFF type: 2 is ASCII, 7 is undefined
+	Count uint32
+	Value []byte
 }
 
 // GPS is the GPS IFD. A zero Time leaves GPSDateStamp and GPSTimeStamp out.
 type GPS struct {
 	Lat, Lng float64
 	Time     time.Time // written in UTC, seconds to the millisecond
+	Hour     uint32    // when set, GPSTimeStamp's hour in place of Time's: a file can say 24, a clock cannot
 	// ZeroLatDegrees writes the latitude's degrees as 0/0.
 	ZeroLatDegrees bool
 }
@@ -156,12 +168,21 @@ func TIFF(p Photo) []byte {
 	if p.OffsetTimeOriginal != "" {
 		exifIFD = append(exifIFD, ascii(0x9011, p.OffsetTimeOriginal))
 	}
+	if p.PixelX != 0 {
+		exifIFD = append(exifIFD, entry{0xA002, typeLong, 1, le.AppendUint32(nil, p.PixelX)})
+	}
+	if p.PixelY != 0 {
+		exifIFD = append(exifIFD, entry{0xA003, typeLong, 1, le.AppendUint32(nil, p.PixelY)})
+	}
 	if p.InteropIFD {
 		exifIFD = append(exifIFD, entry{0xA005, typeLong, 1, make([]byte, 4)})
 		interopIFD = append(interopIFD, ascii(0x0001, "R98"), entry{0x0002, typeUndefined, 4, []byte("0100")})
 	}
 	if p.BrokenExifIFD {
 		exifIFD = append(exifIFD, entry{0x9286, typeASCII, 0, nil})
+	}
+	for _, raw := range p.Extra {
+		exifIFD = append(exifIFD, entry{raw.ID, raw.Type, raw.Count, raw.Value})
 	}
 	if g := p.GPS; g != nil {
 		lat := degrees(0x0002, g.Lat)
@@ -178,8 +199,12 @@ func TIFF(p Photo) []byte {
 		if !g.Time.IsZero() {
 			t := g.Time.UTC()
 			ms := t.Second()*1000 + t.Nanosecond()/int(time.Millisecond)
+			hour := uint32(t.Hour())
+			if g.Hour != 0 {
+				hour = g.Hour
+			}
 			gpsIFD = append(gpsIFD,
-				rationals(0x0007, [2]uint32{uint32(t.Hour()), 1}, [2]uint32{uint32(t.Minute()), 1}, [2]uint32{uint32(ms), 1000}),
+				rationals(0x0007, [2]uint32{hour, 1}, [2]uint32{uint32(t.Minute()), 1}, [2]uint32{uint32(ms), 1000}),
 				ascii(0x001D, t.Format("2006:01:02")),
 			)
 		}
