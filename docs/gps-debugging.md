@@ -583,7 +583,7 @@ nginx gives up on an upstream after 60 s by default. That closes the upstream co
 ```nginx
 location = /api/gps-matcher/run {
     proxy_read_timeout 900s;
-    proxy_pass http://backend:8080;
+    proxy_pass $backend;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
 }
@@ -978,7 +978,7 @@ With a non-empty `hide`, buckets are per source rather than per format and `form
 ```nginx
 location ~ ^/api/(trips|albums)/[^/]+/track$ {
     access_log off;
-    proxy_pass http://backend:8080;
+    proxy_pass $backend;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
 }
