@@ -12,6 +12,8 @@ import type {
   Estimate,
   FileReread,
   MediaItem,
+  OtherFormat,
+  OtherPoint,
   PlacementState,
   ProvenanceResponse,
   ServerCameraZone,
@@ -187,6 +189,47 @@ export function independenceLine({ item, placement }: ProvenanceFacts): string |
   if (!independent) return "No log supports this. It rests only on other photos or pins.";
   if (independent.moved_m === null) return null;
   return `Without photos and pins this would move ${formatDistance(independent.moved_m)}.`;
+}
+
+// The points of one format's own bracket, earlier first. A point at the item's exact time is both
+// sides, and is listed once.
+export function otherFormatPoints(row: Pick<OtherFormat, "before" | "after">): OtherPoint[] {
+  const { before, after } = row;
+  if (before && after && before.source === after.source && before.t === after.t) return [before];
+  return [before, after].filter((point): point is OtherPoint => point !== null);
+}
+
+export const OTHER_FORMATS_HEADING = "Each format on its own";
+export const OTHER_FORMATS_NOTE =
+  "Before and After are each format's nearest point on that side within the match window. Alone is how far that format's points by themselves would place this item from its marker.";
+const NO_POINT = "none";
+const THIS_ITEM = "this item";
+
+// A Before or After cell: the gap to that side's point.
+export function otherSideCell(point: OtherPoint | null): string {
+  if (!point) return NO_POINT;
+  return point.self ? THIS_ITEM : formatDuration(point.gap_s);
+}
+
+// The Alone cell: how far this format's own estimate is from the item's marker.
+export function otherAloneCell(row: OtherFormat): string {
+  if (otherFormatPoints(row).every((point) => point.self)) return THIS_ITEM;
+  return row.alone.distance_m === null ? NOT_RECORDED : formatDistance(row.alone.distance_m);
+}
+
+// Whether the map marks where this format alone would place the item. A one-sided or exact estimate
+// sits on its point, and one made of the estimate's own points is the estimate.
+export function showsAloneEstimate(row: OtherFormat): boolean {
+  if (row.alone.shape !== "two_sided") return false;
+  return !(row.before?.used && row.after?.used);
+}
+
+// Which side of the item's time t is on, or null at the same instant or with no capture time.
+export function pointSide(t: string, takenAt: string | null): "before" | "after" | null {
+  if (takenAt === null) return null;
+  const difference = Date.parse(t) - Date.parse(takenAt);
+  if (difference === 0 || Number.isNaN(difference)) return null;
+  return difference < 0 ? "before" : "after";
 }
 
 // A format-level note: stored rows carry no time kind, so it can never be about one point.

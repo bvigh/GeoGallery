@@ -252,8 +252,8 @@ export interface OutsidePoint {
   gap_s: number;
 }
 
-export interface OtherFormat {
-  format: string; // the raw prefix, so an unknown one is shown as written
+// One format's nearest point on one side of the item's time, within the match window.
+export interface OtherPoint {
   source: string;
   t: string;
   lat: number;
@@ -261,7 +261,23 @@ export interface OtherFormat {
   gap_s: number;
   accuracy_m: number | null;
   distance_m: number | null; // from the position on the map
-  used: boolean; // the row is this estimate's before or after point
+  used: boolean; // the estimate's before or after point
+  self: boolean; // the item's own exif or manual point
+}
+
+// One format on its own: its nearest point on each side, and where those alone place the item.
+export interface OtherFormat {
+  format: string; // the raw prefix, so an unknown one is shown as written
+  before: OtherPoint | null; // null when the format has no point on that side within the window
+  after: OtherPoint | null; // the same row as before when it is at the item's exact time
+  alone: {
+    lat: number;
+    lng: number;
+    shape: BracketShape;
+    confidence: number;
+    distance_m: number | null; // from the position on the map
+  };
+  used: boolean; // one of its points is the estimate's before or after point
 }
 
 export type WarningCode = "pair_impossible" | "pair_far" | "logger_parked" | "confidence_zero" | "point_orphan";

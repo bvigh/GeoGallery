@@ -1,6 +1,15 @@
 // Synthetic provenance responses for the evidence view's tests. Nothing here is real data.
 
-import type { Bracket, CaptureEvidence, Estimate, FileReread, ProvenanceResponse, TrackResponse } from "@/types";
+import type {
+  Bracket,
+  CaptureEvidence,
+  Estimate,
+  FileReread,
+  OtherFormat,
+  OtherPoint,
+  ProvenanceResponse,
+  TrackResponse,
+} from "@/types";
 
 export const SERVER_ZONE = { name: "Etc/GMT-1", set: true, utc_fallback: false, offset_now_min: 60 };
 
@@ -16,6 +25,33 @@ export function makeBracket(overrides: Partial<Bracket> = {}): Bracket {
     altitude_m: 100,
     gap_s: 60,
     origin: null,
+    ...overrides,
+  };
+}
+
+export function makeOtherPoint(overrides: Partial<OtherPoint> = {}): OtherPoint {
+  return {
+    source: "nmea:a.nmea",
+    t: "2000-01-01T00:00:30Z",
+    lat: 10.3,
+    lng: 20.3,
+    gap_s: 30,
+    accuracy_m: null,
+    distance_m: 100,
+    used: false,
+    self: false,
+    ...overrides,
+  };
+}
+
+// A format with a point on each side of the default item's time (00:01:00), and its own estimate.
+export function makeOtherFormat(overrides: Partial<OtherFormat> = {}): OtherFormat {
+  return {
+    format: "nmea",
+    before: makeOtherPoint({ t: "2000-01-01T00:00:30Z", lat: 10.3, lng: 20.3, gap_s: 30 }),
+    after: makeOtherPoint({ t: "2000-01-01T00:02:00Z", lat: 10.4, lng: 20.4, gap_s: 60 }),
+    alone: { lat: 10.33, lng: 20.33, shape: "two_sided", confidence: 0.9, distance_m: 1500 },
+    used: false,
     ...overrides,
   };
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -248,12 +249,28 @@ func TestProvenanceGet_Errors(t *testing.T) {
 			}
 			return errRow{boom}
 		}, nil, http.StatusInternalServerError},
-		{"the others query fails", id, func(call int) pgx.Row {
+		{"the formats query fails", id, func(call int) pgx.Row {
 			if call == 1 {
 				return item
 			}
 			return noRowsRow{}
 		}, func(int) (pgx.Rows, error) { return nil, boom }, http.StatusInternalServerError},
+		// The item, then two bracket lookups each for the estimate, the independent estimate and the
+		// nearest points outside the window, before the format's own bracket.
+		{"a format's bracket query fails", id, func(call int) pgx.Row {
+			switch {
+			case call == 1:
+				return item
+			case call <= 7:
+				return noRowsRow{}
+			}
+			return errRow{boom}
+		}, func(call int) (pgx.Rows, error) {
+			if call == 1 {
+				return &mockRows{rows: [][]any{{"gpx"}}}, nil
+			}
+			return &mockRows{}, nil
+		}, http.StatusInternalServerError},
 		{"the track query fails", id, func(call int) pgx.Row {
 			if call == 1 {
 				return item
@@ -336,4 +353,121 @@ func TestLoadTrack_ErrorsAreReturned(t *testing.T) {
 			require.ErrorIs(t, err, boom)
 		})
 	}
+}
+
+func TestNewOtherFormat(t *testing.T) {
+	takenAt := time.Date(2001, 2, 3, 12, 0, 0, 0, time.UTC)
+	point := func(source string, offset time.Duration, lat, lng float64) *geo.Point {
+		return &geo.Point{Source: source, At: takenAt.Add(offset), Lat: lat, Lng: lng}
+	}
+	before := point("gpx:a.gpx", -2*time.Minute, 10, 20)
+	after := point("gpx:a.gpx", 3*time.Minute, 10.01, 20)
+	reference := &position{lat: 10, lng: 20.01}
+	facts := otherFormatFacts{takenAt: takenAt, window: time.Hour, reference: reference}
+
+	t.Run("a point on each side is this format's own estimate", func(t *testing.T) {
+		row, ok := newOtherFormat("gpx", before, after, facts)
+
+		require.True(t, ok)
+		want := geo.Explain(before, after, takenAt, time.Hour)
+		assert.Equal(t, "gpx", row.Format)
+		assert.Equal(t, string(geo.ShapeTwoSided), row.Alone.Shape)
+		assert.InDelta(t, want.Lat, row.Alone.Lat, 1e-12)
+		assert.InDelta(t, want.Lng, row.Alone.Lng, 1e-12)
+		assert.InDelta(t, want.Confidence, row.Alone.Confidence, 1e-12)
+		assert.InDelta(t, geo.HaversineKm(10, 20.01, want.Lat, want.Lng)*1000, *row.Alone.DistanceM, 1e-6)
+		require.NotNil(t, row.Before)
+		require.NotNil(t, row.After)
+		assert.Equal(t, 120.0, row.Before.GapS)
+		assert.Equal(t, 180.0, row.After.GapS)
+		assert.InDelta(t, geo.HaversineKm(10, 20.01, 10, 20)*1000, *row.Before.DistanceM, 1e-6)
+		assert.False(t, row.Used)
+		assert.Equal(t, time.UTC, row.Before.T.Location())
+	})
+	t.Run("one side only", func(t *testing.T) {
+		row, ok := newOtherFormat("gpx", nil, after, facts)
+
+		require.True(t, ok)
+		assert.Nil(t, row.Before)
+		assert.Equal(t, string(geo.ShapeOneSided), row.Alone.Shape)
+		assert.Equal(t, after.Lat, row.Alone.Lat)
+	})
+	t.Run("a point at the exact time is both sides", func(t *testing.T) {
+		exact := point("exif", 0, 10, 20)
+		row, ok := newOtherFormat("exif", exact, exact, facts)
+
+		require.True(t, ok)
+		assert.Equal(t, string(geo.ShapeExact), row.Alone.Shape)
+		assert.Equal(t, row.Before, row.After)
+	})
+	t.Run("no point is no row", func(t *testing.T) {
+		_, ok := newOtherFormat("gpx", nil, nil, facts)
+		assert.False(t, ok)
+	})
+	t.Run("points of the estimate are marked used", func(t *testing.T) {
+		withNow := facts
+		withNow.now = &provenanceEstimate{
+			Before: newBracket(before, takenAt),
+			After:  newBracket(point("nmea:b.nmea", time.Minute, 10, 20), takenAt),
+		}
+		row, ok := newOtherFormat("gpx", before, after, withNow)
+
+		require.True(t, ok)
+		assert.True(t, row.Before.Used)
+		assert.False(t, row.After.Used, "the estimate's after point is another format's")
+		assert.True(t, row.Used)
+	})
+}
+
+func TestNewOtherFormat_TheItemsOwnPoint(t *testing.T) {
+	takenAt := time.Date(2001, 2, 3, 12, 0, 0, 0, time.UTC)
+	own := &geo.Point{Source: "exif", At: takenAt, Lat: 10, Lng: 20}
+	item := func(source string, lat float64) provenanceItem {
+		lng := 20.0
+		return provenanceItem{GPSSource: &source, Lat: &lat, Lng: &lng}
+	}
+	tests := []struct {
+		name  string
+		item  provenanceItem
+		point *geo.Point
+		want  bool
+	}{
+		{"an own position's point", item("exif", 10), own, true},
+		{"a pin's point", item("manual", 10), &geo.Point{Source: "manual", At: takenAt, Lat: 10, Lng: 20}, true},
+		{"an estimate never wrote one", item("interpolated", 10), own, false},
+		{"another photo in the same second, elsewhere", item("exif", 10.001), own, false},
+		{"another format at the same place and time", item("exif", 10), &geo.Point{Source: "gpx:a.gpx", At: takenAt, Lat: 10, Lng: 20}, false},
+		{"a point a second off", item("exif", 10), &geo.Point{Source: "exif", At: takenAt.Add(time.Second), Lat: 10, Lng: 20}, false},
+		{"an item with no position", provenanceItem{GPSSource: ptr("exif")}, own, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row, ok := newOtherFormat(sourcePrefix(tt.point.Source), tt.point, tt.point,
+				otherFormatFacts{takenAt: takenAt, window: time.Hour, item: tt.item})
+
+			require.True(t, ok)
+			assert.Equal(t, tt.want, row.Before.Self)
+		})
+	}
+}
+
+func TestCompareOtherFormats(t *testing.T) {
+	side := func(gapS float64) *provenanceOtherPoint { return &provenanceOtherPoint{GapS: gapS} }
+	rows := []provenanceOtherFormat{
+		{Format: "one-sided-near", After: side(5)},
+		{Format: "wide", Before: side(10), After: side(600)},
+		{Format: "one-sided-far", Before: side(900)},
+		{Format: "b-tight", Before: side(60), After: side(30)},
+		{Format: "a-tight", Before: side(60), After: side(60)},
+		{Format: "exact", Before: side(0), After: side(0)},
+	}
+
+	slices.SortFunc(rows, compareOtherFormats)
+
+	var got []string
+	for _, row := range rows {
+		got = append(got, row.Format)
+	}
+	assert.Equal(t, []string{"exact", "a-tight", "b-tight", "wide", "one-sided-near", "one-sided-far"}, got,
+		"both sides first, by the longer gap, then one side by its gap; the prefix breaks ties")
 }

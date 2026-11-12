@@ -1,11 +1,11 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { makeBracket, makeEstimate, makeResponse } from "@/components/evidence/evidenceTestUtils";
+import { makeBracket, makeEstimate, makeOtherFormat, makeOtherPoint, makeResponse } from "@/components/evidence/evidenceTestUtils";
 import { PlacementCard } from "@/components/evidence/PlacementCard";
-import { REMATCH_HEADING, STANDING_LINE } from "@/lib/evidence";
+import { OTHER_FORMATS_NOTE, REMATCH_HEADING, STANDING_LINE } from "@/lib/evidence";
 import { formatInstant } from "@/lib/time";
-import type { Bracket, OtherFormat, ProvenanceResponse } from "@/types";
+import type { Bracket, ProvenanceResponse } from "@/types";
 
 type Placement = ProvenanceResponse["placement"];
 
@@ -28,21 +28,6 @@ const photoPoint = (filename: string): Bracket =>
     kind: "exif",
     origin: { state: "linked", media: [{ id: "behind", filename }] },
   });
-
-function other(overrides: Partial<OtherFormat> = {}): OtherFormat {
-  return {
-    format: "nmea",
-    source: "nmea:a.nmea",
-    t: "2000-01-01T00:00:30Z",
-    lat: 10.3,
-    lng: 20.3,
-    gap_s: 30,
-    accuracy_m: 12,
-    distance_m: 1500,
-    used: false,
-    ...overrides,
-  };
-}
 
 describe("PlacementCard", () => {
   describe("the bracket points", () => {
@@ -67,7 +52,7 @@ describe("PlacementCard", () => {
       expect(screen.getByText("Your browser")).toBeInTheDocument();
       expect(screen.getByText(formatInstant("2000-01-01T00:00:00Z", "Asia/Tokyo"))).toBeInTheDocument();
       expect(screen.queryByText("Camera")).not.toBeInTheDocument();
-      expect(screen.getByText("1 min")).toBeInTheDocument();
+      expect(screen.getByText("1 min before")).toBeInTheDocument();
       expect(screen.getByText("5 m")).toBeInTheDocument();
       expect(screen.getByText("100 m")).toBeInTheDocument();
       zone.mockRestore();
@@ -201,23 +186,55 @@ describe("PlacementCard", () => {
   });
 
   describe("the others table", () => {
-    it("has one row per format with gap, accuracy and distance", () => {
-      renderCard({ others: [other(), other({ format: "gpx", source: "gpx:b.gpx", accuracy_m: null, distance_m: null })] });
+    const cells = (row: HTMLElement) => within(row).getAllByRole("cell").map((cell) => cell.textContent);
+
+    it("has one row per format: its gap on each side and how far it alone would place the item", () => {
+      renderCard({
+        others: [
+          makeOtherFormat(),
+          makeOtherFormat({
+            format: "gpx",
+            before: null,
+            after: makeOtherPoint({ source: "gpx:b.gpx", gap_s: 600 }),
+            alone: { lat: 10, lng: 20, shape: "one_sided", confidence: 0.4, distance_m: null },
+          }),
+        ],
+      });
       const rows = screen.getAllByRole("row");
       expect(rows).toHaveLength(3);
-      const nmea = within(rows[1]);
-      expect(nmea.getByText("nmea")).toBeInTheDocument();
-      expect(nmea.getByText("30 s")).toBeInTheDocument();
-      expect(nmea.getByText("12 m")).toBeInTheDocument();
-      expect(nmea.getByText("1.5 km")).toBeInTheDocument();
-      expect(within(rows[2]).getAllByText("not recorded")).toHaveLength(2);
+      expect(within(rows[0]).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual([
+        "Format",
+        "Before",
+        "After",
+        "Alone",
+      ]);
+      expect(cells(rows[1])).toEqual(["nmea", "30 s", "1 min", "1.5 km"]);
+      expect(cells(rows[2])).toEqual(["gpx", "none", "10 min", "not recorded"]);
+      expect(screen.getByText(OTHER_FORMATS_NOTE)).toBeInTheDocument();
     });
 
     it("marks the rows the estimate used", () => {
-      renderCard({ others: [other({ used: true }), other({ format: "gpx", source: "gpx:b.gpx" })] });
+      renderCard({ others: [makeOtherFormat({ used: true }), makeOtherFormat({ format: "gpx" })] });
       const rows = screen.getAllByRole("row");
       expect(within(rows[1]).getByText("used")).toBeInTheDocument();
       expect(within(rows[2]).queryByText("used")).not.toBeInTheDocument();
+    });
+
+    it("names the item's own point instead of a gap and a distance", () => {
+      const own = makeOtherPoint({ source: "exif", t: "2000-01-01T00:01:00Z", gap_s: 0, distance_m: 0, self: true });
+      renderCard({
+        state: "own_position",
+        now: null,
+        others: [makeOtherFormat({ format: "exif", before: own, after: own, alone: { lat: 10.1, lng: 20.1, shape: "exact", confidence: 1, distance_m: 0 } })],
+      });
+      expect(cells(screen.getAllByRole("row")[1])).toEqual(["exif", "this item", "this item", "this item"]);
+    });
+
+    it("gives each row its format's map colour, hidden from screen readers", () => {
+      renderCard({ others: [makeOtherFormat({ format: "gpx" })] });
+      const swatch = within(screen.getAllByRole("row")[1]).getByText("gpx").querySelector("span");
+      expect(swatch).toHaveAttribute("aria-hidden", "true");
+      expect(swatch).toHaveStyle({ backgroundColor: "#2563eb" });
     });
   });
 

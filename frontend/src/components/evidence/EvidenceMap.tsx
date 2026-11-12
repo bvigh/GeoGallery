@@ -13,9 +13,17 @@ import {
 import L from "leaflet";
 import { TOP_MARKER_Z_INDEX_OFFSET } from "@/components/map/markers";
 import { TrackLayer } from "@/components/map/TrackLayer";
-import { bracketKindChip, bracketPoints, contextPointKind, REMATCH_SEGMENT_LABEL } from "@/lib/evidence";
+import {
+  bracketKindChip,
+  bracketPoints,
+  contextPointKind,
+  otherFormatPoints,
+  pointSide,
+  REMATCH_SEGMENT_LABEL,
+  showsAloneEstimate,
+} from "@/lib/evidence";
 import { formatColor, nearestPoint, POINT_HIT_RADIUS_PX } from "@/lib/track";
-import type { ProvenanceResponse } from "@/types";
+import type { OtherFormat, ProvenanceResponse } from "@/types";
 import type { PickedPoint } from "@/components/evidence/PointCard";
 import "leaflet/dist/leaflet.css";
 
@@ -37,6 +45,38 @@ const itemMarkerIcon = L.divIcon({
   iconAnchor: [8, 8],
 });
 
+const aloneIcons = new Map<string, L.DivIcon>();
+
+// Where one format alone would place the item: a diamond, so it is not read as a track point. The
+// colour comes from formatColor's table, never from a format name.
+function aloneIcon(color: string): L.DivIcon {
+  let icon = aloneIcons.get(color);
+  if (!icon) {
+    icon = L.divIcon({
+      html: `<div style="width:10px;height:10px;transform:rotate(45deg);background:${color};border:2px solid white;box-shadow:0 1px 3px rgba(0,0,0,0.5)"></div>`,
+      className: "",
+      iconSize: [10, 10],
+      iconAnchor: [5, 5],
+    });
+    aloneIcons.set(color, icon);
+  }
+  return icon;
+}
+
+// A format's own points that are not drawn already: the estimate's points have their own markers,
+// and the item's own point sits under the item's.
+function ownPointsToDraw(row: OtherFormat) {
+  return otherFormatPoints(row).filter((point) => !point.used && !point.self);
+}
+
+// The thin line between a format's own two points, or null: a format with one point has none, and a
+// pair of the estimate's own points is the thick segment already.
+function ownPairLine(row: OtherFormat): LatLng[] | null {
+  const points = otherFormatPoints(row);
+  if (points.length !== 2 || (points[0].used && points[1].used)) return null;
+  return points.map((point): LatLng => [point.lat, point.lng]);
+}
+
 function storedOrEstimated({ item, placement }: ProvenanceResponse): LatLng | null {
   if (item.lat !== null && item.lng !== null) return [item.lat, item.lng];
   return placement.now ? [placement.now.lat, placement.now.lng] : null;
@@ -53,7 +93,7 @@ function fitPositions(data: ProvenanceResponse): LatLng[] {
   const main: LatLng[] = [
     ...(marker ? [marker] : []),
     ...bracketPoints(data.placement.now).map((point): LatLng => [point.lat, point.lng]),
-    ...data.placement.others.map((other): LatLng => [other.lat, other.lng]),
+    ...data.placement.others.flatMap((other) => otherFormatPoints(other).map((point): LatLng => [point.lat, point.lng])),
   ];
   if (main.length > 0) return main;
   const outside = nearestOutside(data).map((point): LatLng => [point.lat, point.lng]);
@@ -117,20 +157,24 @@ function pickablePoints(data: ProvenanceResponse): PickedPoint[] {
       accuracyM: point.accuracy_m,
       altitudeM: point.altitude_m,
       gapS: point.gap_s,
+      side: pointSide(point.t, item.taken_at),
       kind: bracketKindChip(point),
     })
   );
-  const others = placement.others.map(
-    (other): PickedPoint => ({
-      format: other.format,
-      source: other.source,
-      t: other.t,
-      lat: other.lat,
-      lng: other.lng,
-      accuracyM: other.accuracy_m,
-      gapS: other.gap_s,
-      kind: kindOfFormat(other.format),
-    })
+  const others = placement.others.flatMap((other) =>
+    otherFormatPoints(other).map(
+      (point): PickedPoint => ({
+        format: other.format,
+        source: point.source,
+        t: point.t,
+        lat: point.lat,
+        lng: point.lng,
+        accuracyM: point.accuracy_m,
+        gapS: point.gap_s,
+        side: pointSide(point.t, item.taken_at),
+        kind: point.self ? "this item" : kindOfFormat(other.format),
+      })
+    )
   );
   const outside = nearestOutside(data).map(
     (point): PickedPoint => ({
@@ -140,6 +184,7 @@ function pickablePoints(data: ProvenanceResponse): PickedPoint[] {
       lat: point.lat,
       lng: point.lng,
       gapS: point.gap_s,
+      side: pointSide(point.t, item.taken_at),
       kind: kindOfFormat(point.format),
     })
   );
@@ -156,6 +201,7 @@ function pickablePoints(data: ProvenanceResponse): PickedPoint[] {
         accuracyM: point.acc,
         altitudeM: point.alt,
         gapS: secondsBetween(point.t, item.taken_at),
+        side: pointSide(point.t, item.taken_at),
         kind: contextPointKind(source.kind),
       },
     ];
@@ -222,15 +268,30 @@ export function EvidenceMap({ data, inert, onPick }: EvidenceMapProps) {
       <PointPicker data={data} inert={inert} onPick={onPick} />
       <TrackLayer track={context} />
       <Pane name={BRACKET_PANE} style={{ zIndex: BRACKET_PANE_Z_INDEX }}>
-        {others.map((other) => (
-          <CircleMarker
-            key={other.format}
-            center={[other.lat, other.lng]}
-            radius={4}
-            interactive={false}
-            pathOptions={{ color: "white", weight: 1, fillColor: formatColor(other.format), fillOpacity: 1 }}
-          />
-        ))}
+        {others.flatMap((other) => {
+          const pair = ownPairLine(other);
+          return pair
+            ? [
+                <Polyline
+                  key={`${other.format} pair`}
+                  positions={pair}
+                  interactive={false}
+                  pathOptions={{ color: formatColor(other.format), weight: 2, opacity: 0.9, dashArray: "4 6" }}
+                />,
+              ]
+            : [];
+        })}
+        {others.flatMap((other) =>
+          ownPointsToDraw(other).map((point) => (
+            <CircleMarker
+              key={`${other.format} ${point.source} ${point.t}`}
+              center={[point.lat, point.lng]}
+              radius={5}
+              interactive={false}
+              pathOptions={{ color: "white", weight: 1.5, fillColor: formatColor(other.format), fillOpacity: 1 }}
+            />
+          ))
+        )}
         {nearestOutside(data).map((point) => (
           <CircleMarker
             key={point.t}
@@ -265,6 +326,16 @@ export function EvidenceMap({ data, inert, onPick }: EvidenceMapProps) {
           />
         ))}
       </Pane>
+      {/* Not interactive, like the item marker: an estimate is not a point a click can open. */}
+      {others.filter(showsAloneEstimate).map((other) => (
+        <Marker
+          key={`${other.format} alone`}
+          position={[other.alone.lat, other.alone.lng]}
+          icon={aloneIcon(formatColor(other.format))}
+          interactive={false}
+          keyboard={false}
+        />
+      ))}
       {/* Not interactive: a click on it must still reach the map, to pick a point beneath it. Leaflet
           would otherwise leave it in the tab order as a button that does nothing. */}
       {marker && (

@@ -8,12 +8,17 @@ import {
   formatConfidence,
   formatDistance,
   independenceLine,
-  NOT_RECORDED,
+  OTHER_FORMATS_HEADING,
+  OTHER_FORMATS_NOTE,
+  otherAloneCell,
+  otherSideCell,
+  pointSide,
   REMATCH_HEADING,
   STANDING_LINE,
   warningSentence,
 } from "@/lib/evidence";
 import { formatDuration } from "@/lib/time";
+import { formatColor } from "@/lib/track";
 import { cn } from "@/lib/utils";
 import type { Bracket, Estimate, ProvenanceResponse, Warning } from "@/types";
 
@@ -136,6 +141,7 @@ export function PlacementCard({ item, placement, inert = false, onJump }: Placem
                 accuracyM: point.accuracy_m,
                 altitudeM: point.altitude_m,
                 gapS: point.gap_s,
+                side: pointSide(point.t, item.taken_at),
               }}
               chip={<BracketChip point={point} disabled={inert} onJump={onJump} />}
             />
@@ -155,30 +161,37 @@ export function PlacementCard({ item, placement, inert = false, onJump }: Placem
 
       {others.length > 0 && (
         <div>
-          <h3 className="text-sm font-semibold">Each format at this moment</h3>
+          <h3 className="text-sm font-semibold">{OTHER_FORMATS_HEADING}</h3>
           <table className="mt-1 w-full text-left text-xs">
             <thead className="text-muted-foreground">
               <tr>
                 <th scope="col" className="font-normal">Format</th>
-                <th scope="col" className="font-normal">Gap</th>
-                <th scope="col" className="font-normal">Accuracy</th>
-                <th scope="col" className="font-normal">Distance</th>
+                <th scope="col" className="font-normal">Before</th>
+                <th scope="col" className="font-normal">After</th>
+                <th scope="col" className="font-normal">Alone</th>
               </tr>
             </thead>
             <tbody>
               {others.map((other) => (
                 <tr key={other.format}>
                   <td className="break-all pr-2">
+                    {/* The colour of this format's line, points and diamond on the map. */}
+                    <span
+                      aria-hidden="true"
+                      className="mr-1 inline-block h-2 w-2 rounded-full align-middle"
+                      style={{ backgroundColor: formatColor(other.format) }}
+                    />
                     {other.format}
                     {other.used && <span className={cn(chipClass, "ml-1")}>used</span>}
                   </td>
-                  <td className="pr-2">{formatDuration(other.gap_s)}</td>
-                  <td className="pr-2">{other.accuracy_m === null ? NOT_RECORDED : formatDistance(other.accuracy_m)}</td>
-                  <td>{other.distance_m === null ? NOT_RECORDED : formatDistance(other.distance_m)}</td>
+                  <td className="pr-2">{otherSideCell(other.before)}</td>
+                  <td className="pr-2">{otherSideCell(other.after)}</td>
+                  <td>{otherAloneCell(other)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+          <p className="mt-1 text-xs text-muted-foreground">{OTHER_FORMATS_NOTE}</p>
         </div>
       )}
 

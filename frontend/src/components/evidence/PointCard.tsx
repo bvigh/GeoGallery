@@ -12,6 +12,7 @@ export interface PointDetails {
   accuracyM?: number | null;
   altitudeM?: number | null;
   gapS: number | null; // from the item's capture time; null when the item has none
+  side?: "before" | "after" | null; // which side of the capture time; null at the same instant
 }
 
 // A point picked on the map, with its one-word kind.
@@ -63,7 +64,9 @@ export function PointFacts({ point, chip }: { point: PointDetails; chip: ReactNo
       <dl className="mt-1 space-y-0.5 text-xs">
         {file && <Fact label="File">{file}</Fact>}
         <InstantFacts iso={point.t} />
-        {point.gapS !== null && <Fact label="Gap">{formatDuration(point.gapS)}</Fact>}
+        {point.gapS !== null && (
+          <Fact label="Gap">{point.side ? `${formatDuration(point.gapS)} ${point.side}` : formatDuration(point.gapS)}</Fact>
+        )}
         {point.accuracyM !== undefined && (
           <Fact label="Accuracy">{point.accuracyM === null ? NOT_RECORDED : formatDistance(point.accuracyM)}</Fact>
         )}

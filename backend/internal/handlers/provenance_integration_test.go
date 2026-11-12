@@ -411,43 +411,77 @@ func TestProvenance_OthersOneRowPerFormat(t *testing.T) {
 
 	insertTrack(t, f.pool, owner, "gpx:far.gpx", provOffset(-40*time.Minute), provLat, provLng)
 	insertTrackDetail(t, f.pool, owner, "gpx:near.gpx", provOffset(-10*time.Minute), provLat, provLng, &accuracy, nil)
+	insertTrack(t, f.pool, owner, "gpx:far.gpx", provOffset(25*time.Minute), provLat2, provLng2)
 	// Two unknown prefixes at the same distance: two rows, each as written, ordered by prefix.
 	insertTrack(t, f.pool, owner, "strava:ride", provOffset(-5*time.Minute), provLat, provLng)
 	insertTrack(t, f.pool, owner, "komoot:tour", provOffset(5*time.Minute), provLat2, provLng2)
 	insertTrack(t, f.pool, owner, "exif", provOffset(20*time.Minute), provLat, provLng)
 	insertTrack(t, f.pool, owner, "google_timeline:r.json", provOffset(70*time.Minute), provLat, provLng) // outside the window
 
-	want := []struct {
-		format, source string
-		gapS           float64
-		used           bool
-	}{
-		{"komoot", "komoot:tour", 300, true},
-		{"strava", "strava:ride", 300, true},
-		{"gpx", "gpx:near.gpx", 600, false},
-		{"exif", "exif", 1200, false},
+	type side struct {
+		source string
+		gapS   float64
+		used   bool
 	}
-	check := func(t *testing.T, got []provenanceOtherFormat) {
+	want := []struct {
+		format        string
+		before, after *side
+		shape         geo.Shape
+	}{
+		// gpx surrounds the item, with its nearer file on each side; the rest have one side only.
+		{"gpx", &side{"gpx:near.gpx", 600, false}, &side{"gpx:far.gpx", 1500, false}, geo.ShapeTwoSided},
+		{"komoot", nil, &side{"komoot:tour", 300, true}, geo.ShapeOneSided},
+		{"strava", &side{"strava:ride", 300, true}, nil, geo.ShapeOneSided},
+		{"exif", nil, &side{"exif", 1200, false}, geo.ShapeOneSided},
+	}
+	checkSide := func(t *testing.T, label string, want *side, got *provenanceOtherPoint) {
+		t.Helper()
+		if want == nil {
+			assert.Nil(t, got, label)
+			return
+		}
+		require.NotNil(t, got, label)
+		assert.Equal(t, want.source, got.Source, label)
+		assert.InDelta(t, want.gapS, got.GapS, 1e-6, label)
+		assert.Equal(t, want.used, got.Used, label)
+		assert.False(t, got.Self, label)
+		require.NotNil(t, got.DistanceM, label)
+	}
+	check := func(t *testing.T, got []provenanceOtherFormat, reference position) {
+		t.Helper()
 		require.Len(t, got, len(want))
 		for i, w := range want {
-			assert.Equal(t, w.format, got[i].Format, "row %d", i)
-			assert.Equal(t, w.source, got[i].Source, "row %d", i)
-			assert.InDelta(t, w.gapS, got[i].GapS, 1e-6, "row %d", i)
-			assert.Equal(t, w.used, got[i].Used, "row %d", i)
-			require.NotNil(t, got[i].DistanceM, "row %d", i)
+			row := got[i]
+			assert.Equal(t, w.format, row.Format, "row %d", i)
+			checkSide(t, w.format+" before", w.before, row.Before)
+			checkSide(t, w.format+" after", w.after, row.After)
+			assert.Equal(t, string(w.shape), row.Alone.Shape, w.format)
+			assert.Equal(t, w.format == "komoot" || w.format == "strava", row.Used, w.format)
+
+			// The estimate alone is the matcher's arithmetic on this format's points.
+			var before, after *geo.Point
+			if row.Before != nil {
+				before = &geo.Point{Lat: row.Before.Lat, Lng: row.Before.Lng, At: row.Before.T}
+			}
+			if row.After != nil {
+				after = &geo.Point{Lat: row.After.Lat, Lng: row.After.Lng, At: row.After.T}
+			}
+			e := geo.Explain(before, after, provTime, time.Hour)
+			assert.InDelta(t, e.Lat, row.Alone.Lat, 1e-9, w.format)
+			assert.InDelta(t, e.Lng, row.Alone.Lng, 1e-9, w.format)
+			assert.InDelta(t, e.Confidence, row.Alone.Confidence, 1e-9, w.format)
+			require.NotNil(t, row.Alone.DistanceM, w.format)
+			assert.InDelta(t, geo.HaversineKm(reference.lat, reference.lng, e.Lat, e.Lng)*1000, *row.Alone.DistanceM, 1e-6, w.format)
 		}
-		assert.Equal(t, &accuracy, got[2].AccuracyM)
-		assert.Nil(t, got[0].AccuracyM)
+		assert.Equal(t, &accuracy, got[0].Before.AccuracyM)
+		assert.Nil(t, got[0].After.AccuracyM)
 	}
 
 	t.Run("distance from now when there is no stored position", func(t *testing.T) {
 		got := f.get(t, owner, f.item(t, owner, provItem{filename: "pending.jpg", takenAt: provAt}))
 
 		require.Equal(t, placementPending, got.Placement.State)
-		check(t, got.Placement.Others)
-		now := got.Placement.Now
-		wantM := geo.HaversineKm(now.Lat, now.Lng, got.Placement.Others[0].Lat, got.Placement.Others[0].Lng) * 1000
-		assert.InDelta(t, wantM, *got.Placement.Others[0].DistanceM, 1e-6)
+		check(t, got.Placement.Others, position{lat: got.Placement.Now.Lat, lng: got.Placement.Now.Lng})
 	})
 
 	t.Run("distance from the stored position when there is one", func(t *testing.T) {
@@ -456,20 +490,74 @@ func TestProvenance_OthersOneRowPerFormat(t *testing.T) {
 			lat: ptr(storedLat), lng: ptr(storedLng), gpsSource: ptr("interpolated"), confidence: ptr(0.5)}))
 
 		require.Equal(t, placementStale, got.Placement.State)
-		check(t, got.Placement.Others)
-		wantM := geo.HaversineKm(storedLat, storedLng, got.Placement.Others[0].Lat, got.Placement.Others[0].Lng) * 1000
-		assert.InDelta(t, wantM, *got.Placement.Others[0].DistanceM, 1e-6)
+		check(t, got.Placement.Others, position{lat: storedLat, lng: storedLng})
 	})
 
-	t.Run("an own position has rows and none is used", func(t *testing.T) {
-		got := f.get(t, owner, f.item(t, owner, provItem{filename: "own.jpg", takenAt: provAt,
+	t.Run("an own position has rows, none used, and its own point is marked", func(t *testing.T) {
+		g := newProvenanceFixture(t)
+		owner := createUser(t, g.pool, "owner")
+		insertTrack(t, g.pool, owner, "exif", provAt, provLat, provLng) // the photo's own point
+		insertTrack(t, g.pool, owner, "gpx:a.gpx", provOffset(-time.Minute), provLat2, provLng2)
+
+		got := g.get(t, owner, g.item(t, owner, provItem{filename: "own.jpg", takenAt: provAt,
 			lat: ptr(provLat), lng: ptr(provLng), gpsSource: ptr("exif")}))
 
-		require.Len(t, got.Placement.Others, len(want))
+		require.Equal(t, placementOwnPosition, got.Placement.State)
+		require.Len(t, got.Placement.Others, 2)
+		own := got.Placement.Others[0]
+		assert.Equal(t, "exif", own.Format)
+		assert.Equal(t, string(geo.ShapeExact), own.Alone.Shape)
+		require.NotNil(t, own.Before)
+		assert.True(t, own.Before.Self)
+		assert.True(t, own.After.Self)
+		gpx := got.Placement.Others[1]
+		assert.False(t, gpx.Before.Self)
+		assert.InDelta(t, geo.HaversineKm(provLat, provLng, provLat2, provLng2)*1000, *gpx.Alone.DistanceM, 1e-6,
+			"the distance from the photo's own position is this format's error at that moment")
 		for _, row := range got.Placement.Others {
-			assert.False(t, row.Used, row.Source)
+			assert.False(t, row.Used, row.Format)
 		}
 	})
+}
+
+// A format's own bracket skips every other format, however close.
+func TestProvenance_OthersSkipOtherFormats(t *testing.T) {
+	f := newProvenanceFixture(t)
+	owner := createUser(t, f.pool, "owner")
+	insertTrack(t, f.pool, owner, "google_timeline:r.json", provOffset(-50*time.Minute), provLat, provLng)
+	insertTrack(t, f.pool, owner, "google_timeline:r.json", provOffset(45*time.Minute), provLat2, provLng2)
+	for _, offset := range []time.Duration{-3 * time.Second, -2 * time.Second, -time.Second, time.Second, 2 * time.Second} {
+		insertTrack(t, f.pool, owner, "nmea:log.nmea", provOffset(offset), provLat2, provLng)
+	}
+
+	got := f.get(t, owner, f.item(t, owner, provItem{takenAt: provAt}))
+
+	require.Len(t, got.Placement.Others, 2)
+	nmea, timeline := got.Placement.Others[0], got.Placement.Others[1]
+	assert.Equal(t, "nmea", nmea.Format)
+	assert.True(t, nmea.Used)
+	assert.Equal(t, "google_timeline", timeline.Format)
+	assert.False(t, timeline.Used, "the matcher took the logger's points")
+	assert.InDelta(t, 3000, timeline.Before.GapS, 1e-6)
+	assert.InDelta(t, 2700, timeline.After.GapS, 1e-6)
+	assert.Equal(t, string(geo.ShapeTwoSided), timeline.Alone.Shape)
+}
+
+func TestProvenance_OthersAreCapped(t *testing.T) {
+	f := newProvenanceFixture(t)
+	owner := createUser(t, f.pool, "owner")
+	for i := range maxOtherFormats + 2 {
+		insertTrack(t, f.pool, owner, fmt.Sprintf("f%02d:x", i), provOffset(time.Duration(i+1)*time.Minute), provLat, provLng)
+	}
+
+	got := f.get(t, owner, f.item(t, owner, provItem{takenAt: provAt}))
+
+	require.Len(t, got.Placement.Others, maxOtherFormats)
+	for i, row := range got.Placement.Others {
+		assert.Equal(t, fmt.Sprintf("f%02d", i), row.Format, "the nearest formats are kept")
+		require.NotNil(t, row.After)
+		assert.Equal(t, fmt.Sprintf("f%02d:x", i), row.After.Source, "a format beyond the cap is still excluded")
+	}
 }
 
 func TestProvenance_IndependentExcludesDerivedPoints(t *testing.T) {
@@ -971,7 +1059,12 @@ func TestProvenance_NonUTCProcessStillSendsUTC(t *testing.T) {
 					} `json:"before"`
 				} `json:"independent"`
 				Others []struct {
-					T string `json:"t"`
+					Before *struct {
+						T string `json:"t"`
+					} `json:"before"`
+					After *struct {
+						T string `json:"t"`
+					} `json:"after"`
 				} `json:"others"`
 			} `json:"placement"`
 			Context struct {
@@ -993,7 +1086,12 @@ func TestProvenance_NonUTCProcessStillSendsUTC(t *testing.T) {
 		assertUTC(t, "independent.before.t", raw.Placement.Independent.Before.T)
 		require.NotEmpty(t, raw.Placement.Others)
 		for _, row := range raw.Placement.Others {
-			assertUTC(t, "others.t", row.T)
+			if row.Before != nil {
+				assertUTC(t, "others.before.t", row.Before.T)
+			}
+			if row.After != nil {
+				assertUTC(t, "others.after.t", row.After.T)
+			}
 		}
 		require.Len(t, raw.Context.Windows, 1)
 		assertUTC(t, "windows.from", raw.Context.Windows[0].From)

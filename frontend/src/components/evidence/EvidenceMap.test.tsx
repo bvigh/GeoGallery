@@ -4,10 +4,10 @@ import L from "leaflet";
 import { api } from "@/api/client";
 import { EvidenceMap } from "@/components/evidence/EvidenceMap";
 import { EvidenceView } from "@/components/evidence/EvidenceView";
-import { makeBracket, makeEstimate, makeResponse } from "@/components/evidence/evidenceTestUtils";
+import { makeBracket, makeEstimate, makeOtherFormat, makeOtherPoint, makeResponse } from "@/components/evidence/evidenceTestUtils";
 import { TOP_MARKER_Z_INDEX_OFFSET } from "@/components/map/markers";
 import { POINT_HIT_RADIUS_PX } from "@/lib/track";
-import type { OtherFormat, ProvenanceResponse } from "@/types";
+import type { ProvenanceResponse } from "@/types";
 
 // Real Leaflet in jsdom: nothing is painted, but the map's layers are what EvidenceMap gave it.
 
@@ -38,21 +38,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
-
-function other(overrides: Partial<OtherFormat> = {}): OtherFormat {
-  return {
-    format: "nmea",
-    source: "nmea:a.nmea",
-    t: "2000-01-01T00:00:30Z",
-    lat: 10.3,
-    lng: 20.3,
-    gap_s: 30,
-    accuracy_m: null,
-    distance_m: 100,
-    used: false,
-    ...overrides,
-  };
-}
 
 function renderMap(data: ProvenanceResponse, { inert = false, onPick = vi.fn() } = {}) {
   const tree = (d: ProvenanceResponse) => <EvidenceMap data={d} inert={inert} onPick={onPick} />;
@@ -205,13 +190,65 @@ describe("EvidenceMap", () => {
     expect(tooltip.getLatLng()!.lng).toBeCloseTo(22.1, 1);
   });
 
-  it("draws a dot per format from others", () => {
-    const { layers } = renderMap(
-      makeResponse("a", {
-        placement: { now: null, state: "manual", others: [other(), other({ format: "gpx", source: "gpx:b.gpx" })] },
-      })
-    );
-    expect(layers(L.CircleMarker)).toHaveLength(2);
+  describe("each format on its own", () => {
+    const thinLines = (layers: ReturnType<typeof renderMap>["layers"]) =>
+      layers(L.Polyline).filter((line) => !(line instanceof L.CircleMarker) && line.options.dashArray === "4 6");
+    const diamonds = (layers: ReturnType<typeof renderMap>["layers"]) =>
+      layers(L.Marker).filter((marker) => (marker.options.icon as L.DivIcon).options.html?.toString().includes("rotate(45deg)"));
+    const oneSided = makeOtherFormat({
+      format: "gpx",
+      before: makeOtherPoint({ source: "gpx:b.gpx", lat: 10.5, lng: 20.5 }),
+      after: null,
+      alone: { lat: 10.5, lng: 20.5, shape: "one_sided", confidence: 0.4, distance_m: 900 },
+    });
+
+    it("draws its points in its colour, a thin line between them and a diamond where it alone would put the item", () => {
+      const { layers } = renderMap(
+        makeResponse("a", { placement: { now: null, state: "manual", others: [makeOtherFormat(), oneSided] } })
+      );
+
+      const dots = layers(L.CircleMarker);
+      expect(dots.map((dot) => [dot.getLatLng().lat, dot.options.fillColor])).toEqual(
+        expect.arrayContaining([
+          [10.3, "#7c3aed"],
+          [10.4, "#7c3aed"],
+          [10.5, "#2563eb"],
+        ])
+      );
+      expect(dots).toHaveLength(3);
+      const [line] = thinLines(layers);
+      expect((line.getLatLngs() as L.LatLng[]).map((p) => [p.lat, p.lng])).toEqual([
+        [10.3, 20.3],
+        [10.4, 20.4],
+      ]);
+      expect(thinLines(layers)).toHaveLength(1);
+      const [diamond] = diamonds(layers);
+      expect(diamonds(layers)).toHaveLength(1);
+      expect(diamond.getLatLng()).toEqual(L.latLng(10.33, 20.33));
+      expect((diamond.options.icon as L.DivIcon).options.html).toContain("#7c3aed");
+    });
+
+    it("draws nothing twice: the estimate's own points, their pair and the item's own point", () => {
+      const used = makeOtherFormat({
+        before: makeOtherPoint({ t: "2000-01-01T00:00:00Z", lat: 10, lng: 20, used: true }),
+        after: makeOtherPoint({ t: "2000-01-01T00:03:00Z", lat: 10.2, lng: 20.2, used: true }),
+        used: true,
+      });
+      const own = makeOtherPoint({ source: "exif", t: "2000-01-01T00:01:00Z", lat: 10.1, lng: 20.1, self: true });
+      const self = makeOtherFormat({ format: "exif", before: own, after: own, alone: { lat: 10.1, lng: 20.1, shape: "exact", confidence: 1, distance_m: 0 } });
+      const { layers } = renderMap(makeResponse("a", { placement: { others: [used, self] } }));
+
+      expect(layers(L.CircleMarker)).toHaveLength(2); // the bracket's
+      expect(thinLines(layers)).toHaveLength(0);
+      expect(diamonds(layers)).toHaveLength(0);
+    });
+
+    it("keeps the diamonds out of the way of a click and out of the tab order", () => {
+      const { layers } = renderMap(makeResponse("a", { placement: { others: [makeOtherFormat()] } }));
+      const [diamond] = diamonds(layers);
+      expect(diamond.options.interactive).toBe(false);
+      expect(diamond.getElement()).not.toHaveAttribute("tabindex");
+    });
   });
 
   it("draws the context track", () => {
@@ -242,10 +279,12 @@ describe("EvidenceMap", () => {
       expect(Number.isFinite(map.getZoom())).toBe(true);
     });
 
-    it("covers the marker, the bracket points and the others dots", () => {
+    it("covers the marker, the bracket points and every format's own points", () => {
       const fit = vi.spyOn(L.Map.prototype, "fitBounds");
       const { map } = renderMap(
-        makeResponse("a", { placement: { others: [other({ lat: 40, lng: 50 })] } })
+        makeResponse("a", {
+          placement: { others: [makeOtherFormat({ after: makeOtherPoint({ t: "2000-01-01T00:02:00Z", lat: 40, lng: 50 }) })] },
+        })
       );
       sizeMap(map);
       const bounds = boundsOf(fit);
@@ -346,6 +385,12 @@ describe("EvidenceMap", () => {
       );
       click(map, pixel(map, 10.15, 20.15));
       expect(onPick.mock.calls[0][0]).toMatchObject({ kind: "another photo or pin", gapS: 30 });
+    });
+
+    it("opens a format's own point, with its side of the capture time", () => {
+      const { map, onPick } = renderMap(makeResponse("a", { placement: { others: [makeOtherFormat()] } }));
+      click(map, pixel(map, 10.4, 20.4));
+      expect(onPick.mock.calls[0][0]).toMatchObject({ format: "nmea", gapS: 60, side: "after", kind: "log" });
     });
 
     it("prefers the bracket over the same row in the context track", () => {

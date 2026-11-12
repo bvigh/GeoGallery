@@ -14,12 +14,17 @@ import {
   ITEM_GONE,
   leadSentence,
   NOT_OWNER,
+  otherAloneCell,
+  otherFormatPoints,
+  otherSideCell,
+  pointSide,
   REMATCH_FAILED,
   REMATCH_HEADING,
   REMATCH_SEGMENT_LABEL,
   REREAD_NOT_RECORDED,
   rereadSentence,
   shapeSentence,
+  showsAloneEstimate,
   STANDING_LINE,
   stateBadge,
   timeOriginChip,
@@ -32,6 +37,8 @@ import type {
   CaptureEvidence,
   Estimate,
   FileReread,
+  OtherFormat,
+  OtherPoint,
   OutsidePoint,
   PlacementState,
   ProvenanceResponse,
@@ -853,5 +860,77 @@ describe("formatDistance", () => {
     [125000, "125.0 km"],
   ])("%d metres", (meters, want) => {
     expect(formatDistance(meters)).toBe(want);
+  });
+});
+
+describe("each format on its own", () => {
+  const point = (overrides: Partial<OtherPoint> = {}): OtherPoint => ({
+    source: "gpx:a.gpx",
+    t: "2000-01-01T00:00:30Z",
+    lat: 10,
+    lng: 20,
+    gap_s: 30,
+    accuracy_m: null,
+    distance_m: 100,
+    used: false,
+    self: false,
+    ...overrides,
+  });
+  const row = (overrides: Partial<OtherFormat> = {}): OtherFormat => ({
+    format: "gpx",
+    before: point(),
+    after: point({ t: "2000-01-01T00:02:00Z", gap_s: 60 }),
+    alone: { lat: 10, lng: 20, shape: "two_sided", confidence: 0.9, distance_m: 2500 },
+    used: false,
+    ...overrides,
+  });
+
+  describe("otherFormatPoints", () => {
+    it("lists both sides, earlier first", () => {
+      expect(otherFormatPoints(row()).map((p) => p.t)).toEqual(["2000-01-01T00:00:30Z", "2000-01-01T00:02:00Z"]);
+    });
+    it("lists a point at the exact time once", () => {
+      const exact = point({ gap_s: 0 });
+      expect(otherFormatPoints({ before: exact, after: { ...exact } })).toHaveLength(1);
+    });
+    it("lists one side", () => {
+      expect(otherFormatPoints({ before: null, after: point() })).toHaveLength(1);
+    });
+  });
+
+  it.each<[string, OtherPoint | null, string]>([
+    ["a gap", point({ gap_s: 90 }), "1 min 30 s"],
+    ["no point on that side", null, "none"],
+    ["the item's own point", point({ gap_s: 0, self: true }), "this item"],
+  ])("a side cell: %s", (_name, side, want) => {
+    expect(otherSideCell(side)).toBe(want);
+  });
+
+  it.each<[string, OtherFormat, string]>([
+    ["a distance", row(), "2.5 km"],
+    ["no position to measure from", row({ alone: { lat: 10, lng: 20, shape: "two_sided", confidence: 0.9, distance_m: null } }), "not recorded"],
+    ["only the item's own point", row({ before: point({ self: true }), after: point({ self: true }) }), "this item"],
+    ["the own point and another", row({ before: point({ self: true }) }), "2.5 km"],
+  ])("the alone cell: %s", (_name, other, want) => {
+    expect(otherAloneCell(other)).toBe(want);
+  });
+
+  it.each<[string, OtherFormat, boolean]>([
+    ["a pair of its own", row(), true],
+    ["one side, which sits on its point", row({ after: null, alone: { lat: 10, lng: 20, shape: "one_sided", confidence: 0.5, distance_m: 1 } }), false],
+    ["an exact point", row({ alone: { lat: 10, lng: 20, shape: "exact", confidence: 1, distance_m: 1 } }), false],
+    ["the estimate's own pair", row({ before: point({ used: true }), after: point({ used: true }), used: true }), false],
+    ["one of the estimate's points and one of its own", row({ before: point({ used: true }), used: true }), true],
+  ])("marks where it alone would place the item: %s", (_name, other, want) => {
+    expect(showsAloneEstimate(other)).toBe(want);
+  });
+
+  it.each<[string, string | null, "before" | "after" | null]>([
+    ["2000-01-01T00:00:30Z", "2000-01-01T00:01:00Z", "before"],
+    ["2000-01-01T00:01:30Z", "2000-01-01T00:01:00Z", "after"],
+    ["2000-01-01T00:01:00Z", "2000-01-01T00:01:00Z", null],
+    ["2000-01-01T00:01:00Z", null, null],
+  ])("pointSide(%s, %s)", (t, takenAt, want) => {
+    expect(pointSide(t, takenAt)).toBe(want);
   });
 });

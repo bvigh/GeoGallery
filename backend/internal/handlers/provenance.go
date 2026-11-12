@@ -221,8 +221,18 @@ type provenanceOutsidePoint struct {
 	GapS   float64   `json:"gap_s"`
 }
 
+// provenanceOtherFormat is one format's own view of the item's moment: its nearest point on each
+// side within the match window, and where those points alone would place the item. It shows the
+// formats the matcher passed over beside the ones it used.
 type provenanceOtherFormat struct {
-	Format    string    `json:"format"` // the raw prefix, so an unknown one is shown as written
+	Format string                `json:"format"` // the raw prefix, so an unknown one is shown as written
+	Before *provenanceOtherPoint `json:"before"` // nil when the format has no point on that side within the window
+	After  *provenanceOtherPoint `json:"after"`  // the same row as Before when it is at the item's exact time
+	Alone  provenanceAlone       `json:"alone"`
+	Used   bool                  `json:"used"` // one of its points is the estimate's before or after point
+}
+
+type provenanceOtherPoint struct {
 	Source    string    `json:"source"`
 	T         time.Time `json:"t"`
 	Lat       float64   `json:"lat"`
@@ -230,7 +240,17 @@ type provenanceOtherFormat struct {
 	GapS      float64   `json:"gap_s"`
 	AccuracyM *float64  `json:"accuracy_m"`
 	DistanceM *float64  `json:"distance_m"` // from the position on the map
-	Used      bool      `json:"used"`       // the row is this estimate's before or after point
+	Used      bool      `json:"used"`       // the row is the estimate's before or after point
+	Self      bool      `json:"self"`       // the item's own exif or manual point
+}
+
+// provenanceAlone is where one format's points alone place the item, by geo.Explain.
+type provenanceAlone struct {
+	Lat        float64  `json:"lat"`
+	Lng        float64  `json:"lng"`
+	Shape      string   `json:"shape"`
+	Confidence float64  `json:"confidence"`
+	DistanceM  *float64 `json:"distance_m"` // from the position on the map
 }
 
 type provenanceWarning struct {
@@ -488,7 +508,7 @@ func (h *ProvenanceHandler) placement(ctx context.Context, ownerID string, item 
 			return provenancePlacement{}, err
 		}
 	}
-	if p.Others, err = h.otherFormats(ctx, ownerID, takenAt, reference, p.Now); err != nil {
+	if p.Others, err = h.otherFormats(ctx, ownerID, item, takenAt, reference, p.Now); err != nil {
 		return provenancePlacement{}, err
 	}
 	p.Warnings = placementWarnings(p.Now)
@@ -678,44 +698,137 @@ func (h *ProvenanceHandler) outsidePoint(ctx context.Context, sql, ownerID strin
 	return &p, nil
 }
 
-// One row per raw format prefix, the nearest to the item's time, from one scan of the window. The
-// format is computed after the time-range scan (see the note in track.go).
-const provenanceOthersSQL = `
-	SELECT DISTINCT ON (split_part(source, ':', 1))
-	       source, recorded_at, ST_Y(location::geometry), ST_X(location::geometry), accuracy_m
-	FROM gps_tracks
-	WHERE owner_id = $1 AND recorded_at BETWEEN $2 AND $3
-	ORDER BY split_part(source, ':', 1), abs(extract(epoch FROM recorded_at - $4::timestamptz)), recorded_at, source
+// Every raw format prefix with a point in the window, nearest to the item's time first, from one
+// scan of the window. The format is computed after the time-range scan (see the note in track.go).
+const provenanceFormatsSQL = `
+	SELECT prefix FROM (
+		SELECT DISTINCT ON (split_part(source, ':', 1))
+		       split_part(source, ':', 1) AS prefix, abs(extract(epoch FROM recorded_at - $4::timestamptz)) AS gap_s
+		FROM gps_tracks
+		WHERE owner_id = $1 AND recorded_at BETWEEN $2 AND $3
+		ORDER BY split_part(source, ':', 1), gap_s
+	) formats
+	ORDER BY gap_s, prefix
 `
 
-func (h *ProvenanceHandler) otherFormats(ctx context.Context, ownerID string, takenAt time.Time, reference *position, now *provenanceEstimate) ([]provenanceOtherFormat, error) {
-	rows, err := h.db.Query(ctx, provenanceOthersSQL, ownerID, takenAt.Add(-h.matchWindow), takenAt.Add(h.matchWindow), takenAt)
-	if err != nil {
-		return nil, fmt.Errorf("other formats: %w", err)
-	}
-	defer rows.Close()
+// maxOtherFormats caps the rows of placement.others, the formats nearest to the item's time kept.
+// Each row costs two bracket lookups, and a real library has about ten formats in all.
+const maxOtherFormats = 16
 
+// otherFormats gives every format in the window its own bracket: bracketingPoints with every other
+// format in the window excluded, so it is the matcher's own query, and geo.Explain on the result.
+func (h *ProvenanceHandler) otherFormats(ctx context.Context, ownerID string, item provenanceItem, takenAt time.Time,
+	reference *position, now *provenanceEstimate) ([]provenanceOtherFormat, error) {
+	prefixes, err := h.formatsInWindow(ctx, ownerID, takenAt)
+	if err != nil {
+		return nil, err
+	}
 	others := []provenanceOtherFormat{}
-	for rows.Next() {
-		var o provenanceOtherFormat
-		var at time.Time
-		if err := rows.Scan(&o.Source, &at, &o.Lat, &o.Lng, &o.AccuracyM); err != nil {
-			return nil, fmt.Errorf("scan other format: %w", err)
+	for i, prefix := range prefixes[:min(len(prefixes), maxOtherFormats)] {
+		exclude := slices.Concat(prefixes[:i], prefixes[i+1:])
+		before, after, err := bracketingPoints(ctx, h.db, ownerID, takenAt, h.matchWindow, bracketOptions{excludeFormats: exclude})
+		if err != nil {
+			return nil, fmt.Errorf("format bracket: %w", err)
 		}
-		o.Format = sourcePrefix(o.Source)
-		o.T = at.UTC()
-		o.GapS = gapSeconds(at, takenAt)
-		o.DistanceM = distanceFrom(reference, o.Lat, o.Lng)
-		o.Used = now != nil && (isBracketRow(now.Before, o.Source, o.T) || isBracketRow(now.After, o.Source, o.T))
-		others = append(others, o)
+		if row, ok := newOtherFormat(prefix, before, after, otherFormatFacts{
+			takenAt: takenAt, window: h.matchWindow, reference: reference, now: now, item: item,
+		}); ok {
+			others = append(others, row)
+		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read other formats: %w", err)
-	}
-	slices.SortFunc(others, func(a, b provenanceOtherFormat) int {
-		return cmp.Or(cmp.Compare(a.GapS, b.GapS), strings.Compare(a.Format, b.Format))
-	})
+	slices.SortFunc(others, compareOtherFormats)
 	return others, nil
+}
+
+func (h *ProvenanceHandler) formatsInWindow(ctx context.Context, ownerID string, takenAt time.Time) ([]string, error) {
+	rows, err := h.db.Query(ctx, provenanceFormatsSQL, ownerID, takenAt.Add(-h.matchWindow), takenAt.Add(h.matchWindow), takenAt)
+	if err != nil {
+		return nil, fmt.Errorf("formats in window: %w", err)
+	}
+	prefixes, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("read formats in window: %w", err)
+	}
+	return prefixes, nil
+}
+
+// otherFormatFacts is what newOtherFormat compares one format's points with.
+type otherFormatFacts struct {
+	takenAt   time.Time
+	window    time.Duration
+	reference *position           // the position on the map, or nil
+	now       *provenanceEstimate // the estimate with every format, or nil
+	item      provenanceItem
+}
+
+// newOtherFormat describes one format's bracket. ok is false when it has no point at all, which can
+// only happen when a row went away between the two queries.
+func newOtherFormat(prefix string, before, after *geo.Point, f otherFormatFacts) (provenanceOtherFormat, bool) {
+	e := geo.Explain(before, after, f.takenAt, f.window)
+	if !e.OK {
+		return provenanceOtherFormat{}, false
+	}
+	row := provenanceOtherFormat{
+		Format: prefix,
+		Before: f.otherPoint(before),
+		After:  f.otherPoint(after),
+		Alone: provenanceAlone{
+			Lat: e.Lat, Lng: e.Lng, Shape: string(e.Shape), Confidence: e.Confidence,
+			DistanceM: distanceFrom(f.reference, e.Lat, e.Lng),
+		},
+	}
+	row.Used = (row.Before != nil && row.Before.Used) || (row.After != nil && row.After.Used)
+	return row, true
+}
+
+func (f otherFormatFacts) otherPoint(p *geo.Point) *provenanceOtherPoint {
+	if p == nil {
+		return nil
+	}
+	at := p.At.UTC()
+	return &provenanceOtherPoint{
+		Source: p.Source, T: at, Lat: p.Lat, Lng: p.Lng, GapS: gapSeconds(p.At, f.takenAt), AccuracyM: p.AccuracyM,
+		DistanceM: distanceFrom(f.reference, p.Lat, p.Lng),
+		Used:      f.now != nil && (isBracketRow(f.now.Before, p.Source, at) || isBracketRow(f.now.After, p.Source, at)),
+		Self:      f.isOwnPoint(p),
+	}
+}
+
+// isOwnPoint reports whether p is the track point the item itself wrote: a point of the item's own
+// derived format, at its exact time and its stored position. Another photo taken in the same second
+// writes no point of its own, so the position decides.
+func (f otherFormatFacts) isOwnPoint(p *geo.Point) bool {
+	stored := storedPosition(f.item)
+	if f.item.GPSSource == nil || !isDerivedPrefix(*f.item.GPSSource) || sourcePrefix(p.Source) != *f.item.GPSSource ||
+		!p.At.Equal(f.takenAt) || stored == nil {
+		return false
+	}
+	return *distanceFrom(stored, p.Lat, p.Lng) <= placementMaxDeltaM
+}
+
+// compareOtherFormats orders formats by how closely they surround the item: formats with a point on
+// each side first, by the longer of their two gaps, then formats with points on one side only, by
+// that gap. The prefix breaks ties.
+func compareOtherFormats(a, b provenanceOtherFormat) int {
+	surround := func(o provenanceOtherFormat) (oneSided bool, gapS float64) {
+		if o.Before == nil || o.After == nil {
+			side := o.Before
+			if side == nil {
+				side = o.After
+			}
+			return true, side.GapS
+		}
+		return false, max(o.Before.GapS, o.After.GapS)
+	}
+	aOne, aGap := surround(a)
+	bOne, bGap := surround(b)
+	if aOne != bOne {
+		if aOne {
+			return 1
+		}
+		return -1
+	}
+	return cmp.Or(cmp.Compare(aGap, bGap), strings.Compare(a.Format, b.Format))
 }
 
 func isBracketRow(b *provenanceBracket, source string, at time.Time) bool {
