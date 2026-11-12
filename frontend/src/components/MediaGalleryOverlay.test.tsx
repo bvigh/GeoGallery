@@ -5,7 +5,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { api, ApiError } from "@/api/client";
 import { MediaGalleryOverlay } from "@/components/MediaGalleryOverlay";
 import { AuthContext } from "@/components/auth/AuthContext";
+import type { EvidenceViewProps } from "@/components/evidence/EvidenceView";
 import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
+import { formatInstant } from "@/lib/time";
 import { BACK_DEPTH_KEY } from "@/lib/useCloseOnBack";
 import type { Album, CurrentUser, MediaItem } from "@/types";
 
@@ -29,6 +31,16 @@ vi.mock("@/api/client", async (importOriginal) => {
     },
   };
 });
+
+// The latest props of the evidence view. EvidenceView.test.tsx tests the view itself; this file's
+// Leaflet mock is too narrow for its map.
+const evidence = vi.hoisted(() => ({ props: null as EvidenceViewProps | null }));
+vi.mock("@/components/evidence/EvidenceView", () => ({
+  EvidenceView: (props: EvidenceViewProps) => {
+    evidence.props = props;
+    return <div data-testid="evidence-view" data-media={props.mediaId} />;
+  },
+}));
 
 vi.mock("react-leaflet", () => ({
   MapContainer: ({ children }: { children: ReactNode }) => <div data-testid="map">{children}</div>,
@@ -239,6 +251,21 @@ describe("MediaGalleryOverlay", () => {
     expect(mockApi.get).toHaveBeenCalledWith("/media", { album_id: "a1", offset: "0" });
     expect(screen.getByText("Iceland")).toBeInTheDocument();
     expect(screen.getByText("by Bob")).toBeInTheDocument();
+  });
+
+  it("names the browser's zone beside the capture time", async () => {
+    const zone = vi
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({ timeZone: "Asia/Tokyo" } as Intl.ResolvedDateTimeFormatOptions);
+    renderOverlay();
+    await screen.findByText("1 / 2");
+
+    const label = screen.getByText(formatInstant(own.taken_at!, "Asia/Tokyo", { seconds: false }));
+    expect(label.textContent).toContain("Asia/Tokyo");
+    // Below sm the label sits beside the mini map, and the zone comes last: an ellipsis would take it first.
+    expect(label.className.split(/\s+/)).not.toContain("truncate");
+    expect(label).toHaveClass("break-words", "sm:truncate");
+    zone.mockRestore();
   });
 
   it("does not refetch when re-rendered with equal params", async () => {
@@ -772,6 +799,181 @@ describe("MediaGalleryOverlay", () => {
       fireEvent.click(screen.getByRole("button", { name: "Marker at 64.1,-21.9" }));
       expect(await screen.findByText("1 / 2")).toBeInTheDocument();
       expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
+    });
+  });
+
+  describe("Why here?", () => {
+    const first = makeItem("first", { taken_at: "2025-06-01T10:00:00Z" });
+    const bob = makeItem("bob", { taken_at: "2025-06-02T10:00:00Z", owner_id: "u-bob", owner_name: "Bob" });
+    const third = makeItem("third", { taken_at: "2025-06-03T10:00:00Z" });
+    const fourth = makeItem("fourth", { taken_at: "2025-06-04T10:00:00Z" });
+    const pano = makeItem("pano", { media_type: "photo_360", taken_at: "2025-06-01T10:00:00Z" });
+    const entry = () => screen.getByRole("button", { name: /Why here\?/ });
+    const toolbarButtons = () =>
+      within(screen.getByRole("button", { name: "Close gallery" }).parentElement!).getAllByRole("button");
+
+    async function openEvidence(items: MediaItem[], props: Partial<Props> = {}) {
+      mockApi.get.mockResolvedValue(items);
+      const view = renderOverlay(props);
+      await screen.findByText(`1 / ${items.length}`);
+      await userEvent.click(entry());
+      expect(screen.getByTestId("evidence-view")).toBeInTheDocument();
+      return view;
+    }
+
+    beforeEach(() => {
+      evidence.props = null;
+    });
+
+    it("makes the position label of an own item the entry point", async () => {
+      mockApi.get.mockResolvedValue([own]);
+      renderOverlay();
+      await screen.findByText("1 / 1");
+
+      const button = entry();
+      expect(button).toHaveAccessibleName(expect.stringContaining("Why here?"));
+      // The label sits in a pointer-events-none column.
+      expect(button).toHaveClass("pointer-events-auto", "touch:min-h-11");
+      expect(within(button).getByText("1 / 1")).toBeInTheDocument();
+      expect(button.querySelector("svg")).not.toBeNull();
+    });
+
+    it("keeps the label's text and adds no entry on a shared item", async () => {
+      mockApi.get.mockResolvedValue([shared]);
+      renderOverlay();
+      await screen.findByText("1 / 1");
+      expect(screen.getByText("1 / 1").closest("button")).toBeNull();
+      expect(screen.queryByRole("button", { name: /Why here\?/ })).not.toBeInTheDocument();
+      expect(screen.getByText(formatInstant(shared.taken_at!, Intl.DateTimeFormat().resolvedOptions().timeZone, { seconds: false }))).toBeInTheDocument();
+    });
+
+    it("adds no button to the toolbar", async () => {
+      const removable = { canRemoveFromAlbum: () => true, onRemoveFromAlbum: vi.fn() };
+      mockApi.get.mockResolvedValue([{ ...pano }]);
+      renderOverlay(removable);
+      await screen.findByText("1 / 1");
+      expect(toolbarButtons().map((b) => b.getAttribute("aria-label"))).toEqual([
+        "Albums",
+        "Edit GPS location",
+        "Edit default view",
+        "Remove from album",
+        "Delete media",
+        "Close gallery",
+      ]);
+    });
+
+    it("reaches an item without a location, which the map cannot show", async () => {
+      const unlocated = makeItem("unlocated", { lat: null, lng: null });
+      await openEvidence([unlocated]);
+      expect(evidence.props).toMatchObject({ mediaId: "unlocated", isOwn: true });
+    });
+
+    it("unmounts the viewer while the view is open, and brings it back", async () => {
+      mockApi.get.mockResolvedValue([pano]);
+      renderOverlay();
+      await screen.findByTestId("panorama");
+
+      await userEvent.click(entry());
+      expect(screen.queryByTestId("panorama")).not.toBeInTheDocument();
+
+      act(() => evidence.props!.onClose());
+      expect(await screen.findByTestId("panorama")).toBeInTheDocument();
+    });
+
+    it("keeps its keys off while the view is open", async () => {
+      const { props } = await openEvidence([first, third]);
+      await userEvent.keyboard("{ArrowRight}");
+      expect(screen.getByText("1 / 2")).toBeInTheDocument();
+      expect(evidence.props!.mediaId).toBe("first");
+
+      await userEvent.keyboard("{Escape}");
+      expect(props.onClose).not.toHaveBeenCalled();
+
+      act(() => evidence.props!.onClose());
+      await userEvent.keyboard("{ArrowRight}");
+      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      await userEvent.keyboard("{Escape}");
+      expect(props.onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not play a video from the keys meant for the view", async () => {
+      const { play } = stubMediaPlayback();
+      mockApi.get.mockResolvedValue([makeItem("v", { media_type: "video" })]);
+      renderOverlay();
+      await screen.findByText("1 / 1");
+      await userEvent.click(entry());
+      expect(document.querySelector("video")).toBeNull();
+
+      fireEvent.keyDown(document.body, { code: "Space", key: " " });
+      expect(play).not.toHaveBeenCalled();
+      play.mockRestore();
+    });
+
+    it("steps through own items only and wraps", async () => {
+      await openEvidence([first, bob, third, fourth]);
+
+      act(() => evidence.props!.onNext!());
+      expect(evidence.props!.mediaId).toBe("third");
+      act(() => evidence.props!.onNext!());
+      expect(evidence.props!.mediaId).toBe("fourth");
+      act(() => evidence.props!.onNext!());
+      expect(evidence.props!.mediaId).toBe("first");
+      act(() => evidence.props!.onPrev!());
+      expect(evidence.props!.mediaId).toBe("fourth");
+    });
+
+    it("keeps the gallery on the item the view shows", async () => {
+      await openEvidence([first, bob, third]);
+      act(() => evidence.props!.onNext!());
+      act(() => evidence.props!.onClose());
+      expect(await screen.findByText("3 / 3")).toBeInTheDocument();
+    });
+
+    it("counts only own items in the position", async () => {
+      await openEvidence([first, bob, third]);
+      expect(evidence.props!.position).toBe("1 / 2");
+      act(() => evidence.props!.onNext!());
+      expect(evidence.props!.position).toBe("2 / 2");
+    });
+
+    it("offers no stepping with fewer than two own items", async () => {
+      await openEvidence([first, bob]);
+      expect(evidence.props!.onPrev).toBeUndefined();
+      expect(evidence.props!.onNext).toBeUndefined();
+      expect(evidence.props!.position).toBeUndefined();
+    });
+
+    it("applies a saved location to its item and refetches the list", async () => {
+      await openEvidence([first, third]);
+      expect(mockApi.get).toHaveBeenCalledTimes(1);
+      const refetch = deferred<MediaItem[]>();
+      mockApi.get.mockReturnValue(refetch.promise);
+
+      act(() => evidence.props!.onLocationSaved("first", 12.5, 34.5));
+      expect(mockApi.get).toHaveBeenCalledTimes(2);
+      act(() => evidence.props!.onClose());
+      expect(await screen.findByRole("button", { name: "Marker at 12.5,34.5" })).toBeInTheDocument();
+      await act(async () => refetch.resolve([{ ...first, lat: 48.2, lng: 16.4 }, third]));
+    });
+
+    it("leaves the other items alone when the saved item is not in the gallery", async () => {
+      await openEvidence([first, third]);
+      mockApi.get.mockResolvedValue([first, third]);
+      act(() => evidence.props!.onLocationSaved("behind", 12.5, 34.5));
+      await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
+      expect(screen.queryByRole("button", { name: "Marker at 12.5,34.5" })).not.toBeInTheDocument();
+    });
+
+    it("refetches the list after a re-match, keeping the place", async () => {
+      await openEvidence([first, third]);
+      act(() => evidence.props!.onNext!());
+      mockApi.get.mockResolvedValue([first, { ...third, lat: 1, lng: 2 }]);
+
+      act(() => evidence.props!.onRematched());
+      await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
+      act(() => evidence.props!.onClose());
+      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(await screen.findByRole("button", { name: "Marker at 1,2" })).toBeInTheDocument();
     });
   });
 

@@ -25,4 +25,18 @@ export default defineConfig([
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
     },
   },
+  {
+    // Every time on an evidence surface names its clock, which only src/lib/time.ts guarantees.
+    files: ["src/components/evidence/**/*.{ts,tsx}", "src/lib/evidence.ts"],
+    ignores: ["**/*.test.{ts,tsx}"],
+    rules: {
+      "no-restricted-properties": [
+        "error",
+        ...["toLocaleString", "toLocaleTimeString", "toLocaleDateString"].map((property) => ({
+          property,
+          message: "Use formatInstant from src/lib/time.ts, which requires a zone and names it.",
+        })),
+      ],
+    },
+  },
 ]);

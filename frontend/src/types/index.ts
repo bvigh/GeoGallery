@@ -133,3 +133,214 @@ export interface GuessResult {
   time_score: number | null;
   total_score: number;
 }
+
+// "Why here?": GET /api/media/{id}/provenance and /provenance/file (docs/gps-debugging.md, Step 1).
+// Every instant is RFC 3339 in UTC.
+
+export type CaptureSource = "exif_original" | "exif_ifd0" | "container" | "mtime" | "none";
+export type ZoneRule = "gps" | "offset" | "camera";
+export type PlacementState =
+  | "current"
+  | "stale"
+  | "no_support"
+  | "pending"
+  | "no_bracket"
+  | "no_time"
+  | "own_position"
+  | "manual";
+export type BracketShape = "two_sided" | "one_sided" | "exact";
+
+// media.capture_evidence: how taken_at was derived, recorded at ingest. Every key is always present.
+export interface CaptureEvidence {
+  v: number;
+  by: "ingest" | "backfill";
+  src: CaptureSource;
+  zone: ZoneRule | null;
+  wall: string | null;
+  gps_utc: string | null;
+  wall_minus_gps_s: number | null;
+  offset_tag: string | null;
+  offset_ignored: boolean;
+  offset_used_min: number | null;
+  camera_zone: string; // the IANA name, or the literal "server zone (unset)"
+  camera_zone_utc_fallback: boolean;
+  make: string | null;
+  model: string | null;
+  exif_partial: boolean;
+  creation_time: string | null;
+  file_mtime: string | null;
+  duration_s: number | null;
+  encoder: string | null;
+  codec: string | null;
+  transcoded: boolean;
+}
+
+// The zone this server applies today.
+export interface ServerCameraZone {
+  name: string; // "server zone (unset)" when CAMERA_TIMEZONE is unset
+  set: boolean;
+  utc_fallback: boolean;
+  offset_now_min: number;
+}
+
+export interface TrackSource {
+  label: string;
+  format: string; // "other" when the prefix matches no known format
+  kind: "recorded" | "semantic" | "time_may_be_estimated" | "derived" | "other";
+}
+
+export interface TrackPoint {
+  t: string;
+  lat: number;
+  lng: number;
+  s: number; // index into sources
+  acc: number | null;
+  alt: number | null;
+}
+
+export interface TrackResponse {
+  windows: { from: string; to: string }[];
+  match_window_s: number;
+  total_points: number;
+  returned_points: number;
+  bucket_s: number; // 0 when nothing was downsampled
+  sources: TrackSource[];
+  points: TrackPoint[];
+}
+
+export interface Bracket {
+  source: string;
+  format: string;
+  kind: "log" | "exif" | "manual";
+  t: string;
+  lat: number;
+  lng: number;
+  accuracy_m: number | null;
+  altitude_m: number | null;
+  gap_s: number; // absolute distance in time from the item
+  origin: {
+    state: "linked" | "orphan" | "burst";
+    media: { id: string; filename: string }[];
+  } | null; // null for kind "log"
+}
+
+export interface Estimate {
+  lat: number;
+  lng: number;
+  confidence: number;
+  delta_m: number | null; // distance from the stored position; null when there is none
+  before: Bracket | null;
+  after: Bracket | null;
+  arithmetic: {
+    shape: BracketShape;
+    pair_gap_s: number | null; // null for one_sided
+    pair_km: number | null; // null for one_sided
+    t: number | null; // two_sided only: 0 at before, 1 at after
+    time_factor: number;
+    distance_factor: number | null; // null for one_sided
+    confidence: number;
+    implied_kmh: number | null; // two_sided only
+  };
+}
+
+export interface OutsidePoint {
+  source: string;
+  format: string;
+  t: string;
+  lat: number;
+  lng: number;
+  gap_s: number;
+}
+
+export interface OtherFormat {
+  format: string; // the raw prefix, so an unknown one is shown as written
+  source: string;
+  t: string;
+  lat: number;
+  lng: number;
+  gap_s: number;
+  accuracy_m: number | null;
+  distance_m: number | null; // from the position on the map
+  used: boolean; // the row is this estimate's before or after point
+}
+
+export type WarningCode = "pair_impossible" | "pair_far" | "logger_parked" | "confidence_zero" | "point_orphan";
+
+export interface Warning {
+  code: WarningCode;
+  level: "warn" | "info";
+}
+
+export interface ProvenanceResponse {
+  item: {
+    id: string;
+    filename: string;
+    media_type: MediaItem["media_type"];
+    taken_at: string | null;
+    created_at: string; // upload time
+    lat: number | null;
+    lng: number | null;
+    gps_source: MediaItem["gps_source"];
+    gps_confidence: number | null;
+    camera_model: string | null;
+    width_px: number | null;
+    height_px: number | null;
+    duration_sec: number | null;
+  };
+  time: {
+    recorded: "ingest" | "backfill" | "not_recorded";
+    evidence: CaptureEvidence | null; // null when not_recorded
+    server_camera_zone: ServerCameraZone;
+  };
+  placement: {
+    state: PlacementState;
+    window_s: number;
+    now: Estimate | null;
+    independent: {
+      lat: number;
+      lng: number;
+      confidence: number;
+      moved_m: number | null;
+      before: Bracket | null;
+      after: Bracket | null;
+    } | null;
+    nearest_outside: { before: OutsidePoint | null; after: OutsidePoint | null } | null;
+    others: OtherFormat[]; // never null
+    warnings: Warning[]; // never null
+  };
+  context: TrackResponse; // empty arrays when taken_at is null
+}
+
+// GET /api/media/{id}/provenance/file: the stored file read again with today's rules.
+export interface FileReread {
+  basis: "reread_now";
+  stored_taken_at: string | null;
+  uploaded_at: string;
+  file: {
+    wall_clock: string | null;
+    wall_tag: "DateTimeOriginal" | "DateTime" | null;
+    offset_tag: string | null;
+    offset_ignored: boolean;
+    gps_stamp: string | null;
+    wall_minus_gps_s: number | null;
+    make: string | null;
+    model: string | null;
+    video: {
+      creation_time: string | null;
+      duration_s: number | null;
+      encoder: string | null;
+      codec: string | null;
+    } | null;
+  };
+  rule_today: {
+    source: "exif_original" | "exif_ifd0" | "container";
+    zone_rule: ZoneRule | null;
+    offset_min: number | null; // null for a container time
+    zone_name: string | null; // set only when zone_rule is "camera"
+    taken_at: string;
+  } | null; // null when no capture time could be read
+  delta_s: number | null; // rule_today.taken_at minus stored, in seconds
+  class: "same" | "whole_offset" | "other" | "no_file_time" | "stored_has_no_time" | "unverifiable_transcoded";
+  checks: { id: string; level: "ok" | "warn" | "info"; delta_s: number | null }[];
+  tags: { name: string; value: string }[];
+}

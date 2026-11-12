@@ -43,7 +43,7 @@ function parseCoords(input: string): { lat: number; lng: number } | null {
 }
 
 interface Props {
-  item: MediaItem;
+  item: Pick<MediaItem, "id" | "filename" | "lat" | "lng">;
   onClose: () => void;
   onSaved: (lat: number, lng: number) => void;
 }

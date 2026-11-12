@@ -23,7 +23,7 @@
     <main>
       <p><a href="/">← GeoGallery</a></p>
       <h1>Privacy Policy</h1>
-      <p class="muted">Last updated: 2 November 2026</p>
+      <p class="muted">Last updated: 9 November 2026</p>
 
       <p>
         GeoGallery is a private, invite-only photo and video gallery with a map and a location-guessing game. It is
@@ -90,8 +90,14 @@
       <ul>
         <li>the file itself, unchanged, including any metadata embedded in it (EXIF);</li>
         <li>
-          metadata read from the file: the date and time it was taken, the camera's GPS position if present, the image
-          dimensions, the media type (photo, video, 360°) and the original file name;
+          metadata read from the file: the date and time it was taken, the camera's GPS position if present, the
+          camera make and model, the image or video dimensions, the video duration, the media type (photo, video,
+          360°) and the original file name;
+        </li>
+        <li>
+          how the capture time was derived: which time was used, the camera's clock as written, the time zone
+          information in the file, the photo's GPS timestamp, the video's container time and encoding, and the file's
+          modified time;
         </li>
         <li>the file's last-modified time sent by your browser, used when the file has no capture date;</li>
         <li>a fingerprint of the file, used only to skip duplicate uploads;</li>
@@ -118,9 +124,10 @@
       </ul>
       <p>
         GeoGallery uses imported tracks only to estimate where your own photos without GPS were taken, by matching
-        their capture time against your track. Your tracks are never shown to other users, never matched against
-        other users' media, and never combined with anyone else's data. GeoGallery also groups your media into trips
-        by date; trips are visible only to you.
+        their capture time against your track. Your tracks are also shown to you, and only you, to explain an
+        estimate. They are never shown to other users, never matched against other users' media, and never combined
+        with anyone else's data. GeoGallery also groups your media into trips by date; trips are visible only to
+        you.
       </p>
       <p>
         GeoGallery does not access your device's location. It only processes locations contained in files you

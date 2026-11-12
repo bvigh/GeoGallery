@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, ExternalLink, FolderMinus, MapPin, Rotate3d, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, FolderMinus, Info, MapPin, Rotate3d, Trash2 } from "lucide-react";
 import { Marker, useMap } from "react-leaflet";
 import L from "leaflet";
 import type { MediaItem } from "@/types";
@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { AlbumMenu } from "@/components/albums/AlbumMenu";
 import { EditLocationModal } from "@/components/EditLocationModal";
+import { EvidenceView } from "@/components/evidence/EvidenceView";
 import { EditViewModal } from "@/components/viewer/EditViewModal";
 import { MiniMapOverlay, type MiniMapSize } from "@/components/map/MiniMapOverlay";
 import { TOP_MARKER_Z_INDEX_OFFSET } from "@/components/map/markers";
@@ -19,6 +20,7 @@ import Panorama360 from "@/components/viewer/Panorama360";
 import Video360 from "@/components/viewer/Video360";
 import VideoDecodeNotice from "@/components/viewer/VideoDecodeNotice";
 import { ZoomableImage } from "@/components/viewer/ZoomableImage";
+import { browserTimeZone, formatInstant } from "@/lib/time";
 import { useVideoDecodeCheck } from "@/lib/video";
 
 // ── Map helpers ──────────────────────────────────────────────────────────────
@@ -218,6 +220,8 @@ export function MediaGalleryOverlay({
   // item, so a change of item under the editor (a removal finishing) closes it instead of showing
   // the next one with the old values, and coming back to the item does not reopen it.
   const [editing, setEditing] = useState<{ id: string; kind: "location" | "view" } | null>(null);
+  // Not an editor kind: the view steps between items by itself, so it is not tied to one.
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
   // The size chosen with the map's buttons; it outlives the map, which unmounts while loading.
   const [mapSize, setMapSize] = useState<MiniMapSize>("small");
   const urlCache = useRef<Map<string, string>>(new Map());
@@ -339,18 +343,26 @@ export function MediaGalleryOverlay({
     if (index !== -1) goTo(index);
   }
 
-  function handleLocationSaved(lat: number, lng: number) {
-    if (!currentItem) return;
+  function applyManualLocation(id: string, lat: number, lng: number) {
     // Optimistically update the saved item immediately
     setItems((prev) =>
       prev.map((m) =>
-        m.id === currentItem.id
+        m.id === id
           ? { ...m, lat, lng, gps_source: "manual" as const, gps_confidence: 1.0 }
           : m
       )
     );
+  }
+
+  function handleLocationSaved(lat: number, lng: number) {
+    if (!currentItem) return;
+    applyManualLocation(currentItem.id, lat, lng);
     setEditing(null);
-    // Re-fetch all media so GPS-matched neighbours get their updated coordinates
+    refreshItems();
+  }
+
+  // Re-fetch all media so GPS-matched neighbours get their updated coordinates
+  function refreshItems() {
     fetchAllMedia(paramsRef.current)
       .then((data) => {
         const sorted = sortByTakenAt(data);
@@ -434,19 +446,20 @@ export function MediaGalleryOverlay({
   const showItems = !loading && !!currentItem;
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < items.length - 1;
+  // The evidence view steps through own items only: provenance is a 404 for anyone else's.
+  const ownItems = items.filter((m) => m.owner_id === user.id);
+  const ownIndex = ownItems.findIndex((m) => m.id === currentItem?.id);
+  function stepOwn(delta: number) {
+    const next = ownItems[(ownIndex + delta + ownItems.length) % ownItems.length];
+    goTo(items.findIndex((m) => m.id === next.id));
+  }
   const hasMap = showItems && itemsWithGps.length > 0;
   // A large map covers the right edge (all of the bottom on a phone), so the arrows move into
   // the bottom row beside the position label.
   const mapLarge = hasMap && mapSize === "large";
   const isVideo = currentItem?.media_type === "video" || currentItem?.media_type === "video_360";
   const takenAt = currentItem?.taken_at
-    ? new Date(currentItem.taken_at).toLocaleString(undefined, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      })
+    ? formatInstant(currentItem.taken_at, browserTimeZone(), { seconds: false })
     : null;
   // Only while its item is current; the effect below forgets an editor whose item went away.
   const editorOpen = editing !== null && editing.id === currentItem?.id;
@@ -464,6 +477,8 @@ export function MediaGalleryOverlay({
 
   // Keyboard navigation
   useEffect(() => {
+    // The evidence view covers the gallery and handles the keys itself.
+    if (evidenceOpen) return;
     function onKey(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement)?.tagName;
       const editable = (e.target as HTMLElement)?.isContentEditable;
@@ -483,13 +498,14 @@ export function MediaGalleryOverlay({
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, currentIndex, items.length, editorOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [onClose, currentIndex, items.length, editorOpen, evidenceOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Not under an editor: its keys must not play the item it covers.
-  const videoKeys = useVideoKeys(videoRef, !editorOpen);
+  // Not under an editor or the evidence view: their keys must not play the item they cover.
+  const videoKeys = useVideoKeys(videoRef, !editorOpen && !evidenceOpen);
 
   function renderMedia() {
-    if (!currentItem) return null;
+    // Under the evidence view a video would keep its sound and a 360° viewer its WebGL context.
+    if (!currentItem || evidenceOpen) return null;
     if (!currentUrl) {
       return (
         <div className="flex h-full items-center justify-center text-white/40 text-sm">
@@ -554,6 +570,29 @@ export function MediaGalleryOverlay({
       />
     );
   }
+
+  const positionLabel =
+    "min-w-0 rounded-xl bg-black/50 px-3 py-1 text-sm text-white sm:flex sm:items-baseline sm:gap-2 sm:rounded-full";
+  // Spans: an own item's label is a button.
+  const positionBody = currentItem && (
+    <>
+      {takenAt && (
+        <span className="block break-words text-white/60 sm:order-last sm:shrink-0 sm:truncate">
+          <span className="hidden sm:inline">· </span>
+          {takenAt}
+        </span>
+      )}
+      <span className="flex min-w-0 items-baseline gap-2 sm:contents">
+        <span className="shrink-0 tabular-nums">
+          {currentIndex + 1} / {items.length}
+        </span>
+        {currentItem.filename && (
+          <span className="min-w-0 truncate text-white/80">· {currentItem.filename}</span>
+        )}
+        {isOwn && <Info className="h-3.5 w-3.5 shrink-0 self-center" aria-hidden="true" />}
+      </span>
+    </>
+  );
 
   return (
     <div className="fixed inset-0 z-[1000] overflow-hidden bg-black">
@@ -709,24 +748,23 @@ export function MediaGalleryOverlay({
             >
               {mapLarge && <NavButton direction="prev" placement="row" disabled={!hasPrev} onClick={goPrev} />}
 
-              {/* Position label. A portrait phone has room for two short lines beside the map:
-                  the date, then the position and the truncated file name. */}
-              <div className="min-w-0 rounded-xl bg-black/50 px-3 py-1 text-sm text-white sm:flex sm:items-baseline sm:gap-2 sm:rounded-full">
-                {takenAt && (
-                  <div className="truncate text-white/60 sm:order-last sm:shrink-0">
-                    <span className="hidden sm:inline">· </span>
-                    {takenAt}
-                  </div>
-                )}
-                <div className="flex min-w-0 items-baseline gap-2 sm:contents">
-                  <span className="shrink-0 tabular-nums">
-                    {currentIndex + 1} / {items.length}
-                  </span>
-                  {currentItem.filename && (
-                    <span className="min-w-0 truncate text-white/80">· {currentItem.filename}</span>
-                  )}
-                </div>
-              </div>
+              {/* Position label. On a portrait phone, beside the map: the date, which wraps so that
+                  its zone name at the end is never cut off, then the position and the truncated
+                  file name. */}
+              {isOwn ? (
+                // The toolbar has no room for another button on a phone, and the gallery is the
+                // only way to an item without a location.
+                <button
+                  type="button"
+                  className={cn(positionLabel, "pointer-events-auto text-left hover:bg-black/70 touch:min-h-11")}
+                  onClick={() => setEvidenceOpen(true)}
+                  aria-label={`Why here? ${currentItem.filename}`}
+                >
+                  {positionBody}
+                </button>
+              ) : (
+                <div className={positionLabel}>{positionBody}</div>
+              )}
 
               {mapLarge && <NavButton direction="next" placement="row" disabled={!hasNext} onClick={goNext} />}
             </div>
@@ -766,6 +804,22 @@ export function MediaGalleryOverlay({
           item={currentItem}
           onClose={() => setEditing(null)}
           onSaved={handleLocationSaved}
+        />
+      )}
+
+      {evidenceOpen && currentItem && (
+        <EvidenceView
+          mediaId={currentItem.id}
+          isOwn={isOwn}
+          onClose={() => setEvidenceOpen(false)}
+          onPrev={ownItems.length > 1 ? () => stepOwn(-1) : undefined}
+          onNext={ownItems.length > 1 ? () => stepOwn(1) : undefined}
+          position={ownItems.length > 1 ? `${ownIndex + 1} / ${ownItems.length}` : undefined}
+          onLocationSaved={(id, lat, lng) => {
+            applyManualLocation(id, lat, lng);
+            refreshItems();
+          }}
+          onRematched={refreshItems}
         />
       )}
 
