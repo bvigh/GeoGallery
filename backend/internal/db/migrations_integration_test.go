@@ -336,3 +336,57 @@ func TestMigration000009_Albums(t *testing.T) {
 	migrateTo(t, m, 9)
 	assertAlbumsSchema(t, dsn)
 }
+
+// assertCaptureEvidenceColumn checks the column's definition and that the row seedLegacyData wrote
+// holds no evidence: existing rows are never backfilled by the migration.
+func assertCaptureEvidenceColumn(t *testing.T, dsn string) {
+	t.Helper()
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		var dataType, nullable string
+		var columnDefault *string
+		require.NoError(t, conn.QueryRow(ctx, `
+			SELECT data_type, is_nullable, column_default FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'media' AND column_name = 'capture_evidence'`,
+		).Scan(&dataType, &nullable, &columnDefault))
+		assert.Equal(t, "jsonb", dataType)
+		assert.Equal(t, "YES", nullable)
+		assert.Nil(t, columnDefault)
+
+		var total, withEvidence int
+		require.NoError(t, conn.QueryRow(ctx,
+			`SELECT COUNT(*), COUNT(capture_evidence) FROM media`,
+		).Scan(&total, &withEvidence))
+		assert.Equal(t, 1, total, "the legacy media row survives")
+		assert.Zero(t, withEvidence, "existing rows stay NULL")
+	})
+}
+
+func TestMigration000010_CaptureEvidence(t *testing.T) {
+	dsn := testdb.NewEmpty(t)
+	m := newMigrator(t, dsn)
+
+	migrateTo(t, m, 6)
+	seedLegacyData(t, dsn)
+	migrateTo(t, m, 9)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.False(t, columnExists(ctx, t, conn, "media", "capture_evidence"))
+	})
+
+	migrateTo(t, m, 10)
+	assertCaptureEvidenceColumn(t, dsn)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		_, err := conn.Exec(ctx, `UPDATE media SET capture_evidence = '{"v": 1, "by": "ingest"}'`)
+		require.NoError(t, err)
+	})
+
+	migrateTo(t, m, 9)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.False(t, columnExists(ctx, t, conn, "media", "capture_evidence"))
+		var n int
+		require.NoError(t, conn.QueryRow(ctx, `SELECT COUNT(*) FROM media`).Scan(&n))
+		assert.Equal(t, 1, n, "the down migration keeps the media rows")
+	})
+
+	migrateTo(t, m, 10)
+	assertCaptureEvidenceColumn(t, dsn)
+}

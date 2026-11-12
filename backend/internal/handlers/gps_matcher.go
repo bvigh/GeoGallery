@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/bvigh/geogallery/internal/geo"
@@ -65,7 +66,7 @@ func RunGPSMatcher(ctx context.Context, db matcherDB, ownerID string, maxWindow 
 	}
 
 	for _, item := range items {
-		before, after, err := bracketingPoints(ctx, db, ownerID, item.takenAt, maxWindow)
+		before, after, err := bracketingPoints(ctx, db, ownerID, item.takenAt, maxWindow, bracketOptions{})
 		if err != nil {
 			return err
 		}
@@ -89,36 +90,65 @@ func RunGPSMatcher(ctx context.Context, db matcherDB, ownerID string, maxWindow 
 	return nil
 }
 
-func bracketingPoints(ctx context.Context, db matcherDB, ownerID string, at time.Time, maxWindow time.Duration) (*geo.Point, *geo.Point, error) {
-	var before, after *geo.Point
+// bracketOptions narrows the track points bracketingPoints may pick. The zero value is what the
+// matcher itself uses: every point counts.
+type bracketOptions struct {
+	excludeFormats []string // compared with split_part(source, ':', 1)
+}
 
-	row := db.QueryRow(ctx, `
-		SELECT ST_Y(location::geometry), ST_X(location::geometry), recorded_at
+// The nearest point at or before $1 (and at or after it), no further away than $2. Sorting ties by
+// source makes the choice deterministic, and because UNIQUE (owner_id, source, recorded_at) makes it
+// a total order, a point at the exact instant is the same row on both sides. It sorts on source
+// rather than id because a re-import replaces ids.
+const (
+	bracketBeforeSQL = `
+		SELECT ST_Y(location::geometry), ST_X(location::geometry), recorded_at, source, accuracy_m, altitude_m
 		FROM gps_tracks
 		WHERE owner_id = $3 AND recorded_at <= $1 AND recorded_at >= $2
-		ORDER BY recorded_at DESC
+		  AND split_part(source, ':', 1) <> ALL($4::text[])
+		ORDER BY recorded_at DESC, source ASC
 		LIMIT 1
-	`, at, at.Add(-maxWindow), ownerID)
-	var lat, lng float64
-	var recordedAt time.Time
-	if err := row.Scan(&lat, &lng, &recordedAt); err == nil {
-		before = &geo.Point{Lat: lat, Lng: lng, At: recordedAt}
-	} else if err != pgx.ErrNoRows {
-		return nil, nil, err
-	}
-
-	row = db.QueryRow(ctx, `
-		SELECT ST_Y(location::geometry), ST_X(location::geometry), recorded_at
+	`
+	bracketAfterSQL = `
+		SELECT ST_Y(location::geometry), ST_X(location::geometry), recorded_at, source, accuracy_m, altitude_m
 		FROM gps_tracks
 		WHERE owner_id = $3 AND recorded_at >= $1 AND recorded_at <= $2
-		ORDER BY recorded_at ASC
+		  AND split_part(source, ':', 1) <> ALL($4::text[])
+		ORDER BY recorded_at ASC, source ASC
 		LIMIT 1
-	`, at, at.Add(maxWindow), ownerID)
-	if err := row.Scan(&lat, &lng, &recordedAt); err == nil {
-		after = &geo.Point{Lat: lat, Lng: lng, At: recordedAt}
-	} else if err != pgx.ErrNoRows {
-		return nil, nil, err
+	`
+)
+
+// bracketingPoints returns ownerID's nearest track points on each side of at, within maxWindow.
+// It is the only bracket query: the matcher and the provenance route must not drift apart.
+func bracketingPoints(ctx context.Context, db matcherDB, ownerID string, at time.Time,
+	maxWindow time.Duration, opts bracketOptions) (before, after *geo.Point, err error) {
+	// x <> ALL(NULL) is NULL and would match nothing, so a nil list must never reach the query.
+	exclude := opts.excludeFormats
+	if exclude == nil {
+		exclude = []string{}
 	}
 
+	before, err = scanBracketPoint(db.QueryRow(ctx, bracketBeforeSQL, at, at.Add(-maxWindow), ownerID, exclude))
+	if err != nil {
+		return nil, nil, err
+	}
+	after, err = scanBracketPoint(db.QueryRow(ctx, bracketAfterSQL, at, at.Add(maxWindow), ownerID, exclude))
+	if err != nil {
+		return nil, nil, err
+	}
 	return before, after, nil
+}
+
+// scanBracketPoint reads one row of a bracket query. No row is a nil point, not an error.
+func scanBracketPoint(row pgx.Row) (*geo.Point, error) {
+	var p geo.Point
+	err := row.Scan(&p.Lat, &p.Lng, &p.At, &p.Source, &p.AccuracyM, &p.AltitudeM)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
 }

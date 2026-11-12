@@ -6,6 +6,7 @@ import { EditLocationModal } from "../components/EditLocationModal";
 import type { Album, FilterState, MediaItem, Trip } from "../types";
 import { api } from "../api/client";
 import { activeFilterCount, emptyFilters, filterParams } from "@/lib/filters";
+import { browserTimeZone, formatInstant } from "@/lib/time";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { AlbumMenu } from "@/components/albums/AlbumMenu";
 import Panorama360 from "../components/viewer/Panorama360";
@@ -17,9 +18,17 @@ import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { useVideoKeys } from "@/lib/videoKeys";
 import { ZoomableImage } from "@/components/viewer/ZoomableImage";
 import { EditViewModal } from "@/components/viewer/EditViewModal";
+import { EvidenceView } from "@/components/evidence/EvidenceView";
 
 // The backend's maximum page: every page re-runs the whole filtered query, so fewer is faster.
 const PAGE_SIZE = 5000;
+
+// A row as the reloaded list has it, so the card cannot contradict the map and the evidence view.
+// The keyframes are not in the list: they load per item.
+function withFreshRow(item: MediaItem, rows: Map<string, MediaItem>): MediaItem {
+  const fresh = rows.get(item.id);
+  return fresh ? { ...fresh, keyframes: item.keyframes } : item;
+}
 
 // crossOrigin matters: the fullscreen 360° viewers load this same presigned URL
 // as a CORS request (WebGL texture). A plain no-CORS preview fetch gets cached
@@ -229,6 +238,7 @@ export function MapPage({ active = true }: { active?: boolean }) {
   const [clusterIndex, setClusterIndex] = useState(0);
   const [editingView, setEditingView] = useState(false);
   const [editingLocation, setEditingLocation] = useState(false);
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
   // Bumped to refetch the media list under the same filters.
   const [mediaReload, setMediaReload] = useState(0);
   // Bumped when the tab is shown again: other tabs may have uploaded, deleted or shared media.
@@ -277,6 +287,9 @@ export function MapPage({ active = true }: { active?: boolean }) {
             fetchPage();
           } else {
             if (inBackground) setItems(loaded);
+            const rows = new Map(loaded.map((row) => [row.id, row]));
+            setSelected((prev) => (prev ? withFreshRow(prev, rows) : prev));
+            setClusterPeers((prev) => prev.map((peer) => withFreshRow(peer, rows)));
             setLoadingMedia(false);
           }
         })
@@ -345,13 +358,18 @@ export function MapPage({ active = true }: { active?: boolean }) {
     setMediaUrl(null);
     setUrlError(null);
     setFullscreen(false);
+    setEvidenceOpen(false);
     if (!item) return;
     fetchUrl(item);
-    if (item.media_type === "video_360") {
-      api.getKeyframes(item.id).then((kf) => {
-        setSelected((prev) => prev?.id === item.id ? { ...prev, keyframes: kf } : prev);
-      }).catch(() => {});
-    }
+    loadKeyframes(item);
+  }
+
+  // List rows carry no keyframes, so every way of putting a video_360 on the card goes through here.
+  function loadKeyframes(item: MediaItem) {
+    if (item.media_type !== "video_360") return;
+    api.getKeyframes(item.id).then((kf) => {
+      setSelected((prev) => prev?.id === item.id ? { ...prev, keyframes: kf } : prev);
+    }).catch(() => {});
   }
 
   function navigatePeer(delta: number) {
@@ -363,12 +381,36 @@ export function MapPage({ active = true }: { active?: boolean }) {
     setMediaUrl(null);
     setUrlError(null);
     fetchUrl(newItem);
+    loadKeyframes(newItem);
+  }
+
+  // The evidence view steps through own items only: provenance is a 404 for anyone else's.
+  const ownPeers = clusterPeers.filter((peer) => peer.owner_id === user.id);
+  const ownPeerIndex = ownPeers.findIndex((peer) => peer.id === selected?.id);
+
+  function navigateOwnPeer(delta: number) {
+    const newItem = ownPeers[(ownPeerIndex + delta + ownPeers.length) % ownPeers.length];
+    setClusterIndex(clusterPeers.findIndex((peer) => peer.id === newItem.id));
+    setSelected(newItem);
+    setMediaUrl(null);
+    setUrlError(null);
+    fetchUrl(newItem);
+    loadKeyframes(newItem);
+  }
+
+  function handleEvidenceLocationSaved(id: string, lat: number, lng: number) {
+    const updated = { lat, lng, gps_source: "manual" as const, gps_confidence: 1.0 };
+    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, ...updated } : i)));
+    // The view can be showing the item behind a track point, not the one on the card.
+    setSelected((prev) => (prev?.id === id ? { ...prev, ...updated } : prev));
+    // A manual position is a track point, so the matcher may have moved its neighbours.
+    setMediaReload((n) => n + 1);
   }
 
   useEffect(() => {
-    // Hidden behind another tab, the arrow keys are not ours. The fullscreen view handles them
-    // itself, and behind an editor they would switch the item being edited.
-    const covered = fullscreen || editingView || editingLocation;
+    // Hidden behind another tab, the arrow keys are not ours. The fullscreen view and the evidence
+    // view handle them themselves, and behind an editor they would switch the item being edited.
+    const covered = fullscreen || editingView || editingLocation || evidenceOpen;
     if (!active || covered || clusterPeers.length <= 1) return;
     function onKey(e: KeyboardEvent) {
       // Behind the item panel's album menu, they would switch the item (and close the menu).
@@ -379,7 +421,7 @@ export function MapPage({ active = true }: { active?: boolean }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // navigatePeer reads only clusterPeers and clusterIndex, which are listed.
-  }, [active, fullscreen, editingView, editingLocation, clusterPeers, clusterIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [active, fullscreen, editingView, editingLocation, evidenceOpen, clusterPeers, clusterIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="relative h-full w-full">
@@ -451,17 +493,29 @@ export function MapPage({ active = true }: { active?: boolean }) {
 
             {selected.taken_at && (
               <p className="-order-3 text-sm text-muted-foreground">
-                {new Date(selected.taken_at).toLocaleString()}
+                {formatInstant(selected.taken_at, browserTimeZone())}
               </p>
             )}
 
-            {selected.gps_source && (
-              <p className="-order-3 mt-1 text-xs text-muted-foreground">
-                GPS: {selected.gps_source}
-                {selected.gps_confidence !== null &&
-                  ` (${Math.round(selected.gps_confidence * 100)}%)`}
-              </p>
-            )}
+            {selected.gps_source &&
+              (isOwn ? (
+                <button
+                  className={`-order-3 mt-1 text-left text-xs text-muted-foreground hover:text-foreground ${touchRow}`}
+                  onClick={() => setEvidenceOpen(true)}
+                >
+                  GPS: {selected.gps_source}
+                  {selected.gps_confidence !== null &&
+                    ` (${Math.round(selected.gps_confidence * 100)}%)`}
+                  {" · "}
+                  <span className="underline">Why here?</span>
+                </button>
+              ) : (
+                <p className="-order-3 mt-1 text-xs text-muted-foreground">
+                  GPS: {selected.gps_source}
+                  {selected.gps_confidence !== null &&
+                    ` (${Math.round(selected.gps_confidence * 100)}%)`}
+                </p>
+              ))}
 
             {selected.lat !== null && selected.lng !== null && (
               <a
@@ -493,8 +547,10 @@ export function MapPage({ active = true }: { active?: boolean }) {
 
             {isOwn && (selected.media_type === "photo_360" || selected.media_type === "video_360") && (
               <button
-                className={`mt-2 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted ${touchRow}`}
+                className={`mt-2 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted disabled:opacity-50 ${touchRow}`}
                 onClick={() => setEditingView(true)}
+                // The editor starts from the keyframes: saving from an empty list deletes the stored ones.
+                disabled={selected.media_type === "video_360" && selected.keyframes === undefined}
               >
                 Edit default view
               </button>
@@ -535,7 +591,8 @@ export function MapPage({ active = true }: { active?: boolean }) {
                 </p>
               )}
 
-              {mediaUrl && !loading && (
+              {/* Not behind the evidence view: each step would download an original nobody sees. */}
+              {mediaUrl && !loading && !evidenceOpen && (
                 <MediaPreview
                   item={selected}
                   url={mediaUrl}
@@ -569,6 +626,19 @@ export function MapPage({ active = true }: { active?: boolean }) {
             setItems((prev) => prev.map((i) => (i.id === selected.id ? { ...i, ...updated } : i)));
             setEditingLocation(false);
           }}
+        />
+      )}
+
+      {evidenceOpen && selected && (
+        <EvidenceView
+          mediaId={selected.id}
+          isOwn={isOwn}
+          onClose={() => setEvidenceOpen(false)}
+          onPrev={ownPeers.length > 1 ? () => navigateOwnPeer(-1) : undefined}
+          onNext={ownPeers.length > 1 ? () => navigateOwnPeer(1) : undefined}
+          position={ownPeers.length > 1 ? `${ownPeerIndex + 1} / ${ownPeers.length}` : undefined}
+          onLocationSaved={handleEvidenceLocationSaved}
+          onRematched={() => setMediaReload((n) => n + 1)}
         />
       )}
 

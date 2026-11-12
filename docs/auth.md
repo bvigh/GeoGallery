@@ -127,6 +127,8 @@ Personal API tokens let scripts call the API as the user.
   - Any other scheme (for example `Basic`) is ignored, and the request falls back to the session cookie.
 - Tokens act as their user, scoped to that user's data, with these exceptions. The following are **session-only** and return 403 for a token:
   - `DELETE /api/media/{id}` and `DELETE /api/trips/{id}`
+  - `GET /api/media/{id}/provenance` and `GET /api/media/{id}/provenance/file` (a token cannot read location history)
+  - `DELETE /api/albums/{id}`, `POST /api/albums/{id}/members`, `DELETE /api/albums/{id}/members/{user_id}` and `GET /api/users` (a token cannot widen who sees the data or list users' emails)
   - `/api/tokens*` (a token cannot mint tokens)
   - `/api/admin/*`
 - Disabling a user deletes their sessions and revokes all their tokens and any unused invites they created. Re-enabling them does not bring the tokens or invites back.

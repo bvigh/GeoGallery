@@ -20,6 +20,7 @@ import (
 	"github.com/bvigh/geogallery/internal/db"
 	"github.com/bvigh/geogallery/internal/handlers"
 	"github.com/bvigh/geogallery/internal/httplog"
+	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/bvigh/geogallery/internal/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -147,7 +148,7 @@ func runSubcommand(name string, args []string, stdout io.Writer) int {
 			}
 			logCameraTimezone(env.cfg)
 			deps := handlers.NewIngestDeps(env.pool, env.s3,
-				time.Duration(env.cfg.GPSMatchWindowHours)*time.Hour, env.cfg.TripGapHours, env.cfg.CameraTimezone)
+				time.Duration(env.cfg.GPSMatchWindowHours)*time.Hour, env.cfg.TripGapHours, cameraZone(env.cfg))
 			scan := func(ctx context.Context, dir, ownerID string) (handlers.ScanResult, error) {
 				return handlers.RunIngestScan(ctx, deps, dir, ownerID)
 			}
@@ -232,6 +233,15 @@ func runScan(ctx context.Context, stdout io.Writer, scan scanFunc, users []auth.
 	return nil
 }
 
+// cameraZone is the camera zone as ingest reads and records it.
+func cameraZone(cfg *config.Config) ingest.CameraZone {
+	return ingest.CameraZone{
+		Loc:         cfg.CameraTimezone,
+		Set:         cfg.CameraTimezoneSet,
+		UTCFallback: cfg.CameraTimezoneFallsBackToUTC(),
+	}
+}
+
 // logCameraTimezone states the zone EXIF times are read in, and warns when CAMERA_TIMEZONE is unset
 // and the server runs in UTC (a container without TZ), which is what made times an hour or two off.
 func logCameraTimezone(cfg *config.Config) {
@@ -275,6 +285,7 @@ type routeHandlers struct {
 	gpsMatcher *handlers.GPSMatcherHandler
 	albums     *handlers.AlbumHandler
 	admin      *handlers.AdminHandler
+	provenance *handlers.ProvenanceHandler
 }
 
 func serve() {
@@ -312,13 +323,14 @@ func serve() {
 	logCameraTimezone(cfg)
 	matchWindow := time.Duration(cfg.GPSMatchWindowHours) * time.Hour
 	h := routeHandlers{
-		media:      handlers.NewMediaHandler(pool, s3Client, matchWindow, cfg.TripGapHours, cfg.CameraTimezone),
+		media:      handlers.NewMediaHandler(pool, s3Client, matchWindow, cfg.TripGapHours, cameraZone(cfg)),
 		trips:      handlers.NewTripHandler(pool, cfg.TripGapHours),
 		game:       handlers.NewGameHandler(pool, s3Client),
 		gpsTracks:  handlers.NewGPSTrackHandler(pool, matchWindow),
 		gpsMatcher: handlers.NewGPSMatcherHandler(pool, matchWindow),
 		albums:     handlers.NewAlbumHandler(pool),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
+		provenance: handlers.NewProvenanceHandler(pool, s3Client, matchWindow, cameraZone(cfg)),
 	}
 
 	addr := fmt.Sprintf(":%s", cfg.ServerPort)
@@ -380,6 +392,9 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 				r.Use(auth.RequireSession)
 				r.Delete("/media/{id}", h.media.Delete) // irreversible (S3 object removed): never via token
 				r.Delete("/trips/{id}", h.trips.Delete)
+				// These return the owner's location history and capture evidence: never via token.
+				r.With(middleware.Compress(5, "application/json")).Get("/media/{id}/provenance", h.provenance.Get)
+				r.Get("/media/{id}/provenance/file", h.provenance.File)
 				// These change who can read whose media, and the directory lists everyone's email:
 				// never via token.
 				r.Delete("/albums/{id}", h.albums.Delete)
