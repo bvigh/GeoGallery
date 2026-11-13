@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bvigh/geogallery/internal/ingest"
 )
 
 const (
@@ -34,6 +36,12 @@ type Config struct {
 	// CAMERA_TIMEZONE (an IANA name); unset, the server's own zone (TZ or /etc/localtime).
 	CameraTimezone    *time.Location
 	CameraTimezoneSet bool // CAMERA_TIMEZONE was set
+
+	// CameraRules says, per camera make, which of a file's own clocks ingest must not trust. From the
+	// file CAMERA_RULES_FILE names, by default ./camera-rules.json beside the binary. A missing or
+	// invalid file fails startup, so nothing is ever ingested with the rules silently gone.
+	CameraRulesFile string
+	CameraRules     ingest.CameraRules
 
 	PublicURL        string // normalised to scheme://host[:port]
 	PublicOrigin     string // CSRF trusted origin, redirect_uri and post-logout URI base
@@ -80,6 +88,13 @@ func Load() (*Config, error) {
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
+
+	cfg.CameraRulesFile = getEnv("CAMERA_RULES_FILE", "./camera-rules.json")
+	rules, err := ingest.LoadCameraRules(cfg.CameraRulesFile)
+	if err != nil {
+		return nil, fmt.Errorf("CAMERA_RULES_FILE %q: %w", cfg.CameraRulesFile, err)
+	}
+	cfg.CameraRules = rules
 
 	origin, err := normalisePublicURL(getEnv("PUBLIC_URL", "http://localhost:5173"))
 	if err != nil {

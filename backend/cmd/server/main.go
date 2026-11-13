@@ -233,18 +233,21 @@ func runScan(ctx context.Context, stdout io.Writer, scan scanFunc, users []auth.
 	return nil
 }
 
-// cameraZone is the camera zone as ingest reads and records it.
+// cameraZone is the camera zone as ingest reads and records it, with the camera rules.
 func cameraZone(cfg *config.Config) ingest.CameraZone {
 	return ingest.CameraZone{
 		Loc:         cfg.CameraTimezone,
 		Set:         cfg.CameraTimezoneSet,
 		UTCFallback: cfg.CameraTimezoneFallsBackToUTC(),
+		Rules:       cfg.CameraRules,
 	}
 }
 
-// logCameraTimezone states the zone EXIF times are read in, and warns when CAMERA_TIMEZONE is unset
-// and the server runs in UTC (a container without TZ), which is what made times an hour or two off.
+// logCameraTimezone states the zone EXIF times are read in and the camera rules file, and warns when
+// CAMERA_TIMEZONE is unset and the server runs in UTC (a container without TZ), which is what made
+// times an hour or two off.
 func logCameraTimezone(cfg *config.Config) {
+	slog.Info("camera rules", "file", cfg.CameraRulesFile, "makes", len(cfg.CameraRules))
 	abbrev, offset := time.Now().In(cfg.CameraTimezone).Zone()
 	if cfg.CameraTimezoneFallsBackToUTC() {
 		slog.Warn("CAMERA_TIMEZONE is unset and the server runs in UTC, so photo times without a usable GPS timestamp or offset tag are read as UTC; set CAMERA_TIMEZONE to the zone camera clocks show, e.g. Europe/Warsaw")

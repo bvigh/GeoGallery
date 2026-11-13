@@ -150,6 +150,52 @@ func box(name string, payload []byte) []byte {
 	return append(b, payload...)
 }
 
+// PANA returns the box a Panasonic camera keeps in an MP4's moov/udta, holding p's tags at off of
+// its payload (0x4080 on the DC-TZ200) as the camera frames them: FF D8 FF E1, the APP1 length,
+// "Exif\0\0", then the TIFF block.
+func PANA(p Photo, off int) []byte {
+	tiff := TIFF(p)
+	if len(tiff) > math.MaxUint16-8 {
+		panic("exiftest: the tags do not fit one APP1 segment")
+	}
+	payload := make([]byte, off, off+12+len(tiff))
+	payload = append(payload, 0xFF, 0xD8, 0xFF, 0xE1)
+	payload = binary.BigEndian.AppendUint16(payload, uint16(8+len(tiff)))
+	payload = append(payload, "Exif\x00\x00"...)
+	return box("PANA", append(payload, tiff...))
+}
+
+// PanasonicMP4 returns the start of an MP4 laid out as a Panasonic camera writes it: ftyp, then moov
+// with udta/PANA holding p's tags at 0x4080. It holds no media; only its boxes matter.
+func PanasonicMP4(p Photo) []byte {
+	ftyp := box("ftyp", []byte("mp42\x00\x00\x00\x01mp42avc1"))
+	moov := box("moov", append(box("mvhd", make([]byte, 100)), box("udta", PANA(p, 0x4080))...))
+	return append(ftyp, moov...)
+}
+
+// WithPANA returns mp4, a whole file whose last box is moov (ffmpeg's layout without faststart),
+// with a udta box holding a PANA box for p added at the end of moov. Nothing before moov moves, so
+// the file still plays and ffprobe still reads it. ok is false for any other layout.
+func WithPANA(mp4 []byte, p Photo) (out []byte, ok bool) {
+	last := -1
+	for off := 0; off < len(mp4); {
+		if len(mp4)-off < 8 {
+			return nil, false
+		}
+		size := int(binary.BigEndian.Uint32(mp4[off:]))
+		if size < 8 || size > len(mp4)-off {
+			return nil, false
+		}
+		last, off = off, off+size
+	}
+	if last < 0 || string(mp4[last+4:last+8]) != "moov" {
+		return nil, false
+	}
+	out = append(append([]byte{}, mp4...), box("udta", PANA(p, 0x4080))...)
+	binary.BigEndian.PutUint32(out[last:], uint32(len(out)-last))
+	return out, true
+}
+
 // TIFF returns the EXIF TIFF structure (header, IFD0, Exif IFD, GPS IFD) for p.
 func TIFF(p Photo) []byte {
 	var ifd0, exifIFD, interopIFD, gpsIFD []entry

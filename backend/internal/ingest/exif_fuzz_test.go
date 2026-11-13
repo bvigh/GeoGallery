@@ -31,9 +31,29 @@ func FuzzExtractExif(f *testing.F) {
 		}
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		got := ExtractExif(bytes.NewReader(data), time.UTC)
+		got := ExtractExif(bytes.NewReader(data), CameraZone{Loc: time.UTC})
 		if got.Lat != nil {
 			assert.True(t, geo.IsValidGPS(*got.Lat, *got.Lng))
+		}
+	})
+}
+
+// FuzzVideoExif checks that no file can make the box walk or the decode panic, and that a video
+// dated from its EXIF always has a time and never a position or size. Its seeds run in plain go test.
+func FuzzVideoExif(f *testing.F) {
+	clip := exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: "2021:02:10 15:30:00", OffsetTimeOriginal: "+01:00",
+		GPS: &exiftest.GPS{Lat: 10, Lng: 20}, PixelX: 1920, PixelY: 1080}
+	whole := exiftest.PanasonicMP4(clip)
+	for _, seed := range [][]byte{whole, whole[:len(whole)/2], whole[:0x4080], exiftest.JPEG(clip), nil} {
+		f.Add(seed)
+	}
+	zone := CameraZone{Loc: time.UTC, Rules: panasonicRules}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		got, ok := VideoExif(data, zone)
+		if ok {
+			assert.NotNil(t, got.TakenAt)
+			assert.Nil(t, got.Lat)
+			assert.Nil(t, got.WidthPx)
 		}
 	})
 }

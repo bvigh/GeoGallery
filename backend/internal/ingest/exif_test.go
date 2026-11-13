@@ -163,7 +163,7 @@ func TestExtractExif_TakenAt(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ExtractExif(bytes.NewReader(exiftest.JPEG(tt.photo)), tt.zone)
+			got := ExtractExif(bytes.NewReader(exiftest.JPEG(tt.photo)), CameraZone{Loc: tt.zone, Rules: panasonicRules})
 			if tt.want == "" {
 				assert.Nil(t, got.TakenAt)
 				assert.Empty(t, got.TakenAtZone)
@@ -195,7 +195,7 @@ func TestExtractExif_LatLng(t *testing.T) {
 			got := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{
 				DateTimeOriginal: "2018:10:23 11:50:53",
 				GPS:              &exiftest.GPS{Lat: tt.lat, Lng: tt.lng},
-			})), time.UTC)
+			})), CameraZone{Loc: time.UTC})
 			require.NotNil(t, got.Lat)
 			require.NotNil(t, got.Lng)
 			assert.InDelta(t, tt.lat, *got.Lat, 1e-6)
@@ -210,14 +210,14 @@ func TestExtractExif_BrokenExifIFDKeepsTheRest(t *testing.T) {
 		DateTime:      "2009:04:15 10:20:30",
 		BrokenExifIFD: true,
 		GPS:           &exiftest.GPS{Lat: 47.4979, Lng: 19.0402},
-	})), time.UTC)
+	})), CameraZone{Loc: time.UTC})
 	require.NotNil(t, got.TakenAt)
 	require.NotNil(t, got.Lat, "the GPS IFD is read although the Exif IFD is not")
 	assert.InDelta(t, 47.4979, *got.Lat, 1e-6)
 }
 
 func TestExtractExif_NotExif(t *testing.T) {
-	got := ExtractExif(bytes.NewReader([]byte("not a photo at all")), time.UTC)
+	got := ExtractExif(bytes.NewReader([]byte("not a photo at all")), CameraZone{Loc: time.UTC})
 	assert.Equal(t, ExifData{}, got)
 }
 
@@ -276,7 +276,7 @@ func TestExtractExif_Raw(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ExtractExif(bytes.NewReader(exiftest.JPEG(tt.photo)), mustZone(t, "Europe/Warsaw")).Raw
+			got := ExtractExif(bytes.NewReader(exiftest.JPEG(tt.photo)), CameraZone{Loc: mustZone(t, "Europe/Warsaw"), Rules: panasonicRules}).Raw
 			if tt.photo.GPS != nil && !tt.photo.GPS.Time.IsZero() {
 				require.NotNil(t, got.GPSStamp, "the stamp is recorded whenever it parses")
 				assert.True(t, tt.photo.GPS.Time.Equal(*got.GPSStamp), "GPS stamp %s", got.GPSStamp)
@@ -293,18 +293,18 @@ func TestExtractExif_Raw(t *testing.T) {
 // A decode error ends the walk. What was read before it is kept, and the result says it is partial.
 func TestExtractExif_RawPartial(t *testing.T) {
 	t.Run("an error after IFD0", func(t *testing.T) {
-		got := ExtractExif(bytes.NewReader(crafted.PhotoTIFF(crafted.Entry{ID: 0x9286, Type: 50, Count: 1})), time.UTC)
+		got := ExtractExif(bytes.NewReader(crafted.PhotoTIFF(crafted.Entry{ID: 0x9286, Type: 50, Count: 1})), CameraZone{Loc: time.UTC})
 
 		assert.Equal(t, RawExif{WallClock: crafted.DateTime, WallTag: WallTagIFD0, Partial: true}, got.Raw)
 		require.NotNil(t, got.TakenAt)
 	})
 	t.Run("an error before anything was read is not partial", func(t *testing.T) {
 		for _, in := range crafted.Inputs() {
-			assert.Equal(t, RawExif{}, ExtractExif(bytes.NewReader(in.TIFF), time.UTC).Raw, in.Name)
+			assert.Equal(t, RawExif{}, ExtractExif(bytes.NewReader(in.TIFF), CameraZone{Loc: time.UTC}).Raw, in.Name)
 		}
 	})
 	t.Run("a whole file is not partial", func(t *testing.T) {
-		got := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Make: "Acme", DateTimeOriginal: "2018:10:23 11:50:53"})), time.UTC)
+		got := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Make: "Acme", DateTimeOriginal: "2018:10:23 11:50:53"})), CameraZone{Loc: time.UTC})
 		assert.False(t, got.Raw.Partial)
 	})
 }
@@ -319,7 +319,7 @@ func TestExtractExif_CameraModelIsCleaned(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Model: tt.model})), nil)
+			got := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Model: tt.model})), CameraZone{})
 			assert.Equal(t, tt.want, got.CameraModel)
 		})
 	}
@@ -338,8 +338,8 @@ func TestExtractExif_IgnoredOffsetDoesNotChangeTakenAt(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			withTag := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Make: tt.cameraMake, DateTimeOriginal: tt.wall, OffsetTimeOriginal: tt.offset})), warsaw)
-			withoutTag := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Make: tt.cameraMake, DateTimeOriginal: tt.wall})), warsaw)
+			withTag := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Make: tt.cameraMake, DateTimeOriginal: tt.wall, OffsetTimeOriginal: tt.offset})), CameraZone{Loc: warsaw, Rules: panasonicRules})
+			withoutTag := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Make: tt.cameraMake, DateTimeOriginal: tt.wall})), CameraZone{Loc: warsaw, Rules: panasonicRules})
 
 			require.NotNil(t, withTag.TakenAt)
 			require.NotNil(t, withoutTag.TakenAt)
@@ -431,7 +431,7 @@ func TestExtractExif_OffsetIndependentOfProcessZone(t *testing.T) {
 	photo := exiftest.JPEG(exiftest.Photo{Make: "samsung", DateTimeOriginal: "2025:07:14 15:30:00", OffsetTimeOriginal: "+01:00"})
 	for _, name := range []string{"UTC", "Europe/London", "Europe/Warsaw", "Asia/Tokyo"} {
 		time.Local = mustZone(t, name)
-		got := ExtractExif(bytes.NewReader(photo), mustZone(t, "Europe/Warsaw"))
+		got := ExtractExif(bytes.NewReader(photo), CameraZone{Loc: mustZone(t, "Europe/Warsaw")})
 		require.NotNil(t, got.TakenAt, name)
 		assert.Equal(t, "2025-07-14T14:30:00Z", got.TakenAt.UTC().Format(time.RFC3339), name)
 		assert.Equal(t, ZoneOffset, got.TakenAtZone, name)
@@ -449,8 +449,8 @@ func TestExtractExif_IndependentOfProcessZone(t *testing.T) {
 	var withZone, withNil *time.Time
 	for _, name := range []string{"UTC", "Europe/Warsaw", "Asia/Tokyo", "America/New_York"} {
 		time.Local = mustZone(t, name)
-		gotZone := ExtractExif(bytes.NewReader(photo), warsaw).TakenAt
-		gotNil := ExtractExif(bytes.NewReader(photo), nil).TakenAt
+		gotZone := ExtractExif(bytes.NewReader(photo), CameraZone{Loc: warsaw}).TakenAt
+		gotNil := ExtractExif(bytes.NewReader(photo), CameraZone{}).TakenAt
 		require.NotNil(t, gotZone)
 		require.NotNil(t, gotNil)
 		if withZone == nil {
@@ -478,7 +478,7 @@ func TestExtractExif_StopsEarlyOnBadStructures(t *testing.T) {
 			t.Run(in.Name+"/"+form, func(t *testing.T) {
 				var got ExifData
 				crafted.Bounded(t, maxDecodeAlloc, func() {
-					got = ExtractExif(bytes.NewReader(data), time.UTC)
+					got = ExtractExif(bytes.NewReader(data), CameraZone{Loc: time.UTC})
 				})
 				assert.Equal(t, ExifData{}, got)
 			})
@@ -502,7 +502,7 @@ func TestExtractExif_TagLimits(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			crafted.Bounded(t, maxDecodeAlloc, func() {
-				ExtractExif(bytes.NewReader(c.data), time.UTC)
+				ExtractExif(bytes.NewReader(c.data), CameraZone{Loc: time.UTC})
 			})
 		})
 	}
@@ -518,7 +518,7 @@ func TestExtractExif_BadExifIFDKeepsIFD0(t *testing.T) {
 		t.Run(in.Name, func(t *testing.T) {
 			var got ExifData
 			crafted.Bounded(t, maxDecodeAlloc, func() {
-				got = ExtractExif(bytes.NewReader(in.TIFF), zone)
+				got = ExtractExif(bytes.NewReader(in.TIFF), CameraZone{Loc: zone})
 			})
 
 			require.NotNil(t, got.TakenAt)
@@ -535,7 +535,7 @@ func TestExtractExif_ZeroDenominatorIsNoPosition(t *testing.T) {
 		GPS:      &exiftest.GPS{Lat: 10, Lng: 20, ZeroLatDegrees: true},
 	})
 
-	got := ExtractExif(bytes.NewReader(data), time.UTC)
+	got := ExtractExif(bytes.NewReader(data), CameraZone{Loc: time.UTC})
 
 	assert.Nil(t, got.Lat)
 	assert.Nil(t, got.Lng)
@@ -585,18 +585,18 @@ func TestExtractExif_TagsOfUnexpectedTypes(t *testing.T) {
 		return append(data, dateText...)
 	}
 
-	whole := ExtractExif(bytes.NewReader(build(0)), time.UTC)
+	whole := ExtractExif(bytes.NewReader(build(0)), CameraZone{Loc: time.UTC})
 	require.NotNil(t, whole.Lat)
 	require.NotNil(t, whole.TakenAt)
 	require.Equal(t, "Cam", whole.CameraModel)
 
 	for _, id := range []uint16{latRef, lat, lngRef, lng} {
-		got := ExtractExif(bytes.NewReader(build(id)), time.UTC)
+		got := ExtractExif(bytes.NewReader(build(id)), CameraZone{Loc: time.UTC})
 		assert.Nil(t, got.Lat, "tag 0x%04X", id)
 		assert.NotNil(t, got.TakenAt, "tag 0x%04X", id)
 	}
-	assert.Nil(t, ExtractExif(bytes.NewReader(build(date)), time.UTC).TakenAt)
-	assert.Empty(t, ExtractExif(bytes.NewReader(build(model)), time.UTC).CameraModel)
+	assert.Nil(t, ExtractExif(bytes.NewReader(build(date)), CameraZone{Loc: time.UTC}).TakenAt)
+	assert.Empty(t, ExtractExif(bytes.NewReader(build(model)), CameraZone{Loc: time.UTC}).CameraModel)
 }
 
 func TestExtractExif_EveryImageFormat(t *testing.T) {
@@ -616,7 +616,7 @@ func TestExtractExif_EveryImageFormat(t *testing.T) {
 	}
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {
-			got := ExtractExif(bytes.NewReader(data), time.UTC)
+			got := ExtractExif(bytes.NewReader(data), CameraZone{Loc: time.UTC})
 
 			require.NotNil(t, got.TakenAt)
 			assert.Equal(t, "2024-06-01T10:13:14Z", got.TakenAt.UTC().Format(time.RFC3339))
@@ -639,7 +639,7 @@ func TestExtractExif_NotAnImage(t *testing.T) {
 	}
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, ExifData{}, ExtractExif(bytes.NewReader(data), time.UTC))
+			assert.Equal(t, ExifData{}, ExtractExif(bytes.NewReader(data), CameraZone{Loc: time.UTC}))
 		})
 	}
 }
@@ -647,7 +647,7 @@ func TestExtractExif_NotAnImage(t *testing.T) {
 func TestExtractExif_ModelWithoutTrailingSpaces(t *testing.T) {
 	cases := map[string]string{"FinePix A340   ": "FinePix A340", "               ": ""}
 	for written, want := range cases {
-		got := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Model: written})), time.UTC)
+		got := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Model: written})), CameraZone{Loc: time.UTC})
 		assert.Equal(t, want, got.CameraModel)
 	}
 }
@@ -685,7 +685,7 @@ func TestExtractExif_Dimensions(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := ExtractExif(bytes.NewReader(crafted.PhotoTIFF(c.w, c.h)), time.UTC)
+			got := ExtractExif(bytes.NewReader(crafted.PhotoTIFF(c.w, c.h)), CameraZone{Loc: time.UTC})
 			assert.Equal(t, c.wantW, got.WidthPx)
 			assert.Equal(t, c.wantH, got.HeightPx)
 		})
@@ -703,7 +703,7 @@ func TestExtractExif_ThumbnailIFDIsNotRead(t *testing.T) {
 	data = append(data, crafted.IFD(0, crafted.Entry{ID: 0x0110, Type: crafted.TypeASCII, Count: uint32(len(model)), Value: ifd1At + 6 + 12})...)
 	data = append(data, model...)
 
-	assert.Empty(t, ExtractExif(bytes.NewReader(crafted.JPEG(data)), time.UTC).CameraModel)
+	assert.Empty(t, ExtractExif(bytes.NewReader(crafted.JPEG(data)), CameraZone{Loc: time.UTC}).CameraModel)
 }
 
 // The Interoperability IFD's tags share their numbers with GPSLatitudeRef and GPSLatitude and come
@@ -713,7 +713,7 @@ func TestExtractExif_InteropIFDIsNotAPosition(t *testing.T) {
 		DateTimeOriginal: "2024:06:01 12:13:14",
 		InteropIFD:       true,
 		GPS:              &exiftest.GPS{Lat: -33.9, Lng: 18.4},
-	})), time.UTC)
+	})), CameraZone{Loc: time.UTC})
 
 	require.NotNil(t, got.Lat)
 	assert.InDelta(t, -33.9, *got.Lat, 1e-6)
@@ -724,7 +724,7 @@ func TestExtractExif_InteropIFDAloneIsNoPosition(t *testing.T) {
 	got := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{
 		DateTimeOriginal: "2024:06:01 12:13:14",
 		InteropIFD:       true,
-	})), time.UTC)
+	})), CameraZone{Loc: time.UTC})
 
 	assert.Nil(t, got.Lat)
 	assert.NotNil(t, got.TakenAt)
@@ -736,8 +736,8 @@ func TestExtractExif_GPSClockToleranceCountsFractions(t *testing.T) {
 	at := func(d time.Duration) *exiftest.GPS {
 		return &exiftest.GPS{Lat: 47.5, Lng: 19.0, Time: time.Date(2024, 6, 1, 10, 0, 0, 0, time.UTC).Add(d)}
 	}
-	inside := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{DateTimeOriginal: wall, GPS: at(gpsClockTolerance - 500*time.Millisecond)})), time.UTC)
-	outside := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{DateTimeOriginal: wall, GPS: at(gpsClockTolerance + 500*time.Millisecond)})), time.UTC)
+	inside := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{DateTimeOriginal: wall, GPS: at(gpsClockTolerance - 500*time.Millisecond)})), CameraZone{Loc: time.UTC})
+	outside := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{DateTimeOriginal: wall, GPS: at(gpsClockTolerance + 500*time.Millisecond)})), CameraZone{Loc: time.UTC})
 
 	assert.Equal(t, ZoneGPS, inside.TakenAtZone)
 	assert.Equal(t, ZoneCamera, outside.TakenAtZone)
@@ -751,7 +751,7 @@ func TestExtractExif_ImpossiblePositionsAreRefused(t *testing.T) {
 	}
 	for name, gps := range cases {
 		t.Run(name, func(t *testing.T) {
-			got := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{GPS: &gps})), time.UTC)
+			got := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{GPS: &gps})), CameraZone{Loc: time.UTC})
 			assert.Nil(t, got.Lat)
 			assert.Nil(t, got.Lng)
 		})

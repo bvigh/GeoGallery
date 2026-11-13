@@ -63,8 +63,21 @@ func inExifDecodeSlot[T any](ctx context.Context, decode func() T) (T, error) {
 // extractExif is ingest.ExtractExif in one of the exifDecodeSlots.
 func (r *MediaRegistrar) extractExif(ctx context.Context, head []byte) (ingest.ExifData, error) {
 	return inExifDecodeSlot(ctx, func() ingest.ExifData {
-		return ingest.ExtractExif(bytes.NewReader(head), r.cameraZone.Loc)
+		return ingest.ExtractExif(bytes.NewReader(head), r.cameraZone)
 	})
+}
+
+// videoExif is ingest.VideoExif in one of the exifDecodeSlots.
+func (r *MediaRegistrar) videoExif(ctx context.Context, head []byte) (videoExif, error) {
+	return inExifDecodeSlot(ctx, func() videoExif {
+		e, ok := ingest.VideoExif(head, r.cameraZone)
+		return videoExif{e, ok}
+	})
+}
+
+type videoExif struct {
+	exif ingest.ExifData
+	ok   bool
 }
 
 // registerMedia stores one media file for ownerID and returns its media ID. inserted is false when
@@ -112,6 +125,19 @@ func (r *MediaRegistrar) registerMedia(
 		return "", false, fmt.Errorf("look up duplicate: %w", err)
 	}
 
+	if probeVideo && r.cameraZone.Rules.DatesVideosFromExif() {
+		// A make whose camera rule says so is dated from the EXIF inside the video, as a photo would
+		// be: its container time is not UTC. Only the capture time and the camera come from it, after
+		// the hash, so probeVideo and the dedup key stay what they were.
+		v, err := r.videoExif(ctx, head)
+		if err != nil {
+			return "", false, fmt.Errorf("wait to read video exif: %w", err)
+		}
+		if v.ok {
+			exifData = v.exif
+		}
+	}
+
 	var mediaType string
 	var tmpFile *os.File
 	var probe ingest.VideoProbeResult
@@ -130,7 +156,14 @@ func (r *MediaRegistrar) registerMedia(
 	if tmpFile != nil {
 		if probe.NeedsTranscode() {
 			slog.Info("register: transcoding to H.264", "filename", filename, "codec", probe.CodecName)
-			transcoded, terr := ingest.TranscodeH264(tmpFile.Name(), probe.CreatedAt)
+			// The transcode's container time is the time ingest read from the file. For a video dated
+			// from its EXIF that is the EXIF's: the transcode drops the EXIF, and the original
+			// container time is not UTC.
+			containerTime := probe.CreatedAt
+			if exifData.TakenAt != nil {
+				containerTime = exifData.TakenAt
+			}
+			transcoded, terr := ingest.TranscodeH264(tmpFile.Name(), containerTime)
 			tmpFile.Close()
 			os.Remove(tmpFile.Name())
 			if terr != nil {
