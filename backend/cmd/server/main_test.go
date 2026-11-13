@@ -179,6 +179,7 @@ func TestRouter_AuthWiring(t *testing.T) {
 func TestCameraZone(t *testing.T) {
 	warsaw, err := time.LoadLocation("Europe/Warsaw")
 	require.NoError(t, err)
+	rules := ingest.CameraRules{{Make: "Acme", IgnoreOffsetTag: true, Why: "test"}}
 	tests := []struct {
 		name string
 		cfg  config.Config
@@ -188,6 +189,8 @@ func TestCameraZone(t *testing.T) {
 		{"set to UTC is not a fallback", config.Config{CameraTimezone: time.UTC, CameraTimezoneSet: true}, ingest.CameraZone{Loc: time.UTC, Set: true}},
 		{"unset on a server with a zone", config.Config{CameraTimezone: warsaw}, ingest.CameraZone{Loc: warsaw}},
 		{"unset on a UTC server", config.Config{CameraTimezone: time.UTC}, ingest.CameraZone{Loc: time.UTC, UTCFallback: true}},
+		{"the camera rules come along", config.Config{CameraTimezone: warsaw, CameraTimezoneSet: true, CameraRules: rules},
+			ingest.CameraZone{Loc: warsaw, Set: true, Rules: rules}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

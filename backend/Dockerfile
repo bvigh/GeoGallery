@@ -15,6 +15,7 @@ WORKDIR /app
 
 COPY --from=builder /app/server .
 COPY --from=builder /app/migrations ./migrations
+COPY --from=builder /app/camera-rules.json .
 
 EXPOSE 8080
 ENTRYPOINT ["./server"]

@@ -23,6 +23,7 @@ import (
 // Positions of the new columns in the media INSERT's arguments.
 const (
 	insertArgTakenAt     = 7
+	insertArgFileHash    = 9
 	insertArgCameraModel = 10
 	insertArgWidth       = 11
 	insertArgHeight      = 12
@@ -140,7 +141,7 @@ func TestRegisterMedia_ExifTimeZone(t *testing.T) {
 
 func TestRegisterMedia_CaptureEvidence(t *testing.T) {
 	warsaw := mustLoadLocation(t, "Europe/Warsaw")
-	set := ingest.CameraZone{Loc: warsaw, Set: true}
+	set := ingest.CameraZone{Loc: warsaw, Set: true, Rules: panasonicOffsetRule}
 	unset := ingest.CameraZone{Loc: mustLoadLocation(t, "Asia/Tokyo")}
 	utcServer := ingest.CameraZone{Loc: time.UTC, UTCFallback: true}
 	mtime := time.Date(2001, 2, 3, 4, 5, 6, 789_000_000, time.UTC)
