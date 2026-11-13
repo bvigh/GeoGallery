@@ -257,43 +257,63 @@ func (h *ProvenanceHandler) readPhoto(ctx context.Context, key string) (fileRead
 }
 
 func newPhotoRead(head []byte, zone ingest.CameraZone) fileRead {
-	e := ingest.ExtractExif(bytes.NewReader(head), zone.Loc)
-	read := fileRead{
-		file: rereadFile{
-			WallClock:     nilIfEmpty(e.Raw.WallClock),
-			WallTag:       nilIfEmpty(e.Raw.WallTag),
-			OffsetTag:     nilIfEmpty(e.Raw.OffsetTag),
-			OffsetIgnored: e.Raw.OffsetIgnored,
-			GPSStamp:      utcTime(e.Raw.GPSStamp),
-			Make:          nilIfEmpty(e.Raw.Make),
-			Model:         nilIfEmpty(e.CameraModel),
-		},
-		tags: ingest.ReadTags(head),
-	}
-	if read.file.GPSStamp != nil && e.Raw.WallMinusGPS != nil {
-		seconds := e.Raw.WallMinusGPS.Seconds()
-		read.file.WallMinusGPSS = &seconds
-	}
-	if takenAt := utcTime(e.TakenAt); takenAt != nil {
-		_, offsetSeconds := e.TakenAt.Zone()
-		offsetMin := offsetSeconds / 60
-		read.rule = &rereadRule{
-			Source:    captureSource(e, ingest.VideoProbeResult{}, nil),
-			ZoneRule:  nilIfEmpty(e.TakenAtZone),
-			OffsetMin: &offsetMin,
-			TakenAt:   *takenAt,
-		}
-		if e.TakenAtZone == ingest.ZoneCamera {
-			name := zone.Name()
-			read.rule.ZoneName = &name
-		}
-	}
-	return read
+	file, rule := exifFileRead(ingest.ExtractExif(bytes.NewReader(head), zone), zone)
+	return fileRead{file: file, rule: rule, tags: ingest.ReadTags(head)}
 }
 
-// readVideo runs ffprobe on a presigned URL. A head-only read cannot work for a video, because moov
-// is often at the end.
+// exifFileRead is what a file's EXIF says about its capture time, and the rule today reads from it.
+func exifFileRead(e ingest.ExifData, zone ingest.CameraZone) (rereadFile, *rereadRule) {
+	file := rereadFile{
+		WallClock:     nilIfEmpty(e.Raw.WallClock),
+		WallTag:       nilIfEmpty(e.Raw.WallTag),
+		OffsetTag:     nilIfEmpty(e.Raw.OffsetTag),
+		OffsetIgnored: e.Raw.OffsetIgnored,
+		GPSStamp:      utcTime(e.Raw.GPSStamp),
+		Make:          nilIfEmpty(e.Raw.Make),
+		Model:         nilIfEmpty(e.CameraModel),
+	}
+	if file.GPSStamp != nil && e.Raw.WallMinusGPS != nil {
+		seconds := e.Raw.WallMinusGPS.Seconds()
+		file.WallMinusGPSS = &seconds
+	}
+	takenAt := utcTime(e.TakenAt)
+	if takenAt == nil {
+		return file, nil
+	}
+	_, offsetSeconds := e.TakenAt.Zone()
+	offsetMin := offsetSeconds / 60
+	rule := &rereadRule{
+		Source:    captureSource(e, ingest.VideoProbeResult{}, nil),
+		ZoneRule:  nilIfEmpty(e.TakenAtZone),
+		OffsetMin: &offsetMin,
+		TakenAt:   *takenAt,
+	}
+	if e.TakenAtZone == ingest.ZoneCamera {
+		name := zone.Name()
+		rule.ZoneName = &name
+	}
+	return file, rule
+}
+
+// readVideo runs ffprobe on a presigned URL. A head-only read cannot do that part, because moov is
+// often at the end. When a camera rule dates some videos from the EXIF inside them, it first takes
+// one ranged GET of the head ingest read that EXIF from, and decodes it in one of the
+// exifDecodeSlots, like a photo.
 func (h *ProvenanceHandler) readVideo(ctx context.Context, key string) (fileRead, error) {
+	var embedded videoExif
+	if h.cameraZone.Rules.DatesVideosFromExif() {
+		head, err := h.storage.ReadHead(ctx, key, mediaHeadSize)
+		if err != nil {
+			return fileRead{}, err
+		}
+		embedded, err = inExifDecodeSlot(ctx, func() videoExif {
+			e, ok := ingest.VideoExif(head, h.cameraZone)
+			return videoExif{e, ok}
+		})
+		if err != nil {
+			return fileRead{}, err
+		}
+	}
 	url, err := h.storage.PresignGetInternal(ctx, key)
 	if err != nil {
 		return fileRead{}, err
@@ -302,20 +322,23 @@ func (h *ProvenanceHandler) readVideo(ctx context.Context, key string) (fileRead
 	if err != nil {
 		return fileRead{}, err
 	}
-	return newVideoRead(probe), nil
+	return newVideoRead(probe, embedded, h.cameraZone), nil
 }
 
-func newVideoRead(probe ingest.VideoProbeResult) fileRead {
-	read := fileRead{
-		file: rereadFile{Video: &rereadVideo{
-			CreationTime: utcTime(probe.CreatedAt),
-			DurationS:    probe.DurationS,
-			Encoder:      nilIfEmpty(probe.Encoder),
-			Codec:        nilIfEmpty(ingest.CleanTag(probe.CodecName)),
-		}},
-		tags: ingest.TagsFromMap(probe.RawTags),
+// newVideoRead reads the time from the video's EXIF when the camera rules date it from there, as
+// ingest does, and from the container otherwise.
+func newVideoRead(probe ingest.VideoProbeResult, embedded videoExif, zone ingest.CameraZone) fileRead {
+	read := fileRead{tags: ingest.TagsFromMap(probe.RawTags)}
+	if embedded.ok {
+		read.file, read.rule = exifFileRead(embedded.exif, zone)
 	}
-	if created := read.file.Video.CreationTime; created != nil {
+	read.file.Video = &rereadVideo{
+		CreationTime: utcTime(probe.CreatedAt),
+		DurationS:    probe.DurationS,
+		Encoder:      nilIfEmpty(probe.Encoder),
+		Codec:        nilIfEmpty(ingest.CleanTag(probe.CodecName)),
+	}
+	if created := read.file.Video.CreationTime; !embedded.ok && created != nil {
 		read.rule = &rereadRule{Source: captureSrcContainer, TakenAt: *created}
 	}
 	return read

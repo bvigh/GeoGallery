@@ -133,7 +133,7 @@ The column is nullable with no default. Existing rows stay `NULL`. The four othe
 | `gps_utc` | RFC 3339 UTC or null | `GPSDateStamp` + `GPSTimeStamp`, recorded whenever the stamp parses, whether or not it was accepted and whether or not the file has a wall clock. |
 | `wall_minus_gps_s` | number or null | Wall clock minus `gps_utc`, before rounding. Null unless both parse. |
 | `offset_tag` | string or null | `OffsetTimeOriginal` as written, after `CleanTag`, even when it was ignored. |
-| `offset_ignored` | boolean | The tag exists and the make is in `offsetIgnoredMakes`. |
+| `offset_ignored` | boolean | The tag exists and the make's camera rule sets `ignore_offset_tag` (`backend/camera-rules.json`). |
 | `offset_used_min` | number or null | The UTC offset actually applied, in minutes, under whichever of the three rules applied. Null exactly when `zone` is null. |
 | `camera_zone` | string | The zone in effect at ingest: the IANA name when `CAMERA_TIMEZONE` is set, otherwise the literal `server zone (unset)`. Written for every file. |
 | `camera_zone_utc_fallback` | boolean | `CAMERA_TIMEZONE` was unset and the server's zone is UTC all year. |
@@ -156,7 +156,7 @@ The size of this object was not measured. It is expected to be a few hundred byt
 
 The applied offset needs no new field. `register.go` reads it from `ExifData.TakenAt.Zone()`, which holds for all three rules because `takenAt` keeps the location it applied.
 
-`raw` reads `OffsetTimeOriginal` whatever the make, so an ignored value is recorded, while `offsetTimeOriginal` still applies the exemption before it uses the tag. `takenAt`'s result must not change. A table test pins that.
+`raw` reads `OffsetTimeOriginal` whatever the make, so an ignored value is recorded, while `offsetTimeOriginal` still applies the camera rule before it uses the tag. `takenAt`'s result must not change. A table test pins that.
 
 Never call imagemeta's `Tags.GetDateTime`, which applies its own zone rules.
 
@@ -495,7 +495,7 @@ Two formats alone are not a warning. Of 3,290 two-sided estimates without ties, 
 
 Session-only, owner only, `auth.CanonicalUUID`, literal `owner_id`, 404 for shared items, a 15 s context. It is read-only and never moves `taken_at`.
 
-Photos use `storage.ReadHead(ctx, key, mediaHeadSize)`, one ranged GET of at most 1 MiB, then `ExtractExif` with today's zone. Photos are never transcoded, so the stored object is the original. Videos use `ingest.ProbeURL` on a URL from `storage.PresignGetInternal`, signed for `S3_ENDPOINT`: the backend fetches it itself, and `S3_PUBLIC_ENDPOINT`, which `PresignGet` signs for, may be a host only browsers reach. Never use `ProbeVideo`, which copies the whole file. Both helpers are ported from branch `fix/exif-offset-video-location`, commit `f2afa0d`. A head-only read cannot work for a video, because `moov` is often at the end. Over HTTP with `Range`, a synthetic 60 MB moov-at-end file needed 3 requests and about 4.4 MB.
+Photos use `storage.ReadHead(ctx, key, mediaHeadSize)`, one ranged GET of at most 1 MiB, then `ExtractExif` with today's zone. Photos are never transcoded, so the stored object is the original. Videos use `ingest.ProbeURL` on a URL from `storage.PresignGetInternal`, signed for `S3_ENDPOINT`: the backend fetches it itself, and `S3_PUBLIC_ENDPOINT`, which `PresignGet` signs for, may be a host only browsers reach. Never use `ProbeVideo`, which copies the whole file. When a camera rule sets `video_time_from_exif`, a video first takes the same ranged GET as a photo, and `ingest.VideoExif` reads the EXIF a Panasonic keeps in its `PANA` box, as ingest does: then `rule_today` comes from that EXIF, not from the container. Both helpers are ported from branch `fix/exif-offset-video-location`, commit `f2afa0d`. A head-only read cannot work for a video, because `moov` is often at the end. Over HTTP with `Range`, a synthetic 60 MB moov-at-end file needed 3 requests and about 4.4 MB.
 
 An S3 or ffprobe failure is logged and returns 502. A timeout returns 504.
 
@@ -806,7 +806,7 @@ Where the code differs from the specification above, or settles something it lef
 - A year outside 0 to 9999 is `null` in evidence and on both routes, because JSON cannot carry it. A stored `taken_at` like that reads as no time. So does one whose match window leaves that range: `item.taken_at` is `null`, the state is `no_time` and the context is empty. The file re-read still reports that stored time, because it uses no window. `nearest_outside.before` or `.after` is `null` when the nearest row on that side is out of range, since every row further out is too.
 - `HaversineKm` clamps its haversine term to at most 1. Exact antipodes give half the circumference, with distance factor and confidence 0, never `NaN`.
 - `capture_evidence` is `NULL` if it cannot be encoded at all. `parseProbeOutput` never produces such a value.
-- `offset_ignored` is true for a blank offset tag on an exempt make, and `offset_tag` is then `null`.
+- `offset_ignored` is true for a blank offset tag on a make whose rule ignores it, and `offset_tag` is then `null`.
 - `others` was first one row per format with its single nearest point. A follow-up gave each format both sides and its own estimate, as "Computing the fields" now describes.
 - `ReadTags` lists only IFD0 and the Exif and GPS IFDs, because imagemeta names the Interoperability IFD's tags 1 and 2 `GPSLatitudeRef` and `GPSLatitude`.
 - EXIF is read through imagemeta, which replaced goexif (#66) after this note was written. On one real library of 14,188 objects, `ExtractExif` and `Raw` agreed with the goexif version on all but 13, and each of those gained a value. 3 files are partial, all of them files goexif could not read at all.
@@ -1369,7 +1369,7 @@ Some of the rejected views need defining, so that the reopen triggers mean somet
 - HEIC, HEIF, PNG and WebP are read through imagemeta, but only from the first 1 MiB, and no real phone file has been tried (#29).
 - `TranscodeH264` drops `creation_time`. Step 1 fixes new files. How many stored videos were transcoded is unknown.
 - One `CAMERA_TIMEZONE` applies to every user (#25). A camera whose clock was changed by hand is misread, with no GPS tag or offset to catch it. A wall clock in the repeated daylight-saving hour is ambiguous, since Go does not specify which occurrence `time.Date` picks.
-- A make with a wrong offset tag goes unnoticed until someone adds it to `offsetIgnoredMakes`.
+- A make with a wrong offset tag goes unnoticed until someone adds a rule for it to `backend/camera-rules.json`.
 - A video's `creation_time` is parsed as RFC 3339 even when the file holds a wall clock labelled as UTC, and such a video is off by the camera's offset.
 - A video's `taken_at` is sometimes the end of the recording. No correction exists.
 - Items can be dated in the future; there is no guard at ingest. 6 such items exist, all without a location.

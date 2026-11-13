@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,6 +18,8 @@ func setBaseEnv(t *testing.T) {
 		"S3_ENDPOINT", "S3_PUBLIC_ENDPOINT"} {
 		t.Setenv(k, "")
 	}
+	// The file the backend ships with, which every test then also loads.
+	t.Setenv("CAMERA_RULES_FILE", "../../camera-rules.json")
 }
 
 func TestLoad_Defaults(t *testing.T) {
@@ -242,4 +246,39 @@ func TestCameraTimezoneFallsBackToUTC(t *testing.T) {
 			assert.Equal(t, tt.want, cfg.CameraTimezoneFallsBackToUTC())
 		})
 	}
+}
+
+func TestLoad_CameraRules(t *testing.T) {
+	t.Run("the shipped file", func(t *testing.T) {
+		setBaseEnv(t)
+		cfg, err := Load()
+		require.NoError(t, err)
+		assert.Equal(t, "../../camera-rules.json", cfg.CameraRulesFile)
+		assert.True(t, cfg.CameraRules.For("Panasonic").IgnoreOffsetTag)
+	})
+	t.Run("unset, the file beside the binary, and its absence fails startup", func(t *testing.T) {
+		setBaseEnv(t)
+		t.Setenv("CAMERA_RULES_FILE", "")
+		_, err := Load()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `CAMERA_RULES_FILE "./camera-rules.json"`)
+	})
+	t.Run("an invalid file fails startup", func(t *testing.T) {
+		setBaseEnv(t)
+		path := filepath.Join(t.TempDir(), "rules.json")
+		require.NoError(t, os.WriteFile(path, []byte(`{"cameras": [{"make": "Acme", "ignore_offset": true, "why": "x"}]}`), 0o600))
+		t.Setenv("CAMERA_RULES_FILE", path)
+		_, err := Load()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown field")
+	})
+	t.Run("an empty list is allowed", func(t *testing.T) {
+		setBaseEnv(t)
+		path := filepath.Join(t.TempDir(), "rules.json")
+		require.NoError(t, os.WriteFile(path, []byte(`{"cameras": []}`), 0o600))
+		t.Setenv("CAMERA_RULES_FILE", path)
+		cfg, err := Load()
+		require.NoError(t, err)
+		assert.Empty(t, cfg.CameraRules)
+	})
 }

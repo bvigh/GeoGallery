@@ -1,0 +1,10 @@
+{
+  "cameras": [
+    {
+      "make": "Panasonic",
+      "ignore_offset_tag": true,
+      "video_time_from_exif": true,
+      "why": "ignore_offset_tag: the camera writes the offset of its own zone setting, without the hour its clock may have been set forward by hand. On one real library a DC-TZ200 wrote +01:00 all year while its clock showed Central European Summer Time, so the offset is ignored and the camera zone applies. video_time_from_exif: a Panasonic MP4 stores the camera's wall clock as the container's creation_time, marked UTC, so that time is off by the camera's offset. The camera's EXIF, with the same wall clock, sits in the file's PANA box and is read like a photo's."
+    }
+  ]
+}

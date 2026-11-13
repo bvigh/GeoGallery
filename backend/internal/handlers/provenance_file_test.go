@@ -38,7 +38,10 @@ const (
 var (
 	rereadNoon     = time.Date(2001, 2, 3, 12, 0, 0, 0, time.UTC)
 	rereadUploaded = time.Date(2001, 3, 1, 0, 0, 0, 0, time.UTC)
-	utcZone        = ingest.CameraZone{Loc: time.UTC, Set: true}
+	utcZone        = ingest.CameraZone{Loc: time.UTC, Set: true, Rules: panasonicOffsetRule}
+	// panasonicOffsetRule is the shipped Panasonic rule without its video part, so no video re-read
+	// here reads a head unless a test asks for it.
+	panasonicOffsetRule = ingest.CameraRules{{Make: "Panasonic", IgnoreOffsetTag: true, Why: "test"}}
 )
 
 // noonPlus is a stored time, delta after the file's clock.
@@ -272,7 +275,7 @@ func TestProvenanceFile_VideoClasses(t *testing.T) {
 }
 
 func TestProvenanceFile_RuleToday(t *testing.T) {
-	zone := ingest.CameraZone{Loc: time.FixedZone("Test/Zone", 330*60), Set: true}
+	zone := ingest.CameraZone{Loc: time.FixedZone("Test/Zone", 330*60), Set: true, Rules: panasonicOffsetRule}
 	wall := exiftest.Photo{DateTimeOriginal: rereadWallNoon}
 	ifd0 := exiftest.Photo{DateTime: rereadWallNoon}
 	offset := exiftest.Photo{DateTimeOriginal: rereadWallNoon, OffsetTimeOriginal: "+02:00"}
@@ -640,7 +643,18 @@ func TestProvenanceFile_ReadsTheRightWay(t *testing.T) {
 
 		assert.Equal(t, rereadSame, callFile(t, newRereadHandler(row, store, utcZone, probeMustNotRun(t))).Class)
 	})
-	t.Run("a video goes to ffprobe by a URL presigned for S3_ENDPOINT and is never read through S3", func(t *testing.T) {
+	t.Run("with a rule dating videos from their EXIF, a video also takes one ranged read of 1 MiB", func(t *testing.T) {
+		store := &stubRereadStorage{}
+		zone := utcZone
+		zone.Rules = panasonicVideoRules
+
+		callFile(t, newRereadHandler(videoRow(noonPlus(0), ""), store, zone, probeReturns(ingest.VideoProbeResult{})))
+
+		assert.Equal(t, []string{rereadKey}, store.headKeys)
+		assert.Equal(t, []int64{1 << 20}, store.headSizes)
+		assert.Equal(t, []string{rereadKey}, store.presigned)
+	})
+	t.Run("without one, a video goes to ffprobe by a URL presigned for S3_ENDPOINT and is never read through S3", func(t *testing.T) {
 		store := &stubRereadStorage{}
 		var gotURL string
 		probe := func(_ context.Context, url string) (ingest.VideoProbeResult, error) {

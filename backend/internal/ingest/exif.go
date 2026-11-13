@@ -57,13 +57,15 @@ type RawExif struct {
 	Partial       bool // the decoder stopped at an error, and the tags read before it were kept
 }
 
-// CameraZone is the zone camera clocks are assumed to show, with what ingest records about where it
-// came from. time.Local's name is "Local", which would hide a container running in UTC. A zero
-// CameraZone reads wall clocks as UTC.
+// CameraZone is how ingest reads camera clocks: the zone they are assumed to show, with what ingest
+// records about where it came from, and the camera rules that say which of a file's own clocks not
+// to trust. time.Local's name is "Local", which would hide a container running in UTC. A zero
+// CameraZone reads wall clocks as UTC and applies no camera rules.
 type CameraZone struct {
 	Loc         *time.Location // CAMERA_TIMEZONE, or time.Local when unset
 	Set         bool           // CAMERA_TIMEZONE was set
 	UTCFallback bool           // unset, and the server's zone is UTC all year
+	Rules       CameraRules    // CAMERA_RULES_FILE
 }
 
 // Name returns the IANA name when Set, otherwise "server zone (unset)".
@@ -123,10 +125,10 @@ var exifTagsRead = map[string]string{
 }
 
 // ExtractExif reads the EXIF block of the image at the start of r, which may be only the head of
-// the file. Anything that is not a supported image gives an empty result. cameraZone is the
-// timezone camera clocks are assumed to show (CAMERA_TIMEZONE); nil means UTC. takenAt explains
-// how the capture time is read, and Raw keeps what it read it from.
-func ExtractExif(r io.ReadSeeker, cameraZone *time.Location) ExifData {
+// the file. Anything that is not a supported image gives an empty result. zone holds the timezone
+// camera clocks are assumed to show (CAMERA_TIMEZONE; nil Loc means UTC) and the camera rules.
+// takenAt explains how the capture time is read, and Raw keeps what it read it from.
+func ExtractExif(r io.ReadSeeker, zone CameraZone) ExifData {
 	tags, err := readExifTags(r)
 	var result ExifData
 
@@ -135,11 +137,12 @@ func ExtractExif(r io.ReadSeeker, cameraZone *time.Location) ExifData {
 		result.Lng = &lng
 	}
 
+	cameraZone := zone.Loc
 	if cameraZone == nil {
 		cameraZone = time.UTC
 	}
-	result.TakenAt, result.TakenAtZone = tags.takenAt(cameraZone)
-	result.Raw = tags.raw()
+	result.TakenAt, result.TakenAtZone = tags.takenAt(cameraZone, zone.Rules)
+	result.Raw = tags.raw(zone.Rules)
 	result.Raw.Partial = err != nil && len(tags) > 0
 
 	if s, ok := tags.text("Model"); ok {
@@ -280,10 +283,11 @@ const exifTimeLayout = "2006:01:02 15:04:05"
 // native and a Docker server):
 //  1. when the photo's GPS timestamp (UTC) puts the camera clock within gpsClockTolerance of a
 //     UTC offset in real use, that offset. It is measured, so it outranks what the camera declares;
-//  2. the photo's OffsetTimeOriginal, unless its make is in offsetIgnoredMakes. A phone writes the
-//     offset its clock really shows, abroad too, and many phones write no GPS timestamp;
+//  2. the photo's OffsetTimeOriginal, unless the camera rules say to ignore it for the make. A
+//     phone writes the offset its clock really shows, abroad too, and many phones write no GPS
+//     timestamp;
 //  3. otherwise cameraZone, with its daylight saving rules on that date.
-func (t exifTags) takenAt(cameraZone *time.Location) (*time.Time, string) {
+func (t exifTags) takenAt(cameraZone *time.Location, rules CameraRules) (*time.Time, string) {
 	clock := t.wallClock()
 	if !clock.parsed {
 		return nil, ""
@@ -293,7 +297,7 @@ func (t exifTags) takenAt(cameraZone *time.Location) (*time.Time, string) {
 		at := wallAtOffset(wall, offset)
 		return &at, ZoneGPS
 	}
-	if offset, ok := t.offsetTimeOriginal(); ok {
+	if offset, ok := t.offsetTimeOriginal(rules); ok {
 		at := wallAtOffset(wall, offset)
 		return &at, ZoneOffset
 	}
@@ -302,7 +306,7 @@ func (t exifTags) takenAt(cameraZone *time.Location) (*time.Time, string) {
 }
 
 // raw collects RawExif through the helpers takenAt uses.
-func (t exifTags) raw() RawExif {
+func (t exifTags) raw(rules CameraRules) RawExif {
 	clock := t.wallClock()
 	cameraMake, _ := t.text("Make")
 	raw := RawExif{
@@ -320,7 +324,7 @@ func (t exifTags) raw() RawExif {
 	if _, found := t["OffsetTimeOriginal"]; found {
 		offsetTag, _ := t.text("OffsetTimeOriginal")
 		raw.OffsetTag = CleanTag(offsetTag)
-		raw.OffsetIgnored = t.offsetMakeIgnored()
+		raw.OffsetIgnored = t.offsetTagIgnored(rules)
 	}
 	return raw
 }
@@ -330,17 +334,13 @@ func wallAtOffset(wall time.Time, offset time.Duration) time.Time {
 	return wall.Add(-offset).In(time.FixedZone("", int(offset/time.Second)))
 }
 
-// offsetIgnoredMakes lists camera makes, in lower case, whose OffsetTimeOriginal is wrong, so their
-// photos are read in the camera zone instead. The value alone cannot tell them apart: the Panasonic
-// DC-TZ200 writes "+01:00" all year, even while its clock shows Central European Summer Time, and a
-// phone in London writes the same "+01:00" and means it. If another camera turns out to write a
-// wrong offset, add its make here. Photos it already ingested keep their stored times until repaired.
-var offsetIgnoredMakes = map[string]bool{"panasonic": true}
-
 // offsetTimeOriginal returns the photo's OffsetTimeOriginal when it is a UTC offset in real use and
-// its make is trusted.
-func (t exifTags) offsetTimeOriginal() (time.Duration, bool) {
-	if t.offsetMakeIgnored() {
+// the camera rules do not say to ignore it for the make. The value alone cannot tell a wrong offset
+// apart: a camera whose clock was set forward by hand writes "+01:00" while showing Central European
+// Summer Time, and a phone in London writes the same "+01:00" and means it. So the exemption goes by
+// make, in the rules file. Photos already ingested keep their stored times until repaired.
+func (t exifTags) offsetTimeOriginal(rules CameraRules) (time.Duration, bool) {
+	if t.offsetTagIgnored(rules) {
 		return 0, false
 	}
 	s, ok := t.text("OffsetTimeOriginal")
@@ -350,10 +350,10 @@ func (t exifTags) offsetTimeOriginal() (time.Duration, bool) {
 	return parseUTCOffset(s)
 }
 
-// offsetMakeIgnored reports whether the photo's make is in offsetIgnoredMakes.
-func (t exifTags) offsetMakeIgnored() bool {
+// offsetTagIgnored reports whether the camera rules say to ignore the make's OffsetTimeOriginal.
+func (t exifTags) offsetTagIgnored(rules CameraRules) bool {
 	cameraMake, _ := t.text("Make")
-	return offsetIgnoredMakes[strings.ToLower(strings.TrimSpace(cameraMake))]
+	return rules.For(cameraMake).IgnoreOffsetTag
 }
 
 // parseUTCOffset reads "+01:00". Cameras without a zone write blanks or colons, which fail here.
