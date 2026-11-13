@@ -121,7 +121,7 @@ The hosted instance uses Logto Cloud. Any OIDC provider works. [docs/auth.md](do
    docker compose exec backend ./server invite --admin
    ```
 
-`docker-compose.yml` hard-codes the backend's `S3_ENDPOINT` to `http://minio:9000`, which browsers cannot resolve. Presigned media URLs point there, so edit it to a browser-reachable S3 host before hosting (known gap).
+Presigned media URLs are signed for `S3_PUBLIC_ENDPOINT` (default `http://localhost:${MINIO_API_PORT:-9000}`), while the backend itself reaches MinIO at `http://minio:9000`. Before hosting, set `S3_PUBLIC_ENDPOINT` in `.env` to a browser-reachable S3 host.
 
 Do not expose the database, MinIO console or backend ports publicly; see [Port hardening](docs/auth.md#port-hardening).
 

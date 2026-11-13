@@ -19,7 +19,8 @@ const (
 
 type Config struct {
 	DatabaseURL         string
-	S3Endpoint          string
+	S3Endpoint          string // where the backend reaches S3
+	S3PublicEndpoint    string // presigned URLs are signed for it, so browsers must reach it; unset, S3Endpoint
 	S3AccessKey         string
 	S3SecretKey         string
 	S3Bucket            string
@@ -75,6 +76,7 @@ func Load() (*Config, error) {
 		SessionTTLHours:     getEnvInt("SESSION_TTL_HOURS", 720),
 	}
 	cfg.OIDCDiscoveryURL = getEnv("OIDC_DISCOVERY_URL", cfg.OIDCIssuerURL)
+	cfg.S3PublicEndpoint = getEnv("S3_PUBLIC_ENDPOINT", cfg.S3Endpoint)
 
 	cfg.CameraTimezone = time.Local
 	if name := os.Getenv("CAMERA_TIMEZONE"); name != "" {

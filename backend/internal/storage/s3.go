@@ -15,9 +15,11 @@ import (
 )
 
 type Client struct {
-	s3       *s3.Client
-	uploader *transfermanager.Client
-	bucket   string
+	s3                *s3.Client
+	uploader          *transfermanager.Client
+	presigner         *s3.PresignClient // signs for cfg.S3PublicEndpoint; never sends a request
+	internalPresigner *s3.PresignClient // signs for cfg.S3Endpoint, for tools the backend runs itself
+	bucket            string
 }
 
 func NewClient(cfg *config.Config) (*Client, error) {
@@ -31,15 +33,27 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
 
-	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(cfg.S3Endpoint)
-		o.UsePathStyle = true // required for MinIO
-	})
+	newS3 := func(endpoint string) *s3.Client {
+		return s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(endpoint)
+			o.UsePathStyle = true // required for MinIO
+		})
+	}
+	client := newS3(cfg.S3Endpoint)
+
+	// A presigned URL is signed for its host, so it cannot be rewritten afterwards: sign it for the
+	// endpoint browsers use. Signing is local, so the backend never has to reach that host itself.
+	public := client
+	if cfg.S3PublicEndpoint != "" && cfg.S3PublicEndpoint != cfg.S3Endpoint {
+		public = newS3(cfg.S3PublicEndpoint)
+	}
 
 	return &Client{
-		s3:       client,
-		uploader: transfermanager.New(client),
-		bucket:   cfg.S3Bucket,
+		s3:                client,
+		uploader:          transfermanager.New(client),
+		presigner:         s3.NewPresignClient(public),
+		internalPresigner: s3.NewPresignClient(client),
+		bucket:            cfg.S3Bucket,
 	}, nil
 }
 
@@ -62,10 +76,21 @@ func (c *Client) Upload(ctx context.Context, key string, body io.Reader, size in
 // presignTTL bounds how long a URL stays usable after logout or a user being disabled.
 const presignTTL = 15 * time.Minute
 
+// PresignGet returns a URL for a browser, signed for S3_PUBLIC_ENDPOINT. The backend itself may not
+// reach that host (under docker compose it is the host's localhost), so it never fetches this URL.
 func (c *Client) PresignGet(ctx context.Context, key string) (string, error) {
-	presigner := s3.NewPresignClient(c.s3)
+	return presignGet(ctx, c.presigner, c.bucket, key)
+}
+
+// PresignGetInternal returns a URL for a tool the backend runs itself, such as ffprobe, signed for
+// S3_ENDPOINT. Browsers may not reach that host, so this URL never goes to one.
+func (c *Client) PresignGetInternal(ctx context.Context, key string) (string, error) {
+	return presignGet(ctx, c.internalPresigner, c.bucket, key)
+}
+
+func presignGet(ctx context.Context, presigner *s3.PresignClient, bucket, key string) (string, error) {
 	req, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(c.bucket),
+		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	}, s3.WithPresignExpires(presignTTL))
 	if err != nil {

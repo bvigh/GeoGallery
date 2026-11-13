@@ -495,7 +495,7 @@ Two formats alone are not a warning. Of 3,290 two-sided estimates without ties, 
 
 Session-only, owner only, `auth.CanonicalUUID`, literal `owner_id`, 404 for shared items, a 15 s context. It is read-only and never moves `taken_at`.
 
-Photos use `storage.ReadHead(ctx, key, mediaHeadSize)`, one ranged GET of at most 1 MiB, then `ExtractExif` with today's zone. Photos are never transcoded, so the stored object is the original. Videos use `ingest.ProbeURL` on a presigned URL. Never use `ProbeVideo`, which copies the whole file. When a camera rule sets `video_time_from_exif`, a video first takes the same ranged GET as a photo, and `ingest.VideoExif` reads the EXIF a Panasonic keeps in its `PANA` box, as ingest does: then `rule_today` comes from that EXIF, not from the container. Both helpers are ported from branch `fix/exif-offset-video-location`, commit `f2afa0d`. A head-only read cannot work for a video, because `moov` is often at the end. Over HTTP with `Range`, a synthetic 60 MB moov-at-end file needed 3 requests and about 4.4 MB.
+Photos use `storage.ReadHead(ctx, key, mediaHeadSize)`, one ranged GET of at most 1 MiB, then `ExtractExif` with today's zone. Photos are never transcoded, so the stored object is the original. Videos use `ingest.ProbeURL` on a URL from `storage.PresignGetInternal`, signed for `S3_ENDPOINT`: the backend fetches it itself, and `S3_PUBLIC_ENDPOINT`, which `PresignGet` signs for, may be a host only browsers reach. Never use `ProbeVideo`, which copies the whole file. When a camera rule sets `video_time_from_exif`, a video first takes the same ranged GET as a photo, and `ingest.VideoExif` reads the EXIF a Panasonic keeps in its `PANA` box, as ingest does: then `rule_today` comes from that EXIF, not from the container. Both helpers are ported from branch `fix/exif-offset-video-location`, commit `f2afa0d`. A head-only read cannot work for a video, because `moov` is often at the end. Over HTTP with `Range`, a synthetic 60 MB moov-at-end file needed 3 requests and about 4.4 MB.
 
 An S3 or ffprobe failure is logged and returns 502. A timeout returns 504.
 
@@ -583,7 +583,7 @@ nginx gives up on an upstream after 60 s by default. That closes the upstream co
 ```nginx
 location = /api/gps-matcher/run {
     proxy_read_timeout 900s;
-    proxy_pass http://backend:8080;
+    proxy_pass $backend;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
 }
@@ -978,7 +978,7 @@ With a non-empty `hide`, buckets are per source rather than per format and `form
 ```nginx
 location ~ ^/api/(trips|albums)/[^/]+/track$ {
     access_log off;
-    proxy_pass http://backend:8080;
+    proxy_pass $backend;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
 }

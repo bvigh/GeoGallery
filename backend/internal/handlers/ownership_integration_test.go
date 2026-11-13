@@ -65,6 +65,10 @@ func (s *fakeObjectStore) PresignGet(_ context.Context, key string) (string, err
 	return "https://s3.test/" + key + "?X-Amz-Signature=sig", nil
 }
 
+func (s *fakeObjectStore) PresignGetInternal(_ context.Context, key string) (string, error) {
+	return "http://s3.internal.test/" + key + "?X-Amz-Signature=sig", nil
+}
+
 func (s *fakeObjectStore) Delete(_ context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

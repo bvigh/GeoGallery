@@ -32,6 +32,7 @@ const (
 	recordedCopy    = `{"v":1,"by":"ingest","transcoded":true}`
 	rereadLavf      = "Lavf60.16.100"
 	rereadPresigned = "https://s3.test/" + rereadKey + "?X-Amz-Signature=deadbeef"
+	rereadBrowser   = "https://s3.public.test/" + rereadKey + "?X-Amz-Signature=browser"
 )
 
 var (
@@ -82,17 +83,27 @@ type stubRereadStorage struct {
 	presignErr error
 	blockHead  bool
 
-	mu        sync.Mutex
-	headKeys  []string
-	headSizes []int64
-	presigned []string
+	mu               sync.Mutex
+	headKeys         []string
+	headSizes        []int64
+	presigned        []string
+	browserPresigned []string
 }
 
-func (s *stubRereadStorage) PresignGet(_ context.Context, key string) (string, error) {
+func (s *stubRereadStorage) PresignGetInternal(_ context.Context, key string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.presigned = append(s.presigned, key)
 	return rereadPresigned, s.presignErr
+}
+
+// PresignGet is the browser's URL, which the backend may not reach. rereadStorage does not need it;
+// the stub has it so a re-read switched to it fails the test below instead of compiling silently.
+func (s *stubRereadStorage) PresignGet(_ context.Context, key string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.browserPresigned = append(s.browserPresigned, key)
+	return rereadBrowser, nil
 }
 
 func (s *stubRereadStorage) ReadHead(ctx context.Context, key string, n int64) ([]byte, error) {
@@ -643,7 +654,7 @@ func TestProvenanceFile_ReadsTheRightWay(t *testing.T) {
 		assert.Equal(t, []int64{1 << 20}, store.headSizes)
 		assert.Equal(t, []string{rereadKey}, store.presigned)
 	})
-	t.Run("without one, a video goes to ffprobe by presigned URL and is never read through S3", func(t *testing.T) {
+	t.Run("without one, a video goes to ffprobe by a URL presigned for S3_ENDPOINT and is never read through S3", func(t *testing.T) {
 		store := &stubRereadStorage{}
 		var gotURL string
 		probe := func(_ context.Context, url string) (ingest.VideoProbeResult, error) {
@@ -655,6 +666,7 @@ func TestProvenanceFile_ReadsTheRightWay(t *testing.T) {
 
 		assert.Equal(t, rereadPresigned, gotURL)
 		assert.Equal(t, []string{rereadKey}, store.presigned)
+		assert.Empty(t, store.browserPresigned, "the backend may not reach S3_PUBLIC_ENDPOINT")
 		assert.Empty(t, store.headKeys)
 	})
 	t.Run("the query is scoped to the owner, literally", func(t *testing.T) {
@@ -1026,7 +1038,9 @@ func TestProvenanceFile_RealVideo(t *testing.T) {
 
 type signedURLStorage struct{ url string }
 
-func (s *signedURLStorage) PresignGet(context.Context, string) (string, error) { return s.url, nil }
+func (s *signedURLStorage) PresignGetInternal(context.Context, string) (string, error) {
+	return s.url, nil
+}
 
 func (s *signedURLStorage) ReadHead(context.Context, string, int64) ([]byte, error) {
 	return nil, errors.New("a video is never read through S3")

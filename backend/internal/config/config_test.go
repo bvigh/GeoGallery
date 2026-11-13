@@ -14,7 +14,8 @@ func setBaseEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DATABASE_URL", "postgres://x@localhost/db")
 	for _, k := range []string{"PUBLIC_URL", "OIDC_ISSUER_URL", "OIDC_DISCOVERY_URL", "OIDC_CLIENT_ID",
-		"OIDC_CLIENT_SECRET", "OIDC_SCOPES", "SESSION_TTL_HOURS", "S3_ACCESS_KEY", "S3_SECRET_KEY", "CAMERA_TIMEZONE"} {
+		"OIDC_CLIENT_SECRET", "OIDC_SCOPES", "SESSION_TTL_HOURS", "S3_ACCESS_KEY", "S3_SECRET_KEY", "CAMERA_TIMEZONE",
+		"S3_ENDPOINT", "S3_PUBLIC_ENDPOINT"} {
 		t.Setenv(k, "")
 	}
 	// The file the backend ships with, which every test then also loads.
@@ -81,6 +82,28 @@ func TestLoad_PublicURL(t *testing.T) {
 			assert.Equal(t, tt.wantOrigin, cfg.PublicOrigin)
 			assert.Equal(t, tt.wantOrigin, cfg.PublicURL)
 			assert.Equal(t, tt.wantSecure, cfg.CookieSecure)
+		})
+	}
+}
+
+func TestLoad_S3PublicEndpoint(t *testing.T) {
+	tests := []struct {
+		name, endpoint, public   string
+		wantEndpoint, wantPublic string
+	}{
+		{"both unset", "", "", "http://localhost:9000", "http://localhost:9000"},
+		{"public defaults to the endpoint", "https://s3.example.com", "", "https://s3.example.com", "https://s3.example.com"},
+		{"container-only endpoint", "http://minio:9000", "http://localhost:9000", "http://minio:9000", "http://localhost:9000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("S3_ENDPOINT", tt.endpoint)
+			t.Setenv("S3_PUBLIC_ENDPOINT", tt.public)
+			cfg, err := Load()
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantEndpoint, cfg.S3Endpoint)
+			assert.Equal(t, tt.wantPublic, cfg.S3PublicEndpoint)
 		})
 	}
 }
