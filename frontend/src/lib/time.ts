@@ -61,3 +61,11 @@ export function formatDuration(seconds: number): string {
   }
   return parts.join(" ");
 }
+
+// A UTC offset as written in EXIF, for example "+01:00" or "-03:30".
+export function formatOffset(minutes: number): string {
+  const absolute = Math.abs(minutes);
+  const hours = String(Math.floor(absolute / 60)).padStart(2, "0");
+  const rest = String(absolute % 60).padStart(2, "0");
+  return `${minutes < 0 ? "-" : "+"}${hours}:${rest}`;
+}

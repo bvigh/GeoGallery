@@ -4,6 +4,7 @@ import type {
   Bracket,
   CaptureEvidence,
   Estimate,
+  EvidenceClockRule,
   FileReread,
   OtherFormat,
   OtherPoint,
@@ -99,6 +100,7 @@ export function makeEvidence(overrides: Partial<CaptureEvidence> = {}): CaptureE
   return {
     v: 1,
     by: "ingest",
+    retimed_from: null,
     src: "exif_original",
     zone: "camera",
     wall: "2000:01:01 01:01:00",
@@ -107,6 +109,7 @@ export function makeEvidence(overrides: Partial<CaptureEvidence> = {}): CaptureE
     offset_tag: null,
     offset_ignored: false,
     offset_used_min: 60,
+    clock_rule: null,
     camera_zone: "Etc/GMT-1",
     camera_zone_utc_fallback: false,
     make: null,
@@ -143,6 +146,7 @@ export function makeReread(overrides: Partial<FileReread> = {}): FileReread {
       zone_rule: "camera",
       offset_min: 60,
       zone_name: "Etc/GMT-1",
+      clock_rule: null,
       taken_at: "2000-01-01T00:01:00Z",
     },
     delta_s: 0,
@@ -195,5 +199,18 @@ export function makeResponse(id: string, overrides: ResponseOverrides = {}): Pro
       ...overrides.placement,
     },
     context: makeTrack(overrides.context),
+  };
+}
+
+// A rule as capture_evidence and rule_today carry it: the owner's camera whose clock showed UTC+2.
+export function makeEvidenceClockRule(overrides: Partial<EvidenceClockRule> = {}): EvidenceClockRule {
+  return {
+    id: "r1",
+    make: "Panasonic",
+    model: "DC-TZ200",
+    offset_min: 120,
+    starts_on: null,
+    ends_on: null,
+    ...overrides,
   };
 }

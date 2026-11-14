@@ -9,7 +9,13 @@ vi.mock("@/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/client")>();
   return {
     ApiError: actual.ApiError,
-    api: { listTokens: vi.fn(), createToken: vi.fn(), revokeToken: vi.fn() },
+    api: {
+      listTokens: vi.fn(),
+      createToken: vi.fn(),
+      revokeToken: vi.fn(),
+      listCameraClockRules: vi.fn(),
+      listCameras: vi.fn(),
+    },
   };
 });
 
@@ -17,6 +23,8 @@ const mockApi = api as unknown as {
   listTokens: ReturnType<typeof vi.fn>;
   createToken: ReturnType<typeof vi.fn>;
   revokeToken: ReturnType<typeof vi.fn>;
+  listCameraClockRules: ReturnType<typeof vi.fn>;
+  listCameras: ReturnType<typeof vi.fn>;
 };
 
 const future = new Date(Date.now() + 30 * 86400_000).toISOString();
@@ -48,6 +56,8 @@ describe("SettingsPage", () => {
     mockApi.listTokens.mockResolvedValue([activeToken, revokedToken]);
     mockApi.createToken.mockResolvedValue(created);
     mockApi.revokeToken.mockResolvedValue(undefined);
+    mockApi.listCameraClockRules.mockResolvedValue([]);
+    mockApi.listCameras.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -65,6 +75,28 @@ describe("SettingsPage", () => {
     const oldRow = screen.getByText("old").closest("tr")!;
     expect(within(oldRow).getByText("revoked")).toBeInTheDocument();
     expect(within(oldRow).queryByRole("button", { name: /Revoke/ })).not.toBeInTheDocument();
+  });
+
+  it("has the API tokens and the camera clocks sections", async () => {
+    mockApi.listCameraClockRules.mockResolvedValue([
+      {
+        id: "r1",
+        make: "Panasonic",
+        model: "DC-TZ200",
+        utc_offset_min: 120,
+        starts_on: null,
+        ends_on: null,
+        note: "",
+        created_at: "2026-11-01T10:00:00Z",
+        updated_at: "2026-11-01T10:00:00Z",
+      },
+    ]);
+    render(<SettingsPage />);
+    expect(screen.getByRole("heading", { name: "API tokens" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Camera clocks" })).toBeInTheDocument();
+    expect(await screen.findByText("cron")).toBeInTheDocument();
+    expect(await screen.findByText("Clock showed UTC+02:00 · always")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add rule" })).toBeInTheDocument();
   });
 
   it("shows the empty state", async () => {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { api, ApiError } from "@/api/client";
 import type { ApiToken, CreatedApiToken } from "@/types";
 import { CopyField } from "@/components/CopyField";
+import { CameraClockRules } from "@/components/settings/CameraClockRules";
 import {
   Dialog,
   DialogContent,
@@ -261,6 +262,9 @@ export function SettingsPage() {
           </div>
         )}
       </section>
+      <div className="mt-8">
+        <CameraClockRules />
+      </div>
       <CreateTokenDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}

@@ -3,11 +3,14 @@ import type {
   Album,
   AlbumMember,
   ApiToken,
+  CameraClockRule,
+  CameraClockRuleInput,
   CreatedApiToken,
   CurrentUser,
   DirectoryUser,
   FileReread,
   GpsUploadResult,
+  LibraryCamera,
   OrientationKeyframe,
   ProvenanceResponse,
 } from "@/types";
@@ -18,7 +21,8 @@ export type AlbumMediaSelection = { mediaIds: string[] } | { tripId: string };
 const BASE = "/api";
 
 export class ApiError extends Error {
-  constructor(message: string, public status: number) {
+  // reason: the plain-text body of a 400 from a route whose reasons are written for the user, else null.
+  constructor(message: string, public status: number, public reason: string | null = null) {
     super(message);
     this.name = "ApiError";
   }
@@ -252,6 +256,45 @@ async function mediaProvenanceFile(id: string, signal: AbortSignal): Promise<Fil
   return res.json();
 }
 
+function listCameraClockRules(): Promise<CameraClockRule[]> {
+  return getList<CameraClockRule>("/camera-clock-rules");
+}
+
+// A refused rule says why in a short plain-text body, which the dialog shows as it is.
+async function sendClockRule(method: "POST" | "PUT", path: string, input: CameraClockRuleInput): Promise<CameraClockRule> {
+  const res = await request(path, jsonInit(method, input));
+  if (!res.ok) {
+    let reason: string | null = null;
+    if (res.status === 400) {
+      try {
+        reason = (await res.text()).trim() || null;
+      } catch {
+        reason = null;
+      }
+    }
+    throw new ApiError(`${method} ${path} failed: ${res.status}`, res.status, reason);
+  }
+  return res.json();
+}
+
+function createCameraClockRule(input: CameraClockRuleInput): Promise<CameraClockRule> {
+  return sendClockRule("POST", "/camera-clock-rules", input);
+}
+
+// A full replacement of the rule.
+function updateCameraClockRule(id: string, input: CameraClockRuleInput): Promise<CameraClockRule> {
+  return sendClockRule("PUT", `/camera-clock-rules/${id}`, input);
+}
+
+function deleteCameraClockRule(id: string): Promise<void> {
+  return del(`/camera-clock-rules/${id}`);
+}
+
+// The cameras in the caller's own library, most items first, for the clock rule dialog.
+function listCameras(): Promise<LibraryCamera[]> {
+  return getList<LibraryCamera>("/cameras");
+}
+
 // Re-matches the caller's whole library.
 async function runMatcher(): Promise<void> {
   const res = await request("/gps-matcher/run", { method: "POST" });
@@ -293,4 +336,9 @@ export const api = {
   mediaProvenance,
   mediaProvenanceFile,
   runMatcher,
+  listCameraClockRules,
+  createCameraClockRule,
+  updateCameraClockRule,
+  deleteCameraClockRule,
+  listCameras,
 };
