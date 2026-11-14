@@ -131,9 +131,14 @@ func probeMustNotRun(t *testing.T) probeFunc {
 	}
 }
 
+// newRereadHandler answers the item query with row and the clock rule query with no rules
+// (withClockRules sets some).
 func newRereadHandler(row pgx.Row, store *stubRereadStorage, zone ingest.CameraZone, probe probeFunc) *ProvenanceHandler {
 	return &ProvenanceHandler{
-		db:         &mockMatcherDB{queryRowFn: func(context.Context, string, ...any) pgx.Row { return row }},
+		db: &mockMatcherDB{
+			queryRowFn: func(context.Context, string, ...any) pgx.Row { return row },
+			queryFn:    clockRulesQuery(nil),
+		},
 		storage:    store,
 		cameraZone: zone,
 		probeURL:   probe,
@@ -250,6 +255,7 @@ func TestProvenanceFile_VideoClasses(t *testing.T) {
 		{"evidence: transcoded, and no stored time", "video", ingest.VideoProbeResult{}, nil, recordedCopy, rereadUnverifiableTranscoded},
 		{"evidence: not transcoded, though it looks re-encoded", "video", lavf, noonPlus(0), recordedNoCopy, rereadNoFileTime},
 		{"evidence: transcoded, with a time, is checkable", "video", lavfWithTime, noonPlus(0), recordedCopy, rereadSame},
+		{"evidence rewritten by server retime counts too", "video", lavf, noonPlus(0), `{"v":1,"by":"retime","transcoded":false}`, rereadNoFileTime},
 
 		// Without evidence, the heuristic.
 		{"heuristic: H.264 written by Lavf", "video", lavf, noonPlus(0), "", rereadUnverifiableTranscoded},
@@ -541,7 +547,7 @@ func TestProvenanceFile_Wire(t *testing.T) {
 				"model": "TestModel",
 				"video": null
 			},
-			"rule_today": {"source": "exif_original", "zone_rule": "gps", "offset_min": 60, "zone_name": null, "taken_at": "2001-02-03T12:00:00Z"},
+			"rule_today": {"source": "exif_original", "zone_rule": "gps", "offset_min": 60, "zone_name": null, "clock_rule": null, "taken_at": "2001-02-03T12:00:00Z"},
 			"delta_s": 0,
 			"class": "same",
 			"checks": [],
@@ -569,7 +575,7 @@ func TestProvenanceFile_Wire(t *testing.T) {
 				"gps_stamp": null, "wall_minus_gps_s": null, "make": null, "model": null,
 				"video": {"creation_time": "2001-02-03T12:00:00Z", "duration_s": 12.5, "encoder": "Lavf60.16.100", "codec": "hevc"}
 			},
-			"rule_today": {"source": "container", "zone_rule": null, "offset_min": null, "zone_name": null, "taken_at": "2001-02-03T12:00:00Z"},
+			"rule_today": {"source": "container", "zone_rule": null, "offset_min": null, "zone_name": null, "clock_rule": null, "taken_at": "2001-02-03T12:00:00Z"},
 			"delta_s": 0,
 			"class": "same",
 			"checks": [{"id": "video_time_may_be_end", "level": "info", "delta_s": null}],

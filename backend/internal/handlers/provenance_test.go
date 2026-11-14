@@ -178,6 +178,8 @@ func TestProvenanceTimeFacts(t *testing.T) {
 		{"not recorded", zone, "", "not_recorded", false, "Test/Zone", true, false, 330},
 		{"ingest", zone, `{"v":1,"by":"ingest"}`, "ingest", true, "Test/Zone", true, false, 330},
 		{"backfill", zone, `{"v":1,"by":"backfill"}`, "backfill", true, "Test/Zone", true, false, 330},
+		{"retime", zone, `{"v":1,"by":"retime","retimed_from":"2019-03-13T18:28:15Z","zone":"clock_rule","clock_rule":{"id":"r1","make":"Panasonic","model":"DC-TZ200","offset_min":120,"starts_on":null,"ends_on":null}}`,
+			"retime", true, "Test/Zone", true, false, 330},
 		{"an unknown writer is not trusted", zone, `{"v":1,"by":"someone"}`, "not_recorded", false, "Test/Zone", true, false, 330},
 		{"no by key", zone, `{"v":1}`, "not_recorded", false, "Test/Zone", true, false, 330},
 		{"a zero zone reads as UTC", ingest.CameraZone{}, "", "not_recorded", false, "server zone (unset)", false, false, 0},

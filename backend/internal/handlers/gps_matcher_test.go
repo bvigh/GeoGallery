@@ -35,6 +35,8 @@ func (r *mockRows) Scan(dest ...any) error {
 		switch p := d.(type) {
 		case *string:
 			*p = row[i].(string)
+		case *int:
+			*p = row[i].(int)
 		case **string:
 			if row[i] == nil {
 				*p = nil

@@ -127,7 +127,7 @@ type provenanceItem struct {
 }
 
 type provenanceTime struct {
-	Recorded         string           `json:"recorded"` // "ingest", "backfill" or "not_recorded"
+	Recorded         string           `json:"recorded"` // "ingest", "backfill", "retime" or "not_recorded"
 	Evidence         json.RawMessage  `json:"evidence"` // null when not_recorded
 	ServerCameraZone serverCameraZone `json:"server_camera_zone"`
 }
@@ -360,7 +360,9 @@ func (h *ProvenanceHandler) timeFacts(evidence []byte) provenanceTime {
 	if len(evidence) == 0 || json.Unmarshal(evidence, &header) != nil {
 		return facts
 	}
-	if header.By == "ingest" || header.By == "backfill" {
+	// server retime writes "retime" when it moves taken_at, with the old time in retimed_from.
+	switch header.By {
+	case "ingest", "backfill", "retime":
 		facts.Recorded = header.By
 		facts.Evidence = evidence
 	}

@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
@@ -48,16 +49,31 @@ func (m *mockUploadStorage) PresignGet(_ context.Context, _ string) (string, err
 
 // mockRegistrarDB implements registrarDB and records each call. A lookup by (owner, hash) returns
 // "existing-<file hash>" for a hash in known or one whose INSERT conflicted, else no row. The media
-// INSERT returns the ID "new-<filename>", or no row for a filename in raced.
+// INSERT returns the ID "new-<filename>", or no row for a filename in raced. The clock rule query
+// returns clockRules, or fails with clockRulesErr; it is recorded in ruleLoads, not in sqls.
 type mockRegistrarDB struct {
-	known      map[string]bool // file hashes already in the library
-	raced      map[string]bool // filenames a concurrent call stores between the lookup and the INSERT
-	insertErr  error           // returned by the media INSERT
-	lookupErrs []error         // the i-th duplicate lookup returns lookupErrs[i] when it is set
-	lookups    int
-	conflicts  map[string]bool // file hashes whose INSERT hit ON CONFLICT DO NOTHING
-	sqls       []string
-	args       [][]any
+	known         map[string]bool // file hashes already in the library
+	raced         map[string]bool // filenames a concurrent call stores between the lookup and the INSERT
+	insertErr     error           // returned by the media INSERT
+	lookupErrs    []error         // the i-th duplicate lookup returns lookupErrs[i] when it is set
+	lookups       int
+	conflicts     map[string]bool // file hashes whose INSERT hit ON CONFLICT DO NOTHING
+	clockRules    ingest.ClockRules
+	clockRulesErr error
+	ruleLoads     [][]any // the arguments of each clock rule query
+	sqls          []string
+	args          [][]any
+}
+
+func (m *mockRegistrarDB) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if !strings.Contains(sql, "FROM camera_clock_rules") {
+		panic("unexpected Query: " + sql)
+	}
+	m.ruleLoads = append(m.ruleLoads, args)
+	if m.clockRulesErr != nil {
+		return nil, m.clockRulesErr
+	}
+	return clockRuleRows(m.clockRules), nil
 }
 
 func (m *mockRegistrarDB) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
@@ -903,6 +919,6 @@ func TestRegisterMedia_StopsWaitingForAnExifSlotWhenCancelled(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("still waiting after the context was cancelled")
 	}
-	assert.Empty(t, db.sqls, "the database is not reached")
+	assert.Empty(t, db.sqls, "no media row is looked up or written")
 	assert.Empty(t, store.keys, "nothing is stored")
 }
