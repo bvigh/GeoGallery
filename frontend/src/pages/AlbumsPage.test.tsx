@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { api, ApiError } from "@/api/client";
 import { BACK_DEPTH_KEY } from "@/lib/history";
+import { readLastViewed, writeLastViewed } from "@/lib/lastViewed";
 import { AlbumsPage } from "@/pages/AlbumsPage";
 import { AuthContext } from "@/components/auth/AuthContext";
 import type * as Gallery from "@/components/MediaGalleryOverlay";
@@ -133,6 +134,15 @@ async function settleHistory() {
   });
 }
 
+// jsdom has no scrollIntoView.
+const scrollIntoView = vi.fn();
+
+function storageUnavailable() {
+  vi.spyOn(window, "sessionStorage", "get").mockImplementation(() => {
+    throw new DOMException("The operation is insecure.", "SecurityError");
+  });
+}
+
 function renderPage() {
   return render(
     <AuthContext.Provider value={me}>
@@ -155,6 +165,8 @@ describe("AlbumsPage", () => {
     vi.clearAllMocks();
     gallery.props = null;
     window.history.replaceState(null, "", "/albums");
+    window.sessionStorage.clear();
+    Element.prototype.scrollIntoView = scrollIntoView;
     mockApi.listAlbums.mockResolvedValue([owned, shared]);
     mockApi.createAlbum.mockResolvedValue({ ...owned, id: "a3", name: "Tokyo" });
     mockApi.renameAlbum.mockResolvedValue(undefined);
@@ -171,6 +183,7 @@ describe("AlbumsPage", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    delete (Element.prototype as Partial<Element>).scrollIntoView;
   });
 
   it("shows a card per album with owner, counts and date range", async () => {
@@ -268,6 +281,66 @@ describe("AlbumsPage", () => {
     expect(mockApi.listAlbums).toHaveBeenCalledTimes(2);
   });
 
+  describe("last viewed album", () => {
+    it("marks the album whose gallery closed last and scrolls it into view once", async () => {
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: shared.name }));
+      expect(screen.queryByRole("article", { current: true })).not.toBeInTheDocument();
+
+      act(() => gallery.props!.onClose());
+      expect(screen.getByRole("article", { current: true })).toBe(card(shared.name));
+      expect(card(shared.name)).toHaveClass("ring-2", "ring-primary");
+      expect(card(owned.name)).not.toHaveClass("ring-2");
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+      expect(scrollIntoView.mock.contexts).toEqual([card(shared.name)]);
+
+      // The refresh after closing keeps the mark and leaves the scroll position alone.
+      await waitFor(() => expect(mockApi.listAlbums).toHaveBeenCalledTimes(2));
+      await act(async () => {});
+      expect(screen.getByRole("article", { current: true })).toBe(card(shared.name));
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+      await userEvent.click(screen.getByRole("button", { name: owned.name }));
+      act(() => gallery.props!.onClose());
+      expect(screen.getByRole("article", { current: true })).toBe(card(owned.name));
+    });
+
+    // A tab switch unmounts the page, and a reload mounts it again too.
+    it("keeps the mark when the page mounts again", async () => {
+      const { unmount } = renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: shared.name }));
+      act(() => gallery.props!.onClose());
+      unmount();
+      scrollIntoView.mockClear();
+
+      renderPage();
+      await screen.findByRole("button", { name: shared.name });
+      expect(screen.getByRole("article", { current: true })).toBe(card(shared.name));
+      expect(scrollIntoView.mock.contexts).toEqual([card(shared.name)]);
+    });
+
+    it("never marks the album another user viewed last in this browser tab", async () => {
+      writeLastViewed("u-bob", "albums", shared.id);
+      renderPage();
+      await screen.findByRole("button", { name: shared.name });
+      expect(screen.queryByRole("article", { current: true })).not.toBeInTheDocument();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    it("marks the album only until the page unmounts when storage is unavailable", async () => {
+      storageUnavailable();
+      const { unmount } = renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: shared.name }));
+      act(() => gallery.props!.onClose());
+      expect(screen.getByRole("article", { current: true })).toBe(card(shared.name));
+      unmount();
+
+      renderPage();
+      await screen.findByRole("button", { name: shared.name });
+      expect(screen.queryByRole("article", { current: true })).not.toBeInTheDocument();
+    });
+  });
+
   it.each([
     ["owner, own item", owned, "u-me", true],
     ["owner, another member's item", owned, "u-bob", true],
@@ -288,6 +361,7 @@ describe("AlbumsPage", () => {
 
     expect(await screen.findByText("That album is not available: it was deleted, or you are not a member.")).toBeInTheDocument();
     expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
+    expect(readLastViewed(me.id, "albums")).toBeNull();
   });
 
   describe("gallery from the URL", () => {
@@ -328,6 +402,8 @@ describe("AlbumsPage", () => {
       expect(await screen.findByText("That album is not available: it was deleted, or you are not a member.")).toBeInTheDocument();
       expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: owned.name })).toBeInTheDocument();
+      expect(screen.queryByRole("article", { current: true })).not.toBeInTheDocument();
+      expect(readLastViewed(me.id, "albums")).toBeNull();
     });
 
     it("stays open when the list cannot be loaded", async () => {

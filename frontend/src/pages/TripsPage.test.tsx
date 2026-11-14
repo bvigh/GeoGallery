@@ -1,12 +1,14 @@
 import type { ComponentProps } from "react";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { api, ApiError } from "../api/client";
 import { BACK_DEPTH_KEY } from "@/lib/history";
+import { readLastViewed, writeLastViewed } from "@/lib/lastViewed";
 import { TripsPage } from "./TripsPage";
+import { AuthContext } from "@/components/auth/AuthContext";
 import type * as Gallery from "@/components/MediaGalleryOverlay";
-import type { Album, Trip } from "../types";
+import type { Album, CurrentUser, Trip } from "../types";
 
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
@@ -78,6 +80,29 @@ function makeAlbum(overrides: Partial<Album>): Album {
 
 const family = makeAlbum({ id: "a1", name: "Family" });
 
+const me: CurrentUser = { id: "u-me", email: "me@example.test", display_name: "Me", role: "user" };
+
+// jsdom has no scrollIntoView.
+const scrollIntoView = vi.fn();
+
+function renderPage() {
+  return render(
+    <AuthContext.Provider value={me}>
+      <TripsPage />
+    </AuthContext.Provider>
+  );
+}
+
+function card(name: string): HTMLElement {
+  return screen.getByRole("article", { name });
+}
+
+function storageUnavailable() {
+  vi.spyOn(window, "sessionStorage", "get").mockImplementation(() => {
+    throw new DOMException("The operation is insecure.", "SecurityError");
+  });
+}
+
 // The browser's back (-1) or forward (1) button: resolves once the popstate has been handled.
 async function traverse(delta: number) {
   await act(async () => {
@@ -108,6 +133,8 @@ describe("TripsPage", () => {
     vi.clearAllMocks();
     gallery.props = null;
     window.history.replaceState(null, "", "/trips");
+    window.sessionStorage.clear();
+    Element.prototype.scrollIntoView = scrollIntoView;
     mockApi.get.mockResolvedValue(sampleTrips);
     mockApi.patch.mockResolvedValue({});
     mockApi.listAlbums.mockResolvedValue([family]);
@@ -115,14 +142,19 @@ describe("TripsPage", () => {
     mockApi.addToAlbum.mockResolvedValue({ added: 42 });
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete (Element.prototype as Partial<Element>).scrollIntoView;
+  });
+
   it("displays trip names after API data loads", async () => {
-    render(<TripsPage />);
+    renderPage();
     expect(await screen.findByText("Iceland 2024")).toBeInTheDocument();
     expect(screen.getByText("Tokyo Winter")).toBeInTheDocument();
   });
 
   it("clicking Edit activates edit mode for that trip", async () => {
-    render(<TripsPage />);
+    renderPage();
     await screen.findByText("Iceland 2024");
 
     const editButtons = screen.getAllByRole("button", { name: "Edit" });
@@ -133,7 +165,7 @@ describe("TripsPage", () => {
   });
 
   it("opens the gallery for a trip's media", async () => {
-    render(<TripsPage />);
+    renderPage();
     await userEvent.click(await screen.findByText("Tokyo Winter"));
 
     const el = screen.getByTestId("gallery");
@@ -147,6 +179,63 @@ describe("TripsPage", () => {
     expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
   });
 
+  describe("last viewed trip", () => {
+    it("marks the trip whose gallery closed last and scrolls it into view", async () => {
+      renderPage();
+      await userEvent.click(await screen.findByText("Tokyo Winter"));
+      expect(screen.queryByRole("article", { current: true })).not.toBeInTheDocument();
+
+      act(() => gallery.props!.onClose());
+      expect(screen.getByRole("article", { current: true })).toBe(card("Tokyo Winter"));
+      expect(card("Tokyo Winter")).toHaveClass("ring-2", "ring-primary");
+      expect(card("Iceland 2024")).not.toHaveClass("ring-2");
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+      expect(scrollIntoView.mock.contexts[0]).toBe(card("Tokyo Winter"));
+
+      await userEvent.click(screen.getByText("Iceland 2024"));
+      act(() => gallery.props!.onClose());
+      expect(screen.getByRole("article", { current: true })).toBe(card("Iceland 2024"));
+      expect(scrollIntoView.mock.contexts[1]).toBe(card("Iceland 2024"));
+    });
+
+    // A tab switch unmounts the page, and a reload mounts it again too.
+    it("keeps the mark when the page mounts again", async () => {
+      const { unmount } = renderPage();
+      await userEvent.click(await screen.findByText("Tokyo Winter"));
+      act(() => gallery.props!.onClose());
+      unmount();
+      scrollIntoView.mockClear();
+
+      renderPage();
+      await screen.findByText("Tokyo Winter");
+      expect(screen.getByRole("article", { current: true })).toBe(card("Tokyo Winter"));
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView.mock.contexts[0]).toBe(card("Tokyo Winter"));
+    });
+
+    it("marks a trip whose ID is gone from the list on no card", async () => {
+      writeLastViewed(me.id, "trips", "t-regrouped");
+      renderPage();
+      await screen.findByText("Tokyo Winter");
+      expect(screen.queryByRole("article", { current: true })).not.toBeInTheDocument();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    it("marks the trip only until the page unmounts when storage is unavailable", async () => {
+      storageUnavailable();
+      const { unmount } = renderPage();
+      await userEvent.click(await screen.findByText("Tokyo Winter"));
+      act(() => gallery.props!.onClose());
+      expect(screen.getByRole("article", { current: true })).toBe(card("Tokyo Winter"));
+      unmount();
+
+      renderPage();
+      await screen.findByText("Tokyo Winter");
+      expect(screen.queryByRole("article", { current: true })).not.toBeInTheDocument();
+    });
+  });
+
   describe("gallery from the URL", () => {
     const TRIP = "0b6f3c1e-5d1a-4c47-9a8e-2f0d7b9c4e11";
     const ITEM = "7c2e9d40-1b3a-4f6e-8d5c-a9e1f0b2c3d4";
@@ -156,7 +245,7 @@ describe("TripsPage", () => {
       let resolve!: (trips: Trip[]) => void;
       mockApi.get.mockReturnValue(new Promise((r) => (resolve = r)));
       window.history.replaceState(null, "", `/trips/${TRIP}?item=${ITEM}`);
-      render(<TripsPage />);
+      renderPage();
 
       const el = screen.getByTestId("gallery");
       expect(el).toHaveAttribute("data-title", "");
@@ -171,7 +260,7 @@ describe("TripsPage", () => {
 
     it("closes and says why when the trip is not in the caller's list", async () => {
       window.history.replaceState(null, "", `/trips/${TRIP}?item=${ITEM}`);
-      render(<TripsPage />);
+      renderPage();
       expect(screen.getByTestId("gallery")).toBeInTheDocument();
 
       expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -179,13 +268,31 @@ describe("TripsPage", () => {
       );
       expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
       expect(screen.getByText("Iceland 2024")).toBeInTheDocument();
+      expect(screen.queryByRole("article", { current: true })).not.toBeInTheDocument();
+      expect(readLastViewed(me.id, "trips")).toBeNull();
+    });
+
+    it("scrolls to the last viewed trip only once it closes, and then marks its own", async () => {
+      writeLastViewed(me.id, "trips", "t2");
+      mockApi.get.mockResolvedValue([...sampleTrips, named]);
+      window.history.replaceState(null, "", `/trips/${TRIP}?item=${ITEM}`);
+      renderPage();
+      await screen.findByText("Named trip", { selector: "h2" });
+      expect(screen.getByRole("article", { current: true })).toBe(card("Tokyo Winter"));
+      expect(scrollIntoView).not.toHaveBeenCalled();
+
+      act(() => gallery.props!.onClose());
+      expect(screen.getByRole("article", { current: true })).toBe(card("Named trip"));
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView.mock.contexts[0]).toBe(card("Named trip"));
+      expect(readLastViewed(me.id, "trips")).toBe(TRIP);
     });
 
     it("stays open, without a name, when the list cannot be loaded", async () => {
       vi.spyOn(console, "error").mockImplementation(() => {});
       mockApi.get.mockRejectedValue(new Error("offline"));
       window.history.replaceState(null, "", `/trips/${TRIP}`);
-      render(<TripsPage />);
+      renderPage();
       await act(async () => {});
       expect(screen.getByTestId("gallery")).toHaveAttribute("data-title", "");
       expect(gallery.props!.initialItemId).toBeNull();
@@ -202,7 +309,7 @@ describe("TripsPage", () => {
 
     it("opens again on its item when forward lands on its entry", async () => {
       mockApi.get.mockResolvedValue([...sampleTrips, named]);
-      render(<TripsPage />);
+      renderPage();
       await screen.findByText("Named trip");
 
       await forwardOntoGalleryEntry();
@@ -213,7 +320,7 @@ describe("TripsPage", () => {
     });
 
     it("says why when forward lands on the entry of a trip that is gone", async () => {
-      render(<TripsPage />);
+      renderPage();
       await screen.findByText("Iceland 2024");
 
       await forwardOntoGalleryEntry();
@@ -224,7 +331,7 @@ describe("TripsPage", () => {
   });
 
   it("opens the album picker for a trip without opening its gallery", async () => {
-    render(<TripsPage />);
+    renderPage();
     const dialog = await openPickerForIceland();
 
     expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
@@ -236,7 +343,7 @@ describe("TripsPage", () => {
   });
 
   it("adds the trip to the chosen album and reports the count", async () => {
-    render(<TripsPage />);
+    renderPage();
     const dialog = await openPickerForIceland();
 
     await userEvent.click(await within(dialog).findByRole("radio", { name: "Family" }));
@@ -252,7 +359,7 @@ describe("TripsPage", () => {
   it("creates an album named after the trip and adds the trip to it", async () => {
     mockApi.listAlbums.mockResolvedValue([]);
     mockApi.addToAlbum.mockResolvedValue({ added: 1 });
-    render(<TripsPage />);
+    renderPage();
     const dialog = await openPickerForIceland();
 
     await userEvent.click(within(dialog).getByRole("button", { name: "Add" }));
@@ -264,7 +371,7 @@ describe("TripsPage", () => {
 
   it("says so when the album already had everything", async () => {
     mockApi.addToAlbum.mockResolvedValue({ added: 0 });
-    render(<TripsPage />);
+    renderPage();
     const dialog = await openPickerForIceland();
 
     await userEvent.click(await within(dialog).findByRole("radio", { name: "Family" }));
@@ -289,7 +396,7 @@ describe("TripsPage", () => {
   ])("shows an error for $name", async ({ err, want }) => {
     mockApi.addToAlbum.mockRejectedValue(err);
     vi.spyOn(console, "error").mockImplementation(() => {});
-    render(<TripsPage />);
+    renderPage();
     const dialog = await openPickerForIceland();
 
     await userEvent.click(await within(dialog).findByRole("radio", { name: "Family" }));
@@ -301,7 +408,7 @@ describe("TripsPage", () => {
   it("shows the add as pending until it settles, then lets it be dismissed", async () => {
     let resolve!: (v: { added: number }) => void;
     mockApi.addToAlbum.mockReturnValue(new Promise((r) => (resolve = r)));
-    render(<TripsPage />);
+    renderPage();
     const dialog = await openPickerForIceland();
 
     await userEvent.click(await within(dialog).findByRole("radio", { name: "Family" }));
@@ -318,7 +425,7 @@ describe("TripsPage", () => {
   });
 
   it("closing the picker adds nothing", async () => {
-    render(<TripsPage />);
+    renderPage();
     const dialog = await openPickerForIceland();
 
     await userEvent.click(within(dialog).getByRole("button", { name: "Close" }));
@@ -330,7 +437,7 @@ describe("TripsPage", () => {
   });
 
   it("cancels an edit without saving, by button or Escape", async () => {
-    render(<TripsPage />);
+    renderPage();
     await screen.findByText("Iceland 2024");
 
     await userEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
@@ -349,7 +456,7 @@ describe("TripsPage", () => {
   });
 
   it("labels the edit fields and saves them", async () => {
-    render(<TripsPage />);
+    renderPage();
     await screen.findByText("Iceland 2024");
     await userEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
 
@@ -367,7 +474,7 @@ describe("TripsPage", () => {
   });
 
   it("makes the card actions finger-sized on touch", async () => {
-    render(<TripsPage />);
+    renderPage();
     await screen.findByText("Iceland 2024");
     for (const name of ["Add to album…", "Edit"]) {
       expect(screen.getAllByRole("button", { name })[0]).toHaveClass("touch:min-h-11", "touch:min-w-11");
