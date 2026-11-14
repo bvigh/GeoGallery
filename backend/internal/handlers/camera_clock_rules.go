@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -275,13 +276,23 @@ func (h *CameraClockRuleHandler) List(w http.ResponseWriter, r *http.Request) {
 	writeClockRuleJSON(w, http.StatusOK, rules)
 }
 
-// Create stores a new rule: 201 with the rule, 409 when it overlaps another rule for the same
-// camera or the caller already has maxClockRulesPerOwner rules.
+// lockClockRuleOwner locks the caller's users row for the rest of tx. Every write that adds a rule
+// version (POST and PUT) takes it first, so one owner's writes run one after the other:
+//   - two POSTs could otherwise both count 99 rules and insert;
+//   - two writes that put rules for one camera into overlapping periods at once could deadlock in
+//     the exclusion constraint, which inserts its index entry before it checks for a conflict,
+//     and one would get 40P01 (a 500) instead of 409.
 //
-// The count and the insert share a transaction that first locks the caller's users row, so two
-// POSTs of one owner run one after the other and the second counts the first's rule: without the
-// lock both could count 99 and insert. FOR NO KEY UPDATE does not block the FOR KEY SHARE locks that
-// inserts referencing the user take, so uploads go on meanwhile.
+// FOR NO KEY UPDATE does not block the FOR KEY SHARE locks that inserts referencing the user take,
+// so uploads go on meanwhile.
+func lockClockRuleOwner(ctx context.Context, tx pgx.Tx, ownerID string) error {
+	_, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, ownerID)
+	return err
+}
+
+// Create stores a new rule: 201 with the rule, 409 when it overlaps another rule for the same
+// camera or the caller already has maxClockRulesPerOwner rules. The count and the insert share a
+// transaction under lockClockRuleOwner, so a second POST counts the first's rule.
 func (h *CameraClockRuleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	me := auth.MustUser(r.Context()).ID
 	v, ok := decodeClockRule(w, r)
@@ -298,7 +309,7 @@ func (h *CameraClockRuleHandler) Create(w http.ResponseWriter, r *http.Request) 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, me); err != nil {
+	if err := lockClockRuleOwner(ctx, tx, me); err != nil {
 		slog.Error("clock rules: create owner lock failed", "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
@@ -338,7 +349,8 @@ func (h *CameraClockRuleHandler) Create(w http.ResponseWriter, r *http.Request) 
 	writeClockRuleJSON(w, http.StatusCreated, rule)
 }
 
-// Update replaces a rule with the body: 200 with the rule.
+// Update replaces a rule with the body: 200 with the rule, 409 when it overlaps another rule for
+// the same camera. The UPDATE runs under lockClockRuleOwner.
 //
 // As in the album routes, a malformed ID is 404 first, then the body is checked (400), and only
 // then is the rule looked up, by the UPDATE itself: a foreign or missing ID with a bad body is 400
@@ -354,8 +366,22 @@ func (h *CameraClockRuleHandler) Update(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	ctx := r.Context()
 
-	rule, err := scanClockRule(h.db.QueryRow(r.Context(), `
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		slog.Error("clock rules: update begin tx failed", "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockClockRuleOwner(ctx, tx, me); err != nil {
+		slog.Error("clock rules: update owner lock failed", "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	rule, err := scanClockRule(tx.QueryRow(ctx, `
 		UPDATE camera_clock_rules
 		SET make = $3, model = $4, utc_offset_min = $5, starts_on = $6::date, ends_on = $7::date,
 		    note = $8, updated_at = now()
@@ -371,6 +397,14 @@ func (h *CameraClockRuleHandler) Update(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		slog.Error("clock rules: update failed", "rule_id", id, "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		if clockRuleWriteError(w, err) {
+			return
+		}
+		slog.Error("clock rules: update commit failed", "rule_id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}

@@ -350,6 +350,91 @@ func TestCameraClockRules_CapHoldsUnderConcurrentPosts(t *testing.T) {
 	assert.Equal(t, maxClockRulesPerOwner, countClockRules(t, c.pool, c.user))
 }
 
+// POST and PUT of one owner wait for the owner lock (lockClockRuleOwner), so they run one after the
+// other.
+func TestCameraClockRules_WritesWaitForTheOwnerLock(t *testing.T) {
+	c := newClockRulesAPI(t)
+	id := insertClockRule(t, c.pool, c.user, "Panasonic", "DC-TZ200", 120, nil, ptr("2018-12-31"))
+	tests := []struct {
+		name, method, path, body string
+		want                     int
+	}{
+		{"PUT", http.MethodPut, "/api/camera-clock-rules/" + id, ruleBody(t, "Panasonic", "DC-TZ200", 60, nil, ptr("2019-12-31"), ""), http.StatusOK},
+		{"POST", http.MethodPost, "/api/camera-clock-rules", ruleBody(t, "Panasonic", "DC-TZ90", 60, nil, nil, ""), http.StatusCreated},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			tx, err := c.pool.Begin(ctx)
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback(ctx) }()
+			_, err = tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, c.user)
+			require.NoError(t, err)
+
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- do(t, c.api, c.user, tt.method, tt.path, tt.body) }()
+			select {
+			case rec := <-done:
+				t.Fatalf("answered %d while another write held the owner lock: %s", rec.Code, rec.Body.String())
+			case <-time.After(300 * time.Millisecond):
+			}
+			require.NoError(t, tx.Commit(ctx))
+			select {
+			case rec := <-done:
+				assert.Equal(t, tt.want, rec.Code, rec.Body.String())
+			case <-time.After(10 * time.Second):
+				t.Fatal("still waiting after the lock was released")
+			}
+		})
+	}
+}
+
+// Two writes at once that put rules for one camera into overlapping periods: one is saved and the
+// other is 409, never a 500 from a deadlock in the exclusion constraint.
+func TestCameraClockRules_ConcurrentOverlappingWrites(t *testing.T) {
+	c := newClockRulesAPI(t)
+	const rounds = 20
+	for i := range rounds {
+		model := fmt.Sprintf("Round %02d", i)
+		a := insertClockRule(t, c.pool, c.user, "Panasonic", model, 60, ptr("2010-01-01"), ptr("2010-12-31"))
+		b := insertClockRule(t, c.pool, c.user, "Panasonic", model, 60, ptr("2011-01-01"), ptr("2011-12-31"))
+		type write struct{ method, path, body string }
+		writes := []write{
+			{http.MethodPut, "/api/camera-clock-rules/" + a, ruleBody(t, "Panasonic", model, 60, ptr("2030-01-01"), ptr("2030-06-30"), "")},
+			{http.MethodPut, "/api/camera-clock-rules/" + b, ruleBody(t, "Panasonic", model, 60, ptr("2030-03-01"), ptr("2030-12-31"), "")},
+		}
+		if i%2 == 1 {
+			writes[1] = write{http.MethodPost, "/api/camera-clock-rules", ruleBody(t, "panasonic", model, 60, ptr("2030-03-01"), ptr("2030-12-31"), "")}
+		}
+
+		statuses := make([]int, len(writes))
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for j, wr := range writes {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				statuses[j] = do(t, c.api, c.user, wr.method, wr.path, wr.body).Code
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		saved := 0
+		for j, status := range statuses {
+			switch status {
+			case http.StatusConflict:
+			case http.StatusOK, http.StatusCreated:
+				saved++
+			default:
+				t.Errorf("round %d, %s %s: status %d", i, writes[j].method, writes[j].path, status)
+			}
+		}
+		assert.Equal(t, 1, saved, "round %d: %v", i, statuses)
+	}
+}
+
 // The SQLSTATEs the table really raises map to 409 and 400, never a 500, should a check the handler
 // makes first ever miss one.
 func TestClockRuleWriteError_FromTheDatabase(t *testing.T) {
