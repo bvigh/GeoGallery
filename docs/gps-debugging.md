@@ -1355,7 +1355,7 @@ Some of the rejected views need defining, so that the reopen triggers mean somet
 
 **Matcher**
 
-- The matcher has no transaction, returns at the first error, stops when a request context is cancelled, has no `ORDER BY`, and has no per-owner lock against overlapping runs. `UpdateLocation` only logs a matcher failure.
+- The matcher has no transaction, returns at the first error, stops when a request context is cancelled, has no `ORDER BY`, and has no per-owner lock against overlapping runs. `UpdateLocation` only logs a matcher failure. It writes a position only to a row whose `taken_at` and `gps_source` are still as it listed them, so a run that overlaps `server retime` never puts a position from the old time on a retimed row, but it can still place a neighbour from a point that retime moved after the matcher read it.
 - `GPS_MATCH_WINDOW_HOURS` is not passed by compose, so a native process and a container can differ on one database. Shrinking the window leaves old values in place.
 - It treats derived points as ordinary points. A photo with a wrong clock therefore teaches the matcher a wrong fact: 899 of 4,962 estimates (18%) rest on at least one derived point, 584 (12%) only on those, and 411 of those are plain copies of another item's position.
 - It treats a logger that stands still as the photographer's position, because it has no notion of whether the logger moved with the camera.
