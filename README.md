@@ -226,7 +226,7 @@ docker compose exec backend ./server retime --user <id>            # lists what 
 docker compose exec backend ./server retime --user <id> --apply    # writes it
 ```
 
-`retime` reads each item's EXIF capture time again with today's rules (`CAMERA_TIMEZONE`, `backend/camera-rules.json` and the user's camera clock rules) and moves `taken_at` when the stored time is the same clock reading taken at another UTC offset; any other difference is reported as a mismatch and left alone. It moves the item's own GPS track point with it, clears interpolated locations near the old time, records the change in the item's capture evidence, then runs the GPS matcher and trip detection. It prints one line per change and `checked=N retimed=N unchanged=N not_exif=N mismatched=N failed=N`, and exits 1 if any item failed or the run was interrupted.
+`retime` reads each item's EXIF capture time again with today's rules (`CAMERA_TIMEZONE`, `backend/camera-rules.json` and the user's camera clock rules) and moves `taken_at` when the stored time is the same clock reading taken at another UTC offset; any other difference is reported as a mismatch and left alone. It moves the item's own GPS track point with it, clears interpolated locations near the old time, records the change in the item's capture evidence, then runs the GPS matcher and trip detection. It prints one line per change and `checked=N retimed=N unchanged=N not_exif=N mismatched=N failed=N`, and exits 1 if any item failed or the run was interrupted. Run `--apply` while the user is not uploading, importing tracks or re-matching: a GPS matcher run that overlaps it can place an item near a moved point from the point's old position.
 
 ### Video locations
 

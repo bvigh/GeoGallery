@@ -15,6 +15,7 @@ import (
 	"github.com/bvigh/geogallery/internal/ingest"
 	"github.com/bvigh/geogallery/internal/ingest/exiftest"
 	"github.com/bvigh/geogallery/internal/testdb"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -872,6 +873,72 @@ func TestRunRetime_Integration_OnlyEXIFLocatedPhotosKeepAnExifPoint(t *testing.T
 	require.NotNil(t, m.lat)
 	assert.Equal(t, "exif", *m.gpsSource, "the video keeps its tag's location")
 	assert.InDelta(t, 40, *m.lat, 1e-9)
+}
+
+// heldMatcherDB is the pool for a matcher run that pauses at its first write until released: the
+// matcher has listed its items and worked out that item's position, but not written it.
+type heldMatcherDB struct {
+	*pgxpool.Pool
+	once             sync.Once
+	reached, release chan struct{}
+}
+
+func (h *heldMatcherDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	h.once.Do(func() {
+		close(h.reached)
+		<-h.release
+	})
+	return h.Pool.Exec(ctx, sql, args...)
+}
+
+// A matcher run of the owner's (an upload, a track import, Re-match) can overlap retime. It writes
+// only to rows still as it listed them: never a position worked out at the old time onto a retimed
+// row, which every later run would keep since nothing brackets the new time, nor over a location
+// set by hand meanwhile.
+func TestRunRetime_Integration_OverlappingMatcherWritesNothingStale(t *testing.T) {
+	pool := testdb.New(t)
+	store := newRetimeHeads()
+	alice := createUser(t, pool, "alice")
+
+	// Matched near the wrong time; nothing is logged within the match window of the true one.
+	insertTrack(t, pool, alice, "loom", "2018-10-25T15:05:00Z", 50, 20)
+	retimed := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "P1022050.JPG",
+		object:  exiftest.JPEG(exiftest.Photo{DateTimeOriginal: "2018:10:25 15:00:00"}),
+		takenAt: "2018-10-25T15:00:00Z", gpsSource: "interpolated", lat: 50, lng: 20})
+	// Not placed yet when the matcher lists it, then placed by hand.
+	insertTrack(t, pool, alice, "loom", "2018-10-26T10:05:00Z", 51, 21)
+	placed := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "clip.mp4", mediaType: "video",
+		object: []byte("\x00\x00\x00\x18ftypmp42"), takenAt: "2018-10-26T10:00:00Z"})
+
+	held := &heldMatcherDB{Pool: pool, reached: make(chan struct{}), release: make(chan struct{})}
+	matcherDone := make(chan error, 1)
+	go func() { matcherDone <- RunGPSMatcher(context.Background(), held, alice, time.Hour, true) }()
+	select {
+	case <-held.reached:
+	case err := <-matcherDone:
+		t.Fatalf("the matcher finished without writing: %v", err)
+	}
+
+	_, err := pool.Exec(context.Background(), `
+		UPDATE media SET location = ST_SetSRID(ST_MakePoint(18, 46), 4326), gps_source = 'manual' WHERE id = $1`, placed)
+	require.NoError(t, err)
+	res, err := RunRetime(context.Background(), retimeDeps(t, pool, store), alice, true, func(RetimeChange) {})
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Retimed)
+	close(held.release)
+	require.NoError(t, <-matcherDone)
+
+	m := readRetimedMedia(t, pool, retimed)
+	assert.True(t, retimeUTC(t, "2018-10-25T13:00:00Z").Equal(m.takenAt))
+	assert.Nil(t, m.gpsSource, "no position from the old time")
+	assert.Nil(t, m.lat)
+	m = readRetimedMedia(t, pool, placed)
+	require.NotNil(t, m.gpsSource)
+	assert.Equal(t, "manual", *m.gpsSource)
+	assert.InDelta(t, 46, *m.lat, 1e-9)
+
+	require.NoError(t, RunGPSMatcher(context.Background(), pool, alice, time.Hour, true))
+	assert.Nil(t, readRetimedMedia(t, pool, retimed).lat, "and none later")
 }
 
 // A moved point takes its weight away from interpolations near the old time, including items that
