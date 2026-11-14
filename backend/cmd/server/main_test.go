@@ -81,6 +81,7 @@ func newTestRouter(t *testing.T) http.Handler {
 		albums:     handlers.NewAlbumHandler(nil),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
 		provenance: handlers.NewProvenanceHandler(nil, nil, time.Hour, ingest.CameraZone{}),
+		clockRules: handlers.NewCameraClockRuleHandler(nil),
 	}
 	return newRouter(cop, auth.New(store, nil, cfg), h)
 }
@@ -142,6 +143,19 @@ func TestRouter_AuthWiring(t *testing.T) {
 		{"session adds album member", http.MethodPost, "/api/albums/" + badID + "/members", false, userSession, nil, http.StatusNotFound},
 		{"session removes album member", http.MethodDelete, "/api/albums/" + badID + "/members/" + badID, false, userSession, nil, http.StatusNotFound},
 		{"anonymous albums", http.MethodGet, "/api/albums", false, "", nil, http.StatusUnauthorized},
+
+		// Camera clock rules are open to tokens. Without a DB these statuses come from the handler's
+		// input checks; the token reaching the DB is in clock_rules_routes_integration_test.go.
+		{"token creates clock rule", http.MethodPost, "/api/camera-clock-rules", true, "", nil, http.StatusBadRequest},
+		{"token updates clock rule, malformed id", http.MethodPut, "/api/camera-clock-rules/" + badID, true, "", nil, http.StatusNotFound},
+		{"token deletes clock rule, malformed id", http.MethodDelete, "/api/camera-clock-rules/" + badID, true, "", nil, http.StatusNotFound},
+		{"session updates clock rule, malformed id", http.MethodPut, "/api/camera-clock-rules/" + badID, false, userSession, nil, http.StatusNotFound},
+		{"session deletes clock rule, malformed id", http.MethodDelete, "/api/camera-clock-rules/" + badID, false, userSession, nil, http.StatusNotFound},
+		{"anonymous clock rules", http.MethodGet, "/api/camera-clock-rules", false, "", nil, http.StatusUnauthorized},
+		{"anonymous clock rule create", http.MethodPost, "/api/camera-clock-rules", false, "", nil, http.StatusUnauthorized},
+		{"anonymous clock rule update", http.MethodPut, "/api/camera-clock-rules/" + mediaID, false, "", nil, http.StatusUnauthorized},
+		{"anonymous clock rule delete", http.MethodDelete, "/api/camera-clock-rules/" + mediaID, false, "", nil, http.StatusUnauthorized},
+		{"anonymous cameras", http.MethodGet, "/api/cameras", false, "", nil, http.StatusUnauthorized},
 		{"anonymous user directory", http.MethodGet, "/api/users", false, "", nil, http.StatusUnauthorized},
 
 		{"session lists tokens", http.MethodGet, "/api/tokens", false, userSession, nil, http.StatusOK},

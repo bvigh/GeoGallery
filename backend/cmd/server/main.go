@@ -289,6 +289,7 @@ type routeHandlers struct {
 	albums     *handlers.AlbumHandler
 	admin      *handlers.AdminHandler
 	provenance *handlers.ProvenanceHandler
+	clockRules *handlers.CameraClockRuleHandler
 }
 
 func serve() {
@@ -334,6 +335,7 @@ func serve() {
 		albums:     handlers.NewAlbumHandler(pool),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
 		provenance: handlers.NewProvenanceHandler(pool, s3Client, matchWindow, cameraZone(cfg)),
+		clockRules: handlers.NewCameraClockRuleHandler(pool),
 	}
 
 	addr := fmt.Sprintf(":%s", cfg.ServerPort)
@@ -390,6 +392,14 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 			r.Post("/albums/{id}/media", h.albums.AddMedia)
 			r.Post("/albums/{id}/media/remove", h.albums.RemoveMedia)
 			r.Get("/media/{id}/albums", h.albums.MediaAlbums)
+
+			// A rule changes how the owner's future uploads are dated; neither a rule nor the camera
+			// list is location history, so tokens may use these.
+			r.Get("/camera-clock-rules", h.clockRules.List)
+			r.Post("/camera-clock-rules", h.clockRules.Create)
+			r.Put("/camera-clock-rules/{id}", h.clockRules.Update)
+			r.Delete("/camera-clock-rules/{id}", h.clockRules.Delete)
+			r.Get("/cameras", h.clockRules.Cameras)
 
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireSession)

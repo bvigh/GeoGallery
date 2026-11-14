@@ -96,6 +96,7 @@ func newOwnershipRouter(pool *pgxpool.Pool, store *fakeObjectStore) http.Handler
 		probeURL: store.probeURL, probeSlots: make(chan struct{}, maxConcurrentProbes),
 		photoSlots: make(chan struct{}, maxConcurrentPhotoReads),
 	}
+	clockRules := NewCameraClockRuleHandler(pool)
 
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
@@ -124,6 +125,11 @@ func newOwnershipRouter(pool *pgxpool.Pool, store *fakeObjectStore) http.Handler
 		r.Post("/gps-tracks/import", tracks.Import)
 		r.Post("/gps-tracks/upload", tracks.Upload)
 		r.Post("/gps-matcher/run", matcher.Run)
+		r.Get("/camera-clock-rules", clockRules.List)
+		r.Post("/camera-clock-rules", clockRules.Create)
+		r.Put("/camera-clock-rules/{id}", clockRules.Update)
+		r.Delete("/camera-clock-rules/{id}", clockRules.Delete)
+		r.Get("/cameras", clockRules.Cameras)
 	})
 	return r
 }
@@ -645,4 +651,88 @@ func TestOwnership_KnownHashesOnlyFindOwnMedia(t *testing.T) {
 	rec = do(t, f.router, f.userB, http.MethodPost, "/api/media/known-hashes", body)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.JSONEq(t, `{"known":{}}`, rec.Body.String(), "dedup is per owner: shared media do not count")
+}
+
+// A camera clock rule belongs to its owner: another user never lists, changes or deletes it, and a
+// foreign ID answers 404 even with a body that would overlap the owner's other rule.
+func TestOwnership_CameraClockRulesAreInvisible(t *testing.T) {
+	f := newOwnershipFixture(t)
+	ruleA := insertClockRule(t, f.pool, f.userA, "Panasonic", "DC-TZ200", 120, ptr("2018-07-01"), ptr("2022-12-31"))
+	insertClockRule(t, f.pool, f.userA, "Panasonic", "DC-TZ200", 60, ptr("2023-01-01"), nil)
+	ruleB := insertClockRule(t, f.pool, f.userB, "samsung", "SM-S921B", 0, nil, nil)
+	before := clockRuleRow(t, f.pool, ruleA)
+
+	rec := do(t, f.router, f.userB, http.MethodGet, "/api/camera-clock-rules", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{ruleB}, decodeIDs(t, rec), "only B's own rule")
+
+	const valid = `{"make":"Panasonic","model":"DC-TZ200","utc_offset_min":0,"starts_on":null,"ends_on":null}`
+	const overlapping = `{"make":"Panasonic","model":"DC-TZ200","utc_offset_min":0,"starts_on":"2023-06-01","ends_on":null}`
+	tests := []struct {
+		name, method, body string
+	}{
+		{"update", http.MethodPut, valid},
+		{"update overlapping A's other rule", http.MethodPut, overlapping},
+		{"delete", http.MethodDelete, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := do(t, f.router, f.userB, tt.method, "/api/camera-clock-rules/"+ruleA, tt.body)
+			assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+			assert.Equal(t, before, clockRuleRow(t, f.pool, ruleA), "A's rule is unchanged")
+		})
+	}
+
+	t.Run("positive control as owner", func(t *testing.T) {
+		rec := do(t, f.router, f.userA, http.MethodPut, "/api/camera-clock-rules/"+ruleA,
+			`{"make":"Panasonic","model":"DC-TZ200","utc_offset_min":120,"starts_on":"2018-07-01","ends_on":"2022-12-31","note":"mine"}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		rec = do(t, f.router, f.userA, http.MethodDelete, "/api/camera-clock-rules/"+ruleA, "")
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	})
+
+	t.Run("B's rule survives", func(t *testing.T) {
+		rec := do(t, f.router, f.userB, http.MethodGet, "/api/camera-clock-rules", "")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, []string{ruleB}, decodeIDs(t, rec))
+	})
+}
+
+// GET /api/cameras lists the cameras of the caller's own library. Media shared through an album are
+// readable, but a rule applies only to the owner's uploads, so their cameras are never offered.
+func TestOwnership_CamerasListOnlyOwnMedia(t *testing.T) {
+	f := newSharingFixture(t)
+	setCamera := func(mediaID, cameraMake, model string) {
+		t.Helper()
+		_, err := f.pool.Exec(context.Background(), `
+			UPDATE media SET camera_model = $2, capture_evidence = jsonb_build_object('make', $3::text)
+			WHERE id = $1`, mediaID, model, cameraMake)
+		require.NoError(t, err)
+	}
+	setCamera(f.mediaA, "Panasonic", "DC-TZ200")
+	setCamera(f.mediaAUnlocated, "Panasonic", "DC-TZ200")
+	setCamera(f.mediaB, "samsung", "SM-S921B")
+
+	// B reads A's items through the family album...
+	rec := do(t, f.router, f.userB, http.MethodGet, "/api/media", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.ElementsMatch(t, []string{f.mediaA, f.mediaAUnlocated, f.mediaB}, decodeIDs(t, rec))
+
+	// ...but only B's own camera is in B's list.
+	tests := []struct {
+		name, user, want string
+	}{
+		{"B", f.userB, `[{"make":"samsung","model":"SM-S921B","items":1,
+			"first_taken_at":"2024-05-03T13:00:00Z","last_taken_at":"2024-05-03T13:00:00Z"}]`},
+		{"A", f.userA, `[{"make":"Panasonic","model":"DC-TZ200","items":2,
+			"first_taken_at":"2024-05-02T12:00:00Z","last_taken_at":"2024-05-03T12:30:00Z"}]`},
+		{"carol, a member of no album", f.carol, `[]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := do(t, f.router, tt.user, http.MethodGet, "/api/cameras", "")
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.JSONEq(t, tt.want, rec.Body.String())
+		})
+	}
 }
