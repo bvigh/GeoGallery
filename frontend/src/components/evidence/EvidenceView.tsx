@@ -8,7 +8,7 @@ import { PointCard, type PickedPoint } from "@/components/evidence/PointCard";
 import { TimeCard } from "@/components/evidence/TimeCard";
 import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { ITEM_GONE, leadSentence, NOT_OWNER, REMATCH_FAILED, stateBadge } from "@/lib/evidence";
-import { useCloseOnBack } from "@/lib/useCloseOnBack";
+import { useCloseOnBack } from "@/lib/history";
 import { cn } from "@/lib/utils";
 import type { MediaItem, ProvenanceResponse } from "@/types";
 

@@ -46,6 +46,27 @@ describe("LoginScreen", () => {
     );
   });
 
+  // A link opened while signed out (an album, a trip) is where the backend sends the browser back.
+  it("returns to the page the link opened, without the sign-in's own parameters", () => {
+    window.history.replaceState(null, "", "/albums/a1?item=m1&invite=abc123&auth_error=not_invited");
+    render(<LoginScreen />);
+    const back = encodeURIComponent("/albums/a1?item=m1");
+    expect(screen.getByRole("link", { name: "Sign in" })).toHaveAttribute(
+      "href",
+      `/api/auth/login?invite=abc123&return_to=${back}`
+    );
+    expect(screen.getByRole("link", { name: "Sign in with a different account" })).toHaveAttribute(
+      "href",
+      `/api/auth/login?prompt=login&invite=abc123&return_to=${back}`
+    );
+  });
+
+  it("returns to a tab's path", () => {
+    window.history.replaceState(null, "", "/trips");
+    render(<LoginScreen />);
+    expect(screen.getByRole("link", { name: "Sign in" })).toHaveAttribute("href", "/api/auth/login?return_to=%2Ftrips");
+  });
+
   // 100vh is taller than what a phone browser shows, so h-screen made the page scroll.
   it("fills the visible height of the screen, not 100vh", () => {
     const { container } = render(<LoginScreen />);

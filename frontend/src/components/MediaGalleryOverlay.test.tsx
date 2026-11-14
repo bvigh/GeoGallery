@@ -8,7 +8,7 @@ import { AuthContext } from "@/components/auth/AuthContext";
 import type { EvidenceViewProps } from "@/components/evidence/EvidenceView";
 import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
 import { formatInstant } from "@/lib/time";
-import { BACK_DEPTH_KEY } from "@/lib/useCloseOnBack";
+import { BACK_DEPTH_KEY } from "@/lib/history";
 import type { Album, CurrentUser, MediaItem } from "@/types";
 
 vi.mock("@/api/client", async (importOriginal) => {
@@ -1248,6 +1248,76 @@ describe("MediaGalleryOverlay", () => {
       expect(await screen.findByText("2 / 2")).toBeInTheDocument();
       await userEvent.keyboard("{Escape}");
       expect(props.onClose).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("place in the URL", () => {
+    const route = { tab: "albums" as const, collectionId: "a1" };
+    const location = () => window.location.pathname + window.location.search;
+
+    it("opens on the item the URL names", async () => {
+      renderOverlay({ route, initialItemId: "shared" });
+      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(screen.getByText("· shared.jpg")).toBeInTheDocument();
+      expect(screen.queryByText(/That item is not in this/)).not.toBeInTheDocument();
+    });
+
+    it.each([
+      ["album", "albums" as const],
+      ["trip", "trips" as const],
+    ])("opens on the first item and says so when the item is not in the %s", async (noun, tab) => {
+      renderOverlay({ route: { tab, collectionId: "c1" }, initialItemId: "gone" });
+      expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent(`That item is not in this ${noun}.`);
+
+      await userEvent.keyboard("{ArrowRight}");
+      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(screen.queryByText(`That item is not in this ${noun}.`)).not.toBeInTheDocument();
+    });
+
+    it("keeps its item in the URL while loading, then the current item, and leaves the page's URL when closed", async () => {
+      await settleHistory();
+      window.history.replaceState(null, "", "/albums");
+      const list = deferred<MediaItem[]>();
+      mockApi.get.mockReturnValue(list.promise);
+      const { unmount } = renderOverlay({ route, initialItemId: "shared" });
+      await waitFor(() => expect(location()).toBe("/albums/a1?item=shared"));
+      const depth = () => (window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY];
+      expect(depth()).toBe(1);
+
+      await act(async () => list.resolve([shared, own]));
+      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      await userEvent.keyboard("{ArrowLeft}");
+      expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+      await waitFor(() => expect(location()).toBe("/albums/a1?item=own"));
+      expect(depth()).toBe(1);
+
+      unmount();
+      await settleHistory();
+      expect(location()).toBe("/albums");
+      expect(depth()).toBeUndefined();
+    });
+
+    it("names no item while the gallery is empty", async () => {
+      await settleHistory();
+      window.history.replaceState(null, "", "/albums");
+      mockApi.get.mockResolvedValue([]);
+      const { unmount } = renderOverlay({ route });
+      expect(await screen.findByText("No media here")).toBeInTheDocument();
+      await waitFor(() => expect(location()).toBe("/albums/a1"));
+      unmount();
+      await settleHistory();
+    });
+
+    it("leaves the URL alone without a route", async () => {
+      await settleHistory();
+      window.history.replaceState(null, "", "/albums");
+      const { unmount } = renderOverlay();
+      expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+      await settleHistory();
+      expect(location()).toBe("/albums");
+      unmount();
+      await settleHistory();
     });
   });
 

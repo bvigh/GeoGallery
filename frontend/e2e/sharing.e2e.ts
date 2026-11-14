@@ -82,9 +82,40 @@ test("alice shares an upload with bob through an album, then removes him", async
     await expect(bob.getByText("No trips yet. Upload some media to get started.")).toBeVisible();
 
     await bob.getByRole("button", { name: "Albums", exact: true }).click();
+    await expect(bob).toHaveURL(/\/albums$/);
     const bobCard = bob.getByRole("article", { name: albumName });
     await expect(bobCard).toContainText("Owner: Alice Test");
     await expect(bobCard).toContainText("2 members · 1 item");
+
+    // The open gallery and its item are in the URL: a reload opens them again, back then closes
+    // the gallery before it leaves the tab, and forward opens it again on the same item.
+    await bobCard.getByRole("button", { name: albumName, exact: true }).click();
+    await expect(bob.getByText("1 / 1")).toBeVisible();
+    await expect(bob).toHaveURL(new RegExp(`/albums/${albumId}\\?item=[0-9a-f-]{36}$`));
+    const galleryUrl = bob.url();
+    await bob.reload();
+    await expect(bob.getByText("1 / 1")).toBeVisible();
+    // The gallery's title, once the album list says whose album it is.
+    await expect(bob.getByText("by Alice Test", { exact: true })).toBeVisible();
+    await expect(bob).toHaveURL(galleryUrl);
+    await bob.goBack();
+    await expect(bob.getByRole("button", { name: "Close gallery" })).toHaveCount(0);
+    await expect(bobCard).toBeVisible();
+    await expect(bob).toHaveURL(/\/albums$/);
+    // On the gallery's own entry: the forward is the only traversal, so the URL never flashes back
+    // to the album list's.
+    await bob.evaluate(() => {
+      const counted = window as unknown as { e2ePops: number };
+      counted.e2ePops = 0;
+      window.addEventListener("popstate", () => counted.e2ePops++);
+    });
+    await bob.goForward();
+    await expect(bob.getByText("1 / 1")).toBeVisible();
+    await expect(bob).toHaveURL(galleryUrl);
+    expect(await bob.evaluate(() => (window as unknown as { e2ePops: number }).e2ePops)).toBe(1);
+    await bob.goBack();
+    await expect(bob.getByRole("button", { name: "Close gallery" })).toHaveCount(0);
+    await expect(bob).toHaveURL(/\/albums$/);
 
     await alice.getByRole("button", { name: `Members of ${albumName}` }).click();
     alice.once("dialog", (d) => d.accept());
@@ -92,6 +123,12 @@ test("alice shares an upload with bob through an album, then removes him", async
     await expect(aliceMembers.getByRole("list", { name: "Members" })).not.toContainText("Bob Test");
     await alice.keyboard.press("Escape");
     await expect(aliceMembers).toHaveCount(0);
+
+    // The gallery's link no longer opens the album for bob.
+    await bob.goto(galleryUrl);
+    await expect(bob.getByText("That album is not available: it was deleted, or you are not a member.")).toBeVisible();
+    await expect(bob.getByRole("button", { name: "Close gallery" })).toHaveCount(0);
+    await expect(bob).toHaveURL(/\/albums$/);
 
     const bobMedia = nextGet(bob, "/api/media");
     await bob.getByRole("button", { name: "Map", exact: true }).click();

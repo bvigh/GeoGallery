@@ -3,6 +3,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { api, ApiError } from "@/api/client";
+import { BACK_DEPTH_KEY } from "@/lib/history";
 import { AlbumsPage } from "@/pages/AlbumsPage";
 import { AuthContext } from "@/components/auth/AuthContext";
 import type * as Gallery from "@/components/MediaGalleryOverlay";
@@ -116,6 +117,22 @@ function makeItem(id: string, ownerId: string): MediaItem {
   };
 }
 
+// The browser's back (-1) or forward (1) button: resolves once the popstate has been handled.
+async function traverse(delta: number) {
+  await act(async () => {
+    const popped = new Promise((resolve) => window.addEventListener("popstate", resolve, { once: true }));
+    window.history.go(delta);
+    await popped;
+  });
+}
+
+// Lets a traversal the history module started (leaving an entry nobody owns) land.
+async function settleHistory() {
+  await act(async () => {
+    for (let round = 0; round < 12; round++) await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
 function renderPage() {
   return render(
     <AuthContext.Provider value={me}>
@@ -137,6 +154,7 @@ describe("AlbumsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     gallery.props = null;
+    window.history.replaceState(null, "", "/albums");
     mockApi.listAlbums.mockResolvedValue([owned, shared]);
     mockApi.createAlbum.mockResolvedValue({ ...owned, id: "a3", name: "Tokyo" });
     mockApi.renameAlbum.mockResolvedValue(undefined);
@@ -241,6 +259,9 @@ describe("AlbumsPage", () => {
     expect(el).toHaveAttribute("data-title", shared.name);
     expect(JSON.parse(el.getAttribute("data-params")!)).toEqual({ album_id: shared.id });
     expect(gallery.props!.subtitle).toBe("by Bob");
+    // In the URL, on its first item.
+    expect(gallery.props!.route).toEqual({ tab: "albums", collectionId: shared.id });
+    expect(gallery.props!.initialItemId).toBeNull();
 
     act(() => gallery.props!.onClose());
     expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
@@ -256,6 +277,98 @@ describe("AlbumsPage", () => {
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: album.name }));
     expect(gallery.props!.canRemoveFromAlbum!(makeItem("m1", itemOwner))).toBe(allowed);
+  });
+
+  it("closes the gallery and says why when its album leaves the list", async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: shared.name }));
+    // The owner deleted the album meanwhile; the refresh after a removal finds it gone.
+    mockApi.listAlbums.mockResolvedValue([owned]);
+    await act(() => gallery.props!.onRemoveFromAlbum!(makeItem("m1", "u-me")));
+
+    expect(await screen.findByText("That album is not available: it was deleted, or you are not a member.")).toBeInTheDocument();
+    expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
+  });
+
+  describe("gallery from the URL", () => {
+    const ALBUM = "0b6f3c1e-5d1a-4c47-9a8e-2f0d7b9c4e11";
+    const ITEM = "7c2e9d40-1b3a-4f6e-8d5c-a9e1f0b2c3d4";
+    const linked: Album = { ...shared, id: ALBUM, name: "Linked" };
+
+    it("opens at once on the URL's item, and takes the album's name and rights once the list is in", async () => {
+      let resolve!: (albums: Album[]) => void;
+      mockApi.listAlbums.mockReturnValue(new Promise((r) => (resolve = r)));
+      window.history.replaceState(null, "", `/albums/${ALBUM}?item=${ITEM}`);
+      renderPage();
+
+      const el = screen.getByTestId("gallery");
+      expect(el).toHaveAttribute("data-title", "");
+      expect(JSON.parse(el.getAttribute("data-params")!)).toEqual({ album_id: ALBUM });
+      expect(gallery.props!.route).toEqual({ tab: "albums", collectionId: ALBUM });
+      expect(gallery.props!.initialItemId).toBe(ITEM);
+      expect(gallery.props!.subtitle).toBeUndefined();
+      // Until the list says who owns the album, a member's own items are what anyone may remove.
+      expect(gallery.props!.canRemoveFromAlbum!(makeItem("m1", "u-me"))).toBe(true);
+      expect(gallery.props!.canRemoveFromAlbum!(makeItem("m2", "u-bob"))).toBe(false);
+
+      await act(async () => resolve([owned, linked]));
+      expect(screen.getByTestId("gallery")).toHaveAttribute("data-title", "Linked");
+      expect(gallery.props!.subtitle).toBe("by Bob");
+      expect(gallery.props!.initialItemId).toBe(ITEM);
+
+      await act(() => gallery.props!.onRemoveFromAlbum!(makeItem("m1", "u-me")));
+      expect(mockApi.removeFromAlbum).toHaveBeenCalledWith(ALBUM, { mediaIds: ["m1"] });
+    });
+
+    it("closes and says why when the album is not readable", async () => {
+      window.history.replaceState(null, "", `/albums/${ALBUM}?item=${ITEM}`);
+      renderPage();
+      expect(screen.getByTestId("gallery")).toBeInTheDocument();
+
+      expect(await screen.findByText("That album is not available: it was deleted, or you are not a member.")).toBeInTheDocument();
+      expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: owned.name })).toBeInTheDocument();
+    });
+
+    it("stays open when the list cannot be loaded", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      mockApi.listAlbums.mockRejectedValue(new Error("offline"));
+      window.history.replaceState(null, "", `/albums/${ALBUM}`);
+      renderPage();
+      expect(await screen.findByText("Could not load albums")).toBeInTheDocument();
+      expect(screen.getByTestId("gallery")).toHaveAttribute("data-title", "");
+    });
+
+    // The gallery's entry after back closed it. The mocked gallery owns no entry, so the history
+    // module leaves it again afterwards; the real one takes it over (history.test.tsx).
+    async function forwardOntoGalleryEntry() {
+      window.history.pushState({ [BACK_DEPTH_KEY]: 1 }, "", `/albums/${ALBUM}?item=${ITEM}`);
+      await traverse(-1);
+      expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
+      await traverse(1);
+    }
+
+    it("opens again on its item when forward lands on its entry", async () => {
+      mockApi.listAlbums.mockResolvedValue([owned, linked]);
+      renderPage();
+      await screen.findByRole("button", { name: "Linked" });
+
+      await forwardOntoGalleryEntry();
+      expect(screen.getByTestId("gallery")).toHaveAttribute("data-title", "Linked");
+      expect(gallery.props!.route).toEqual({ tab: "albums", collectionId: ALBUM });
+      expect(gallery.props!.initialItemId).toBe(ITEM);
+      await settleHistory();
+    });
+
+    it("says why when forward lands on the entry of an album that is gone", async () => {
+      renderPage();
+      await screen.findByRole("button", { name: owned.name });
+
+      await forwardOntoGalleryEntry();
+      expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
+      expect(screen.getByText("That album is not available: it was deleted, or you are not a member.")).toBeInTheDocument();
+      await settleHistory();
+    });
   });
 
   it("removes an item from the album and refreshes the counts", async () => {

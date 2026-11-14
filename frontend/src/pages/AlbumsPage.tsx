@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { Plus } from "lucide-react";
 import { api } from "@/api/client";
 import { describeError } from "@/lib/errors";
+import { useHistoryChange } from "@/lib/history";
+import { currentRoute } from "@/lib/routes";
 import { matchesSearch, SEARCH_MIN_ITEMS } from "@/lib/search";
 import type { Album, AlbumMember, DirectoryUser, MediaItem } from "@/types";
 import { useCurrentUser } from "@/components/auth/AuthContext";
@@ -366,13 +368,24 @@ function MembersPanel({
   );
 }
 
+// The open gallery: its album, and from the URL the item to open on.
+interface Gallery {
+  id: string;
+  itemId: string | null;
+}
+
+function galleryFromUrl(): Gallery | null {
+  const route = currentRoute();
+  return route.tab === "albums" && route.collectionId !== null ? { id: route.collectionId, itemId: route.itemId } : null;
+}
+
 export function AlbumsPage() {
   const me = useCurrentUser();
   const [albums, setAlbums] = useState<Album[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   // Ids, not Album objects, so the gallery and dialog follow refreshed counts and names.
-  const [galleryId, setGalleryId] = useState<string | null>(null);
+  const [gallery, setGallery] = useState<Gallery | null>(galleryFromUrl);
   const [membersId, setMembersId] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -389,8 +402,24 @@ export function AlbumsPage() {
 
   useEffect(load, [load]);
 
-  const galleryAlbum = albums?.find((a) => a.id === galleryId) ?? null;
+  const galleryAlbum = albums?.find((a) => a.id === gallery?.id) ?? null;
   const membersAlbum = albums?.find((a) => a.id === membersId) ?? null;
+
+  // The album left the list: deleted, or the caller is no longer a member. That is also how a
+  // gallery from the URL learns that its album was never readable.
+  useEffect(() => {
+    if (gallery === null || albums === null || albums.some((a) => a.id === gallery.id)) return;
+    setGallery(null);
+    setError("That album is not available: it was deleted, or you are not a member.");
+  }, [albums, gallery]);
+
+  // Back or forward onto a gallery's entry while none is open (forward after back): open it again
+  // on the URL's item. It takes that entry over, as this runs before history is brought in line.
+  // An album no longer in the list never renders the gallery, and the effect above says why.
+  useHistoryChange(() => {
+    const next = galleryFromUrl();
+    if (next !== null) setGallery((open) => open ?? next);
+  });
 
   const startRename = (album: Album) => {
     setRenaming(album.id);
@@ -426,10 +455,10 @@ export function AlbumsPage() {
   };
 
   // Rejecting keeps the item in the gallery, which shows the error; it stays here once the gallery closes.
-  const removeItem = async (album: Album, item: MediaItem) => {
+  const removeItem = async (albumId: string, item: MediaItem) => {
     setError(null);
     try {
-      await api.removeFromAlbum(album.id, { mediaIds: [item.id] });
+      await api.removeFromAlbum(albumId, { mediaIds: [item.id] });
     } catch (e) {
       setError(describeError(`Could not remove "${item.filename}" from the album`, e));
       throw e;
@@ -462,7 +491,7 @@ export function AlbumsPage() {
             key={album.id}
             aria-label={album.name}
             className="cursor-pointer rounded-lg border bg-card p-4 shadow-sm transition-colors hover:bg-accent"
-            onClick={() => renaming !== album.id && setGalleryId(album.id)}
+            onClick={() => renaming !== album.id && setGallery({ id: album.id, itemId: null })}
           >
             {renaming === album.id ? (
               <form
@@ -581,18 +610,21 @@ export function AlbumsPage() {
         </DialogContent>
       </Dialog>
 
-      {galleryAlbum && (
+      {/* Opened from the URL, the gallery is open before the list says what the album is. */}
+      {gallery && (galleryAlbum || albums === null) && (
         <MediaGalleryOverlay
-          title={galleryAlbum.name}
-          subtitle={galleryAlbum.is_owner ? undefined : `by ${galleryAlbum.owner_name ?? "another user"}`}
-          params={{ album_id: galleryAlbum.id }}
+          title={galleryAlbum?.name ?? ""}
+          subtitle={!galleryAlbum || galleryAlbum.is_owner ? undefined : `by ${galleryAlbum.owner_name ?? "another user"}`}
+          params={{ album_id: gallery.id }}
+          route={{ tab: "albums", collectionId: gallery.id }}
+          initialItemId={gallery.itemId}
           onClose={() => {
-            setGalleryId(null);
+            setGallery(null);
             load();
           }}
           // The album owner may remove any item, a member only their own.
-          canRemoveFromAlbum={(item) => galleryAlbum.is_owner || item.owner_id === me.id}
-          onRemoveFromAlbum={(item) => removeItem(galleryAlbum, item)}
+          canRemoveFromAlbum={(item) => !!galleryAlbum?.is_owner || item.owner_id === me.id}
+          onRemoveFromAlbum={(item) => removeItem(gallery.id, item)}
         />
       )}
     </div>

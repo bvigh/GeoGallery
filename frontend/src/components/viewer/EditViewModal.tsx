@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { MediaItem, OrientationKeyframe } from "@/types";
 import { api } from "@/api/client";
-import { useCloseOnBack } from "@/lib/useCloseOnBack";
+import { useCloseOnBack } from "@/lib/history";
 import Panorama360 from "@/components/viewer/Panorama360";
 import Video360 from "@/components/viewer/Video360";
 

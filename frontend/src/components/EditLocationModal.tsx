@@ -3,7 +3,7 @@ import { MapContainer, TileLayer, Marker, useMapEvents, useMap } from "react-lea
 import L from "leaflet";
 import type { MediaItem } from "../types";
 import { api } from "../api/client";
-import { useCloseOnBack } from "@/lib/useCloseOnBack";
+import { useCloseOnBack } from "@/lib/history";
 import { TOP_MARKER_Z_INDEX_OFFSET } from "@/components/map/markers";
 import "leaflet/dist/leaflet.css";
 

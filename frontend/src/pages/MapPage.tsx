@@ -13,7 +13,7 @@ import Panorama360 from "../components/viewer/Panorama360";
 import Video360 from "../components/viewer/Video360";
 import VideoDecodeNotice from "../components/viewer/VideoDecodeNotice";
 import { useVideoDecodeCheck } from "@/lib/video";
-import { useCloseOnBack } from "@/lib/useCloseOnBack";
+import { useCloseOnBack } from "@/lib/history";
 import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { useVideoKeys } from "@/lib/videoKeys";
 import { ZoomableImage } from "@/components/viewer/ZoomableImage";
