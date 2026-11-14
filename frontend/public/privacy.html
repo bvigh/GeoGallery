@@ -23,7 +23,7 @@
     <main>
       <p><a href="/">← GeoGallery</a></p>
       <h1>Privacy Policy</h1>
-      <p class="muted">Last updated: 9 November 2026</p>
+      <p class="muted">Last updated: 14 November 2026</p>
 
       <p>
         GeoGallery is a private, invite-only photo and video gallery with a map and a location-guessing game. It is
@@ -96,12 +96,18 @@
         </li>
         <li>
           how the capture time was derived: which time was used, the camera's clock as written, the time zone
-          information in the file, the photo's GPS timestamp, the video's container time and encoding, and the file's
-          modified time;
+          information in the file, the photo's GPS timestamp, the video's container time and encoding, the file's
+          modified time, the camera clock rule used (see below), and, if the operator later corrected the time, the
+          time stored before;
         </li>
         <li>the file's last-modified time sent by your browser, used when the file has no capture date;</li>
         <li>a fingerprint of the file, used only to skip duplicate uploads;</li>
-        <li>settings you make, such as a manually set location, 360° view direction or video keyframes.</li>
+        <li>settings you make, such as a manually set location, 360° view direction or video keyframes;</li>
+        <li>
+          camera clock rules you create in Settings, for a camera whose clock showed the wrong time: the camera's make
+          and model, the UTC offset its clock showed, optional first and last days and an optional note. They are used
+          only to date your own media from that camera, and only you can see them.
+        </li>
       </ul>
       <p>
         Photos and videos can contain information about other people, such as their faces. Please only upload media
@@ -227,9 +233,9 @@
       <h2>5. How long data is kept</h2>
       <ul>
         <li>
-          <strong>Media, metadata, locations, GPS tracks, albums:</strong> until you delete them or your account is
-          deleted. Deleting a photo or video in GeoGallery removes the file and its metadata, and removes it from every
-          album.
+          <strong>Media, metadata, locations, GPS tracks, albums, camera clock rules:</strong> until you delete them or
+          your account is deleted. Deleting a photo or video in GeoGallery removes the file and its metadata, and
+          removes it from every album.
         </li>
         <li><strong>Sessions:</strong> until you sign out, at the latest 30 days.</li>
         <li><strong>API tokens:</strong> until they expire or you revoke them (at most 365 days).</li>

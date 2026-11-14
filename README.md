@@ -130,7 +130,7 @@ Do not expose the database, MinIO console or backend ports publicly; see [Port h
 ```
 geogallery/
 ├── backend/
-│   ├── cmd/server/         # entrypoint, routes, operator subcommands (invite, users, scan, rebind-issuer)
+│   ├── cmd/server/         # entrypoint, routes, operator subcommands (invite, users, scan, retime, rebind-issuer)
 │   ├── internal/
 │   │   ├── auth/           # OIDC login, sessions, API tokens, middleware
 │   │   ├── config/         # env-based config
@@ -214,6 +214,19 @@ Files are deduplicated per user by a partial hash (first + last 64 KB), so re-sc
 ### Capture times and `CAMERA_TIMEZONE`
 
 A photo's EXIF time is a wall-clock reading without a usable timezone. The backend reads it in `CAMERA_TIMEZONE` (an IANA name such as `Europe/Warsaw`). When the photo carries a GPS timestamp that puts the camera clock within two minutes of a real UTC offset, it uses that offset instead. Otherwise it uses the photo's `OffsetTimeOriginal`, so phone photos taken abroad come out right. Makes known to write a wrong offset are exempt (the Panasonic DC-TZ200 writes `+01:00` all year). Such per-make rules live in `backend/camera-rules.json` (`CAMERA_RULES_FILE`), not in the code. The same file has Panasonic videos dated from the camera's EXIF inside the MP4, because their container time is the camera's clock marked UTC. Unset, `CAMERA_TIMEZONE` falls back to the server's own zone, which is UTC in Docker; the backend warns about that at startup. Over https the backend refuses to start without `CAMERA_TIMEZONE`, so a production server cannot drift silently.
+
+### Camera clocks and `server retime`
+
+A camera's clock can show the wrong offset for a while, for example when it stays on summer time all year, and nothing in its files reveals it. Each user can say so under **Settings → Camera clocks**: a rule names the camera (make and model, as in its EXIF), the UTC offset its clock showed, and optionally the first and last day on the camera's own clock. New uploads and scans from that camera are read at that offset. Only a photo's own GPS clock comes before it. Rules belong to one user and never apply to another user's files.
+
+Items already in the library keep their times until an operator re-reads them:
+
+```bash
+docker compose exec backend ./server retime --user <id>            # lists what would change
+docker compose exec backend ./server retime --user <id> --apply    # writes it
+```
+
+`retime` reads each item's EXIF capture time again with today's rules (`CAMERA_TIMEZONE`, `backend/camera-rules.json` and the user's camera clock rules) and moves `taken_at` when the stored time is the same clock reading taken at another UTC offset; any other difference is reported as a mismatch and left alone. It moves the item's own GPS track point with it, clears interpolated locations near the old time, records the change in the item's capture evidence, then runs the GPS matcher and trip detection. It prints one line per change and `checked=N retimed=N unchanged=N not_exif=N mismatched=N failed=N`, and exits 1 if any item failed or the run was interrupted.
 
 ### Video locations
 
