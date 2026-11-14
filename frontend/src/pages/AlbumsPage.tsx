@@ -3,6 +3,7 @@ import { Plus } from "lucide-react";
 import { api } from "@/api/client";
 import { describeError } from "@/lib/errors";
 import { useHistoryChange } from "@/lib/history";
+import { LAST_VIEWED_CLASS, useLastViewed, useRevealLastViewed } from "@/lib/lastViewed";
 import { currentRoute } from "@/lib/routes";
 import { matchesSearch, SEARCH_MIN_ITEMS } from "@/lib/search";
 import type { Album, AlbumMember, DirectoryUser, MediaItem } from "@/types";
@@ -389,6 +390,9 @@ export function AlbumsPage() {
   const [membersId, setMembersId] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [lastViewed, rememberViewed] = useLastViewed(me.id, "albums");
+  const lastViewedCard = useRef<HTMLElement>(null);
+  useRevealLastViewed(lastViewedCard, albums !== null && gallery === null);
 
   const load = useCallback(() => {
     api
@@ -489,8 +493,12 @@ export function AlbumsPage() {
         {albums?.map((album) => (
           <article
             key={album.id}
+            ref={album.id === lastViewed ? lastViewedCard : undefined}
             aria-label={album.name}
-            className="cursor-pointer rounded-lg border bg-card p-4 shadow-sm transition-colors hover:bg-accent"
+            aria-current={album.id === lastViewed || undefined}
+            className={`cursor-pointer rounded-lg border bg-card p-4 shadow-sm transition-colors hover:bg-accent ${
+              album.id === lastViewed ? LAST_VIEWED_CLASS : ""
+            }`}
             onClick={() => renaming !== album.id && setGallery({ id: album.id, itemId: null })}
           >
             {renaming === album.id ? (
@@ -619,6 +627,7 @@ export function AlbumsPage() {
           route={{ tab: "albums", collectionId: gallery.id }}
           initialItemId={gallery.itemId}
           onClose={() => {
+            rememberViewed(gallery.id);
             setGallery(null);
             load();
           }}

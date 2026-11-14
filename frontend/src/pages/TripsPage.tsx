@@ -4,7 +4,9 @@ import type { Album, Trip } from "../types";
 import { api, ApiError } from "../api/client";
 import { MediaGalleryOverlay } from "@/components/MediaGalleryOverlay";
 import { AlbumPickerDialog } from "@/components/albums/AlbumPickerDialog";
+import { useCurrentUser } from "@/components/auth/AuthContext";
 import { useHistoryChange } from "@/lib/history";
+import { LAST_VIEWED_CLASS, useLastViewed, useRevealLastViewed } from "@/lib/lastViewed";
 import { currentRoute } from "@/lib/routes";
 
 const byStartDateDesc = (a: Trip, b: Trip): number => {
@@ -64,6 +66,7 @@ function galleryFromUrl(): Gallery | null {
 }
 
 export function TripsPage() {
+  const me = useCurrentUser();
   const [trips, setTrips] = useState<Trip[]>([]);
   const [tripsLoaded, setTripsLoaded] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
@@ -74,6 +77,9 @@ export function TripsPage() {
   const [pickerTrip, setPickerTrip] = useState<Trip | null>(null);
   const [notices, setNotices] = useState<Notice[]>([]);
   const nextNoticeId = useRef(0);
+  const [lastViewed, rememberViewed] = useLastViewed(me.id, "trips");
+  const lastViewedCard = useRef<HTMLElement>(null);
+  useRevealLastViewed(lastViewedCard, tripsLoaded && gallery === null);
 
   useEffect(() => {
     api
@@ -177,9 +183,14 @@ export function TripsPage() {
       )}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {trips.map((trip) => (
-          <div
+          <article
             key={trip.id}
-            className="rounded-lg border bg-card p-4 shadow-sm cursor-pointer hover:bg-accent transition-colors"
+            ref={trip.id === lastViewed ? lastViewedCard : undefined}
+            aria-label={trip.name}
+            aria-current={trip.id === lastViewed || undefined}
+            className={`rounded-lg border bg-card p-4 shadow-sm cursor-pointer hover:bg-accent transition-colors ${
+              trip.id === lastViewed ? LAST_VIEWED_CLASS : ""
+            }`}
             onClick={() => editing !== trip.id && setGallery({ id: trip.id, trip, itemId: null })}
           >
             {editing === trip.id ? (
@@ -270,7 +281,7 @@ export function TripsPage() {
             <p className="text-sm text-muted-foreground">
               {trip.media_count} item{trip.media_count !== 1 ? "s" : ""}
             </p>
-          </div>
+          </article>
         ))}
       </div>
       {/* Outside the cards: React events bubble out of the dialog's portal into its parent,
@@ -315,7 +326,10 @@ export function TripsPage() {
           params={{ trip_id: gallery.id }}
           route={{ tab: "trips", collectionId: gallery.id }}
           initialItemId={gallery.itemId}
-          onClose={() => setGallery(null)}
+          onClose={() => {
+            rememberViewed(gallery.id);
+            setGallery(null);
+          }}
           onMediaDeleted={() => {
             api.get<Trip[]>("/trips").then((data) => setTrips(data ?? [])).catch(console.error);
           }}

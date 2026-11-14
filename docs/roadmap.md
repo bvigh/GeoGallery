@@ -116,7 +116,7 @@ Each needs a design note before it can be estimated.
 
 ## Dependencies
 
-- URL state (#31) → challenge links (#39), share links (#43); it later absorbs #17.
+- URL state (#31) → challenge links (#39), share links (#43). It did not absorb #17: a tab switch opens a new page entry, so the last viewed trip or album is kept in `sessionStorage` instead.
 - `retime` port (#24) → editing capture times (#26).
 - Per-user settings (#25) → default mute (#38).
 - Labels (#34) → search (#35).
