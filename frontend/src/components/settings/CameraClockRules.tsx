@@ -157,7 +157,8 @@ function ClockRuleDialog({ rule, onClose, onSaved }: RuleDialogProps) {
         <DialogHeader>
           <DialogTitle>{rule ? "Edit clock rule" : "Add clock rule"}</DialogTitle>
           <DialogDescription>
-            The UTC offset this camera's clock really showed. New uploads and scans from it are read at that offset.
+            The UTC offset this camera's clock really showed. New uploads and scans from it are read at that offset
+            wherever their time comes from its EXIF clock.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="min-w-0 space-y-3 text-sm">

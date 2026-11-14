@@ -217,7 +217,7 @@ A photo's EXIF time is a wall-clock reading without a usable timezone. The backe
 
 ### Camera clocks and `server retime`
 
-A camera's clock can show the wrong offset for a while, for example when it stays on summer time all year, and nothing in its files reveals it. Each user can say so under **Settings → Camera clocks**: a rule names the camera (make and model, as in its EXIF), the UTC offset its clock showed, and optionally the first and last day on the camera's own clock. New uploads and scans from that camera are read at that offset. Only a photo's own GPS clock comes before it. Rules belong to one user and never apply to another user's files.
+A camera's clock can show the wrong offset for a while, for example when it stays on summer time all year, and nothing in its files reveals it. Each user can say so under **Settings → Camera clocks**: a rule names the camera (make and model, as in its EXIF), the UTC offset its clock showed, and optionally the first and last day on the camera's own clock. New uploads and scans from that camera are read at that offset wherever their time comes from its EXIF clock: photos, and videos of a make that `backend/camera-rules.json` dates from their EXIF (Panasonic). Other videos keep their container time, and `retime` counts them as `not_exif`. Only a photo's own GPS clock comes before a rule. Rules belong to one user and never apply to another user's files.
 
 Items already in the library keep their times until an operator re-reads them:
 

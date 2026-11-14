@@ -200,6 +200,8 @@ describe("CameraClockRules", () => {
       await screen.findByText("No clock rules yet.");
       const dialog = await openAddDialog();
       expect(within(dialog).getByRole("heading", { name: "Add clock rule" })).toBeInTheDocument();
+      // Videos dated from their container time are not read at the rule's offset.
+      expect(within(dialog).getByText(/read at that offset wherever their time comes from its EXIF clock/)).toBeInTheDocument();
       await camerasLoaded(dialog);
 
       const cameraSelect = within(dialog).getByLabelText("Camera") as HTMLSelectElement;
