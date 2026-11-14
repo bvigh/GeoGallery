@@ -1,9 +1,15 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/api/client";
-import { makeEvidence, makeReread, makeResponse, type ResponseOverrides } from "@/components/evidence/evidenceTestUtils";
+import {
+  makeEvidence,
+  makeEvidenceClockRule,
+  makeReread,
+  makeResponse,
+  type ResponseOverrides,
+} from "@/components/evidence/evidenceTestUtils";
 import { TimeCard } from "@/components/evidence/TimeCard";
-import { REREAD_NOT_RECORDED, VIDEO_TIME_MAY_BE_END } from "@/lib/evidence";
+import { CLOCK_RULE_KEEPS_TIME, REREAD_NOT_RECORDED, VIDEO_TIME_MAY_BE_END } from "@/lib/evidence";
 import { browserTimeZone, formatInstant } from "@/lib/time";
 import type { FileReread } from "@/types";
 
@@ -125,6 +131,7 @@ describe("TimeCard", () => {
       zone_rule: null,
       offset_min: null,
       zone_name: null,
+      clock_rule: null,
       taken_at: "2000-01-01T00:01:00Z",
     });
 
@@ -308,6 +315,81 @@ describe("TimeCard", () => {
       expect(summary.closest("details")).not.toHaveAttribute("open");
       expect(screen.getByText("<b>Cam</b>")).toBeInTheDocument();
       expect(document.querySelector("details b")).toBeNull();
+    });
+  });
+
+  describe("a clock rule", () => {
+    const byRule = makeEvidence({
+      zone: "clock_rule",
+      offset_used_min: 120,
+      make: "Panasonic",
+      model: "DC-TZ200",
+      clock_rule: makeEvidenceClockRule(),
+    });
+
+    it("words the offset as the owner's rule and names the camera", () => {
+      render(card("a", { time: { evidence: byRule } }));
+      expect(cameraRow()).toBe("2000:01:01 01:01:00 +02:00 · your rule");
+      expect(chips()).toEqual(["EXIF capture time", "Your rule for Panasonic DC-TZ200: clock showed UTC+02:00"]);
+      expect(screen.getByText(CLOCK_RULE_KEEPS_TIME)).toBeInTheDocument();
+    });
+
+    it("names today's rule when the re-read differs because of it", async () => {
+      reread.mockResolvedValue(
+        makeReread({
+          rule_today: {
+            source: "exif_original",
+            zone_rule: "clock_rule",
+            offset_min: 120,
+            zone_name: null,
+            clock_rule: makeEvidenceClockRule(),
+            taken_at: "2000-01-01T23:01:00Z",
+          },
+          delta_s: -3600,
+          class: "whole_offset",
+        })
+      );
+      render(card("a"));
+      fireEvent.click(screen.getByRole("button", { name: "Check against the file" }));
+      await advance(0);
+      expect(screen.getByText("Differs by exactly 1 h. An older rule or a changed setting would explain it.")).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          "Today's reading uses your rule for Panasonic DC-TZ200 (clock showed UTC+02:00). A stored time moves only when an administrator runs server retime."
+        )
+      ).toBeInTheDocument();
+      // The chips still describe how the stored time was read.
+      expect(chips()[1]).toBe("Etc/GMT-1; nothing in the file confirms this");
+    });
+  });
+
+  describe("a time moved by server retime", () => {
+    const retimed = makeEvidence({ by: "retime", retimed_from: "2000-01-01T01:01:00Z" });
+
+    it("says it was re-timed and lists the earlier time in UTC and the browser zone", () => {
+      const zone = vi
+        .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+        .mockReturnValue({ timeZone: "Asia/Tokyo" } as Intl.ResolvedDateTimeFormatOptions);
+      render(card("a", { time: { recorded: "retime", evidence: retimed } }));
+      expect(screen.getByText("Re-timed on the server: 1 h earlier than the time stored before.")).toBeInTheDocument();
+      const before = screen.getByText("Before re-time").parentElement!;
+      expect(before).toHaveTextContent(formatInstant("2000-01-01T01:01:00Z", "UTC"));
+      expect(before).toHaveTextContent(formatInstant("2000-01-01T01:01:00Z", "Asia/Tokyo"));
+      zone.mockRestore();
+    });
+
+    it("counts as recorded: the file is read only on request", async () => {
+      render(card("a", { time: { recorded: "retime", evidence: retimed } }));
+      await advance(5000);
+      expect(reread).not.toHaveBeenCalled();
+      expect(screen.queryByText(REREAD_NOT_RECORDED)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Check against the file" })).toBeInTheDocument();
+    });
+
+    it("says nothing of a re-time for a time recorded at ingest", () => {
+      render(card("a"));
+      expect(screen.queryByText(/Re-timed/)).not.toBeInTheDocument();
+      expect(screen.queryByText("Before re-time")).not.toBeInTheDocument();
     });
   });
 

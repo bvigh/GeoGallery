@@ -76,13 +76,17 @@ func RunGPSMatcher(ctx context.Context, db matcherDB, ownerID string, maxWindow 
 			continue
 		}
 
+		// Written only while the row is as listed. `server retime` may have moved taken_at since,
+		// and a position computed at the old time would stay: a later run keeps a location it
+		// cannot recompute. A location set by hand meanwhile must not be overwritten either.
 		_, err = db.Exec(ctx, `
 			UPDATE media
 			SET location       = ST_SetSRID(ST_MakePoint($1, $2), 4326),
 			    gps_confidence = $3,
 			    gps_source     = 'interpolated'
-			WHERE id = $4
-		`, result.Lng, result.Lat, result.Confidence, item.id)
+			WHERE id = $4 AND owner_id = $5 AND taken_at = $6
+			  AND (gps_source IS NULL OR gps_source = 'interpolated')
+		`, result.Lng, result.Lat, result.Confidence, item.id, ownerID, item.takenAt)
 		if err != nil {
 			return err
 		}

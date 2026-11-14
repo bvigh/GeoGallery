@@ -121,20 +121,22 @@ ALTER TABLE media DROP COLUMN capture_evidence;
 
 The column is nullable with no default. Existing rows stay `NULL`. The four other columns already exist in `000001_init`.
 
-`capture_evidence` has this shape. All keys are always present.
+`capture_evidence` has this shape. All keys are always present, except `retimed_from` and `clock_rule`, which came with the camera clock rules (#24) and are missing from rows recorded before them.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `v` | number | Format version, `1`. |
-| `by` | string | `ingest`. Step 4's backfill writes `backfill`. |
+| `by` | string | `ingest`. Step 4's backfill writes `backfill`. `server retime` writes `retime` when it moves `taken_at`. |
+| `retimed_from` | RFC 3339 UTC or null | `taken_at` before `server retime` moved it. Null from ingest. |
 | `src` | string | What produced `taken_at`: `exif_original`, `exif_ifd0`, `container`, `mtime` or `none`. Also `none` when the source gave a time whose UTC year JSON cannot carry (outside 1 to 9998): `taken_at` is then `NULL`, the next source is not tried, `zone` and `offset_used_min` are null, and `wall`, `creation_time` and `file_mtime` still show the inputs. |
-| `zone` | string or null | `gps`, `offset` or `camera` (`ExifData.TakenAtZone`). Null unless `src` is an EXIF value. |
+| `zone` | string or null | `gps`, `clock_rule`, `offset` or `camera` (`ExifData.TakenAtZone`). Null unless `src` is an EXIF value. |
 | `wall` | string or null | The EXIF wall clock as written, after `CleanTag`, with no zone. Kept even when it cannot be parsed. |
 | `gps_utc` | RFC 3339 UTC or null | `GPSDateStamp` + `GPSTimeStamp`, recorded whenever the stamp parses, whether or not it was accepted and whether or not the file has a wall clock. |
 | `wall_minus_gps_s` | number or null | Wall clock minus `gps_utc`, before rounding. Null unless both parse. |
 | `offset_tag` | string or null | `OffsetTimeOriginal` as written, after `CleanTag`, even when it was ignored. |
 | `offset_ignored` | boolean | The tag exists and the make's camera rule sets `ignore_offset_tag` (`backend/camera-rules.json`). |
-| `offset_used_min` | number or null | The UTC offset actually applied, in minutes, under whichever of the three rules applied. Null exactly when `zone` is null. |
+| `offset_used_min` | number or null | The UTC offset actually applied, in minutes, under whichever of the four rules applied. Null exactly when `zone` is null. |
+| `clock_rule` | object or null | A copy of the owner's camera clock rule that gave the offset: `{id, make, model, offset_min, starts_on, ends_on}`, the days `YYYY-MM-DD` or null. Set exactly when `zone` is `clock_rule`. A copy, because the rule can later be changed or deleted. |
 | `camera_zone` | string | The zone in effect at ingest: the IANA name when `CAMERA_TIMEZONE` is set, otherwise the literal `server zone (unset)`. Written for every file. |
 | `camera_zone_utc_fallback` | boolean | `CAMERA_TIMEZONE` was unset and the server's zone is UTC all year. |
 | `make`, `model` | string or null | EXIF `Make` and `Model`, after `CleanTag`. |
@@ -320,7 +322,7 @@ interface ProvenanceResponse {
     duration_sec: number | null;
   };
   time: {
-    recorded: "ingest" | "backfill" | "not_recorded";
+    recorded: "ingest" | "backfill" | "retime" | "not_recorded";
     evidence: CaptureEvidence | null;       // null when not_recorded
     server_camera_zone: {                   // the zone this server applies today
       name: string;                         // "server zone (unset)" when CAMERA_TIMEZONE is unset
@@ -524,9 +526,11 @@ interface FileReread {
   };
   rule_today: {
     source: "exif_original" | "exif_ifd0" | "container";
-    zone_rule: "gps" | "offset" | "camera" | null;
+    zone_rule: "gps" | "clock_rule" | "offset" | "camera" | null;
     offset_min: number | null;    // null for a container time
     zone_name: string | null;     // set only when zone_rule is "camera"
+    clock_rule: EvidenceClockRule | null; // the owner's rule as it is today, shaped like
+                                  // capture_evidence.clock_rule; set only when zone_rule is "clock_rule"
     taken_at: string;
   } | null;                       // null when no capture time could be read
   delta_s: number | null;         // rule_today.taken_at minus stored, in seconds
@@ -600,7 +604,7 @@ location = /api/gps-matcher/run {
 **The item's capture time** is shown as three labelled clocks:
 
 - **UTC**, always shown.
-- **Camera**, the wall clock as written, from `capture_evidence` or the file re-read, with its offset and one word for how the offset was obtained: `measured` (GPS clock), `declared` (offset tag), `assumed` (camera zone) or `file date`. Never colour alone. A video container stores UTC, so the row reads that no wall clock was written. With `src` `mtime` it reads "No wall clock. This is the file's modified date." With `src` `none` it reads "No wall clock." With neither evidence nor a re-read it reads "not recorded".
+- **Camera**, the wall clock as written, from `capture_evidence` or the file re-read, with its offset and one word for how the offset was obtained: `measured` (GPS clock), `your rule` (the owner's camera clock rule), `declared` (offset tag), `assumed` (camera zone) or `file date`. Never colour alone. A video container stores UTC, so the row reads that no wall clock was written. With `src` `mtime` it reads "No wall clock. This is the file's modified date." With `src` `none` it reads "No wall clock." With neither evidence nor a re-read it reads "not recorded".
 - **Your browser**, with the zone named.
 
 **Every other instant** (a track point, the upload time, `gps_utc`, `file_mtime`, `creation_time`) has no camera clock. It shows UTC and the browser zone, each labelled, and the camera row is left out.
@@ -653,7 +657,7 @@ Downsampling keeps one row per format, so a per-source line in a downsampled con
 4. **Others:** one row per format, "Each format on its own": the gap to its nearest point before and after, and how far its points alone would place the item (Alone), the used rows marked and each row in its format's map colour. On the map, each format's own points are dots joined by a thin dashed line, with a diamond at its own estimate. Below the rows comes one independence line (table below), when one applies.
 5. **Actions:** Re-match my library, Place by hand.
 
-**Zone chip wording.** `gps`: the GPS clock, with its residual. `offset`: `OffsetTimeOriginal`. `camera`: the zone name and "nothing in the file confirms this". With `offset_ignored`: "The file declares {tag}, which is ignored for this make." With `camera_zone` unset: "the server's own zone, because `CAMERA_TIMEZONE` is unset", and with `camera_zone_utc_fallback`: a warning that this time was read as UTC.
+**Zone chip wording.** `gps`: the GPS clock, with its residual. `clock_rule`: "Your rule for {camera}: clock showed UTC+02:00", and for recorded evidence the note "Changing this rule in Settings does not move this time." `offset`: `OffsetTimeOriginal`. `camera`: the zone name and "nothing in the file confirms this". With `offset_ignored`: "The file declares {tag}, which is ignored for this make." With `camera_zone` unset: "the server's own zone, because `CAMERA_TIMEZONE` is unset", and with `camera_zone_utc_fallback`: a warning that this time was read as UTC.
 
 **Time origin chip.** `exif_original`: "EXIF capture time". `exif_ifd0`: "EXIF general date, may be an edit time". `container`: "Video container time". `mtime`: "File modified time, may be wrong", with the note "A modified time is often a copy or download time." `none`: "No capture time". With no evidence, the chip follows the re-read's `rule_today.source`, and until that loads it reads "not recorded".
 
@@ -810,7 +814,7 @@ Where the code differs from the specification above, or settles something it lef
 - `others` was first one row per format with its single nearest point. A follow-up gave each format both sides and its own estimate, as "Computing the fields" now describes.
 - `ReadTags` lists only IFD0 and the Exif and GPS IFDs, because imagemeta names the Interoperability IFD's tags 1 and 2 `GPSLatitudeRef` and `GPSLatitude`.
 - EXIF is read through imagemeta, which replaced goexif (#66) after this note was written. On one real library of 14,188 objects, `ExtractExif` and `Raw` agreed with the goexif version on all but 13, and each of those gained a value. 3 files are partial, all of them files goexif could not read at all.
-- A `by` other than `ingest` or `backfill` counts as not recorded.
+- A `by` other than `ingest`, `backfill` or `retime` counts as not recorded.
 - Pair warnings compare raw source prefixes, so two unknown prefixes count as two formats, although both report as `other`.
 - `trackBucketSeconds` has a minimum of 1, and the provenance handler sets `MatchWindowS`.
 - `returned_points <= maxPoints + log formats + derived rows` holds for one window. With several windows, which Step 3 needs, the middle term is log formats times windows.
@@ -827,6 +831,13 @@ Where the code differs from the specification above, or settles something it lef
 - `formatInstant` takes an optional third argument, `{ seconds?, locale? }`, and appends the IANA name without a numeric offset. In the repeated autumn hour, two instants an hour apart can print the same. The evidence view shows UTC beside it, the Map card and the gallery label do not.
 - The Map card's date now has a short month, seconds and the zone.
 - `splitSegments` uses a flat 7,200 s for Google Timeline. A Step 3 bucket over 2,400 s would break that line at every point.
+
+**Camera clock rules (#24), added after Step 1.**
+
+- Each user defines rules for their own cameras in Settings → Camera clocks (`camera_clock_rules`, `/api/camera-clock-rules`). A rule says which UTC offset one camera (make and model) showed during a period. `takenAt` applies it after the GPS clock and before `OffsetTimeOriginal` and the camera zone, with `zone` `clock_rule`.
+- Ingest, the file re-read and `server retime` load the owner's rules from the database. The file re-read reads with the rules as they are now, so `rule_today.clock_rule` is today's rule, and an item whose rule was changed or deleted since reads a whole offset off. A failed load is a 500, not a 502, because it is the database's failure and not the file's.
+- `server retime --user <id> [--apply]` is ported from `f2afa0d` into `main`. A row it moves gets `by: "retime"` and `retimed_from`, with the EXIF keys taken from the re-read and the container and file keys kept from the old evidence. The provenance route returns such evidence as `recorded: "retime"`.
+- `TimeCard` names the rule in the zone chip. For recorded evidence it adds that changing the rule does not move the time. When today's re-read uses a rule and differs from the stored time (`whole_offset` or `other`), it names the rule and says "A stored time moves only when an administrator runs server retime." For `by: "retime"` it says "Re-timed on the server: {duration} earlier" (or "later") "than the time stored before.", and lists the old time as "Before re-time", in UTC and the browser zone. `formatOffset` moved from `lib/evidence.ts` to `lib/time.ts`.
 
 ## Step 2: Checks page
 
@@ -1225,7 +1236,7 @@ Everything below came up during the design and is deliberately left out. Each en
 - **A Trips page badge counting high-severity findings.** Compute on request or cache per owner; do not load on every visit.
 - **Further rules.** `impossible_hop` over 300 km/h and over 5 km (3 of 1,808 consecutive pairs; 7 of 6,816 in another population). `time_from_file_mtime` (54 by a fractional-second proxy; exact from `capture_evidence`, 42 of 48 AVI files). `video_clock_off_zone` by family and quarter, n at least 5 (4 groups, 152 items; these videos are correct but warn that the camera's photos are suspect). `photo_predicted_by_videos` (5 flagged, all 5 in the known set, recall only 5 of 42 until families are merged). `counter_inversion` (13 of 1,171 adjacent pairs, 1 near a whole hour). These last two were only ever named and counted: no condition was written down, so each must be defined before it can be built. `file_time_jump`, a large jump between consecutive points of one file, not measured; it is the only one of the two misdating signals that catches a misdating into the past, because `future_track_points` looks only ahead. `taken_far_from_trip`, a capture time far from its trip neighbours, not measured; it would catch a wrong time before the upload date, such as a camera's default date, which `taken_after_upload` cannot.
 - **What rests on a flagged clock.** When a group verdict fires, list the estimates resting on those photos' points. In the replay, 4 estimates rested on the affected photos' points and would move a median 646 m. Exposure in general is wide: 893 estimates of the largest owner rest on a derived point. Today that needs one lookup per point, and the what-if preview is deferred to #26.
-- **A `retime` dry run as a library-wide audit.** Port `server retime` with #24 and add one summary line per make to its existing consistent, whole-offset and unverifiable counts. It overlaps with the Step 4 backfill's dry run, so build only one. Size: S.
+- **A `retime` dry run as a library-wide audit.** `server retime` is ported (#24), and its dry run prints each change and the counts `checked`, `retimed`, `unchanged`, `not_exif`, `mismatched` and `failed`. The audit would add one summary line per make. It overlaps with the Step 4 backfill's dry run, so build only one. Size: S.
 - **A "needs attention" list** for items with impossible times, which never appear on a map because they have no location. Step 2's `taken_after_upload` covers the main case; a list on the Trips and Map pages is worthwhile if those items keep getting missed.
 - **A scatter of wall clock minus GPS clock per item**, with allowed offsets as bands. It would show stale fixes and slow clock drift. Needs `capture_evidence` on those rows, so it comes after the backfill, and is worthwhile if a drifting camera turns up.
 - **A per-source speed sparkline** to spot corrupted sentences. Computable from stored points. Plausible, not seen, so worthwhile only once such a file is found.
@@ -1340,11 +1351,11 @@ Some of the rejected views need defining, so that the reopen triggers mean somet
 - **Deleted items leave their track points behind, and the matcher still uses them.** `gps_tracks` has no reference to `media`, and nothing deletes a point when an item goes. On the measured library, 32 of 1,838 `exif` points and 2 of 110 `manual` points have no item at that instant, and 6 estimates rest on such a point. Re-uploading a deleted item without a position copies its own leftover point back at confidence 1.0, the one way an item can rest on itself. A cleanup needs care, because several items can share one point (41 instants have more than one item), and a re-import of track files must never delete the `exif` and `manual` labels, which are GeoGallery's own points.
 - **The matcher never clears a location.** An estimate with no bracket left keeps its position forever. Hence `no_support`.
 - **Same-second collisions.** `ON CONFLICT DO NOTHING` keeps the first photo's position (29 of 1,833 own-position photos share an owner and second with another), and a manual save overwrites a point at that second.
-- **Off-main writers leave no trace.** `retime`, `video-locations` and hand SQL change rows, and there is no `updated_at` or audit column.
+- **Some writers leave no trace.** `video-locations`, which is still off `main`, and hand SQL change rows without recording it, and there is no `updated_at` or audit column. `server retime` records itself in `capture_evidence` (`by: "retime"`, `retimed_from`).
 
 **Matcher**
 
-- The matcher has no transaction, returns at the first error, stops when a request context is cancelled, has no `ORDER BY`, and has no per-owner lock against overlapping runs. `UpdateLocation` only logs a matcher failure.
+- The matcher has no transaction, returns at the first error, stops when a request context is cancelled, has no `ORDER BY`, and has no per-owner lock against overlapping runs. `UpdateLocation` only logs a matcher failure. It writes a position only to a row whose `taken_at` and `gps_source` are still as it listed them, so a run that overlaps `server retime` never puts a position from the old time on a retimed row, but it can still place a neighbour from a point that retime moved after the matcher read it.
 - `GPS_MATCH_WINDOW_HOURS` is not passed by compose, so a native process and a container can differ on one database. Shrinking the window leaves old values in place.
 - It treats derived points as ordinary points. A photo with a wrong clock therefore teaches the matcher a wrong fact: 899 of 4,962 estimates (18%) rest on at least one derived point, 584 (12%) only on those, and 411 of those are plain copies of another item's position.
 - It treats a logger that stands still as the photographer's position, because it has no notion of whether the logger moved with the camera.
@@ -1368,7 +1379,7 @@ Some of the rejected views need defining, so that the reopen triggers mean somet
 - IFD0 `DateTime` is used when `DateTimeOriginal` is missing, and editors rewrite it to the edit time.
 - HEIC, HEIF, PNG and WebP are read through imagemeta, but only from the first 1 MiB, and no real phone file has been tried (#29).
 - `TranscodeH264` drops `creation_time`. Step 1 fixes new files. How many stored videos were transcoded is unknown.
-- One `CAMERA_TIMEZONE` applies to every user (#25). A camera whose clock was changed by hand is misread, with no GPS tag or offset to catch it. A wall clock in the repeated daylight-saving hour is ambiguous, since Go does not specify which occurrence `time.Date` picks.
+- One `CAMERA_TIMEZONE` applies to every user (#25). A camera whose clock was changed by hand is misread, with no GPS tag or offset to catch it, until its owner adds a camera clock rule. A wall clock in the repeated daylight-saving hour is ambiguous, since Go does not specify which occurrence `time.Date` picks.
 - A make with a wrong offset tag goes unnoticed until someone adds a rule for it to `backend/camera-rules.json`.
 - A video's `creation_time` is parsed as RFC 3339 even when the file holds a wall clock labelled as UTC, and such a video is off by the camera's offset.
 - A video's `taken_at` is sometimes the end of the recording. No correction exists.
@@ -1398,7 +1409,7 @@ Some of the rejected views need defining, so that the reopen triggers mean somet
 
 - **#22, matcher source preference.** Step 1's options struct and returned source are what #22 builds on. The `others` table and the `independent` line show on real items what it would change. The tie-break ships here rather than in #22. When #22 lands, estimates change and read as `stale` until the next run. Step 2's `time_may_be_estimated_used` matches #22's two formats. #22 keeps KMZ among the preferred sources, because its time spacing was never checked; Step 2's `modal_gap_share` is what can settle that.
 - **#23, parser guards.** Independent. Until it lands, Step 2's `future_track_points` reports what it would have refused, and #23's one-day limit is the threshold used. It stops new rows but does not surface existing ones. The track upload receipt shows a bad span on the day of import.
-- **#24, per-camera clock rule and retime port.** Step 1 ports `storage.ReadHead` and `ingest.ProbeURL`, which #24 also needs. #24's clock rule becomes a new `capture_evidence.zone` value. The ported `retime` must update `capture_evidence`, so that a repaired row is not identical to an untouched one. The backfill follows `RunRetime`'s pattern. The Step 4 group verdict finds what #24's rule would fix.
+- **#24, per-user camera clock rules and the retime port.** Built after Step 1, on its `storage.ReadHead`. The owner's clock rule is the `capture_evidence.zone` value `clock_rule`, with a copy of the rule in `clock_rule`. The ported `retime` updates `capture_evidence` (`by: "retime"`, `retimed_from`), so a repaired row is not identical to an untouched one. The backfill follows `RunRetime`'s pattern. The Step 4 group verdict finds what #24's rule would fix.
 - **#25, per-user camera zone.** `capture_evidence.camera_zone` records the zone actually applied to each file, so per-user and per-batch zones stay explainable. `server_camera_zone` must then become the effective zone for that user.
 - **#26, edit and shift times.** Depends on #24. Step 4's Copy shift produces the `{media_ids, delta_seconds}` body it specifies. Apply buttons belong to #26. An edit must record itself in `capture_evidence`.
 - **#29, phone upload spike.** The spike decides what a phone upload actually delivers, HEIC or JPEG, and whether position survives. It sets the priority of the HEIC parser entry above, and Step 1's `capture_evidence.src` shows the symptom on real uploads.
@@ -1437,7 +1448,7 @@ Some of the rejected views need defining, so that the reopen triggers mean somet
 4. Should the inconsistent day boundaries be fixed or only labelled? Fixing them needs each photo's zone.
 5. Should the track toggle, and per-format layer choices if those are added, persist across reloads? That would be the app's first `localStorage` use.
 6. Should the confidence score be replaced by an estimated error in metres, or only explained better?
-7. Should `retime` and `video-locations` be merged to `main`, and record that they ran? Today a repaired row looks identical to an untouched one.
+7. Should `retime` and `video-locations` be merged to `main`, and record that they ran? Answered for `retime` by #24: it is in `main`, and a row it moves records `by: "retime"` and `retimed_from`. `video-locations` is still off `main` and records nothing.
 8. Should ingest also read the zero-cost extras: the GPS error tag and sub-second times?
 9. Should `Re-match` be narrowed to one item? Today it can only run over the whole library.
 10. Is the tie-break's effect on the hosted instance as small as it was on the measured library? Measure before deploying it.

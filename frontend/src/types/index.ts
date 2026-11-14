@@ -114,6 +114,34 @@ export interface CreatedApiToken extends ApiToken {
   token: string;
 }
 
+// One of the caller's cameras whose clock showed a fixed UTC offset during a period
+// (/api/camera-clock-rules). Ingest matches it on the file's EXIF Make and Model, without case,
+// and on the wall clock's calendar day. Days are "YYYY-MM-DD" on the camera's own clock, inclusive.
+export interface CameraClockRuleInput {
+  make: string;
+  model: string;
+  utc_offset_min: number; // what the clock showed: -720..840, a multiple of 15
+  starts_on: string | null; // null: no first day
+  ends_on: string | null; // null: no last day
+  note: string;
+}
+
+export interface CameraClockRule extends CameraClockRuleInput {
+  id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// GET /api/cameras: a camera in the caller's own library. Only items whose capture evidence
+// recorded a make are counted.
+export interface LibraryCamera {
+  make: string; // the most frequent spelling
+  model: string;
+  items: number;
+  first_taken_at: string | null;
+  last_taken_at: string | null;
+}
+
 // POST /api/gps-tracks/upload. skipped: points imported before; empty: files without a
 // timestamped point; failed: files that could not be read.
 export interface GpsUploadResult {
@@ -138,7 +166,7 @@ export interface GuessResult {
 // Every instant is RFC 3339 in UTC.
 
 export type CaptureSource = "exif_original" | "exif_ifd0" | "container" | "mtime" | "none";
-export type ZoneRule = "gps" | "offset" | "camera";
+export type ZoneRule = "gps" | "offset" | "clock_rule" | "camera";
 export type PlacementState =
   | "current"
   | "stale"
@@ -150,10 +178,24 @@ export type PlacementState =
   | "manual";
 export type BracketShape = "two_sided" | "one_sided" | "exact";
 
-// media.capture_evidence: how taken_at was derived, recorded at ingest. Every key is always present.
+// The owner's clock rule a capture time was read with, as the rule was then: it may have been
+// changed or deleted since.
+export interface EvidenceClockRule {
+  id: string;
+  make: string;
+  model: string;
+  offset_min: number;
+  starts_on: string | null; // "YYYY-MM-DD" on the camera's own clock
+  ends_on: string | null;
+}
+
+// media.capture_evidence: how taken_at was derived, recorded at ingest, or by server retime when
+// that moved taken_at. Every key is always present, except the two added with clock rules, which
+// older rows lack.
 export interface CaptureEvidence {
   v: number;
-  by: "ingest" | "backfill";
+  by: "ingest" | "backfill" | "retime";
+  retimed_from?: string | null; // taken_at before server retime moved it
   src: CaptureSource;
   zone: ZoneRule | null;
   wall: string | null;
@@ -162,6 +204,7 @@ export interface CaptureEvidence {
   offset_tag: string | null;
   offset_ignored: boolean;
   offset_used_min: number | null;
+  clock_rule?: EvidenceClockRule | null; // set when zone is "clock_rule"
   camera_zone: string; // the IANA name, or the literal "server zone (unset)"
   camera_zone_utc_fallback: boolean;
   make: string | null;
@@ -304,7 +347,7 @@ export interface ProvenanceResponse {
     duration_sec: number | null;
   };
   time: {
-    recorded: "ingest" | "backfill" | "not_recorded";
+    recorded: "ingest" | "backfill" | "retime" | "not_recorded";
     evidence: CaptureEvidence | null; // null when not_recorded
     server_camera_zone: ServerCameraZone;
   };
@@ -353,6 +396,7 @@ export interface FileReread {
     zone_rule: ZoneRule | null;
     offset_min: number | null; // null for a container time
     zone_name: string | null; // set only when zone_rule is "camera"
+    clock_rule: EvidenceClockRule | null; // set only when zone_rule is "clock_rule"
     taken_at: string;
   } | null; // null when no capture time could be read
   delta_s: number | null; // rule_today.taken_at minus stored, in seconds

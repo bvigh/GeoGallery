@@ -1,6 +1,6 @@
 # GeoGallery roadmap
 
-As of 2026-11-09. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
+As of 2026-11-14. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
 
 Sizes: **XS** < 2 h, **S** ≤ 1 day, **M** 2–4 days, **L** a week or more.
 
@@ -46,7 +46,7 @@ Mostly frontend. Small enough to ship as two or three bundled PRs.
 |---|---|---|
 | #22 | Matcher: use KML and GeoJSON points only when no recorded source is in range | S |
 | #23 | Track parsers: skip far-future points, decide on times without an offset | S |
-| #24 | Per-camera clock rule (Insta360 ONE RS, 2022), and port `server retime` | S |
+| #24 | Per-user camera clock rules, defined in Settings, and port `server retime` | M |
 | #25 | Per-user camera time zone, with an override per upload batch | M |
 | #26 | Edit and shift capture times in the UI | M |
 | #27 | Let the owner mark an item as 360° or flat | M |
@@ -58,6 +58,8 @@ Mostly frontend. Small enough to ship as two or three bundled PRs.
 | #63 | Clock check: test camera clocks against GPS data | L |
 
 #61, #62, #32 and #63 are the four steps of `docs/gps-debugging.md`, in that order. That note also keeps everything the design left for later.
+
+#24 grew beyond its issue: instead of one built-in rule for the Insta360 ONE RS in 2022, each user defines rules for their own cameras in Settings (a make and model, the UTC offset its clock showed, an optional period), and `server retime` applies them to stored items. Make-wide facts stay in `backend/camera-rules.json`.
 
 360° is the owner's decision (#27). Ingest still makes a first guess, and #28 makes that guess better for new files, but a manual choice always wins.
 
@@ -130,5 +132,5 @@ Each needs a design note before it can be estimated.
 2. #13, #14: video keys.
 3. #15: the view editor in the galleries.
 4. #22, #23: matcher and parser guards.
-5. #24 with the `retime` port, then the local repair.
+5. #24: per-user camera clock rules and the `retime` port, then the local repair with `server retime`.
 6. #61: "Why here?", as one pull request. Its design planned four, but the parts share files.

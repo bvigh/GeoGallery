@@ -370,6 +370,132 @@ describe("api client", () => {
     });
   });
 
+  describe("camera clock rules", () => {
+    const input = {
+      make: "Panasonic",
+      model: "DC-TZ200",
+      utc_offset_min: 120,
+      starts_on: "2018-07-01",
+      ends_on: null,
+      note: "",
+    };
+    const rule = { ...input, id: "r1", created_at: "2026-11-01T10:00:00Z", updated_at: "2026-11-01T10:00:00Z" };
+    const camera = { make: "Panasonic", model: "DC-TZ200", items: 595, first_taken_at: null, last_taken_at: null };
+    const noBody = () => ({ status: 204, ok: true, json: async () => { throw new Error("no body"); } });
+
+    it.each([
+      {
+        name: "listCameraClockRules()",
+        call: () => api.listCameraClockRules(),
+        reply: response(200, [rule]),
+        url: "/api/camera-clock-rules",
+        method: undefined,
+        body: undefined,
+        want: [rule],
+      },
+      {
+        name: "createCameraClockRule()",
+        call: () => api.createCameraClockRule(input),
+        reply: response(201, rule),
+        url: "/api/camera-clock-rules",
+        method: "POST",
+        body: input,
+        want: rule,
+      },
+      {
+        name: "updateCameraClockRule() replaces the rule",
+        call: () => api.updateCameraClockRule("r1", input),
+        reply: response(200, rule),
+        url: "/api/camera-clock-rules/r1",
+        method: "PUT",
+        body: input,
+        want: rule,
+      },
+      {
+        name: "deleteCameraClockRule() accepts a 204",
+        call: () => api.deleteCameraClockRule("r1"),
+        reply: noBody(),
+        url: "/api/camera-clock-rules/r1",
+        method: "DELETE",
+        body: undefined,
+        want: undefined,
+      },
+      {
+        name: "listCameras()",
+        call: () => api.listCameras(),
+        reply: response(200, [camera]),
+        url: "/api/cameras",
+        method: undefined,
+        body: undefined,
+        want: [camera],
+      },
+    ])("$name", async ({ call, reply, url, method, body, want }) => {
+      fetchMock.mockResolvedValue(reply);
+      await expect(call()).resolves.toEqual(want);
+      const [gotUrl, init] = fetchMock.mock.calls[0];
+      expect(gotUrl).toBe(url);
+      expect(init.method).toBe(method);
+      if (body === undefined) {
+        expect(init.body).toBeUndefined();
+      } else {
+        expect(init.headers).toEqual({ "Content-Type": "application/json" });
+        expect(JSON.parse(init.body)).toEqual(body);
+      }
+    });
+
+    it.each([
+      { name: "listCameraClockRules()", call: () => api.listCameraClockRules() },
+      { name: "listCameras()", call: () => api.listCameras() },
+    ])("$name turns a null list into []", async ({ call }) => {
+      fetchMock.mockResolvedValue(response(200, null));
+      await expect(call()).resolves.toEqual([]);
+    });
+
+    it.each([
+      { name: "createCameraClockRule()", call: () => api.createCameraClockRule(input), message: "POST /camera-clock-rules failed: 400" },
+      { name: "updateCameraClockRule()", call: () => api.updateCameraClockRule("r1", input), message: "PUT /camera-clock-rules/r1 failed: 400" },
+    ])("$name carries the reason of a 400", async ({ call, message }) => {
+      fetchMock.mockResolvedValue({ ...response(400), text: async () => "utc_offset_min must be a multiple of 15\n" });
+      const error = await call().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status: 400, message, reason: "utc_offset_min must be a multiple of 15" });
+    });
+
+    it("has no reason for a 400 with an empty or unreadable body", async () => {
+      fetchMock.mockResolvedValueOnce({ ...response(400), text: async () => "  " });
+      await expect(api.createCameraClockRule(input)).rejects.toMatchObject({ status: 400, reason: null });
+      fetchMock.mockResolvedValueOnce({ ...response(400), text: async () => { throw new Error("gone"); } });
+      await expect(api.createCameraClockRule(input)).rejects.toMatchObject({ status: 400, reason: null });
+    });
+
+    it.each([
+      { name: "createCameraClockRule()", call: () => api.createCameraClockRule(input), reason: "at most 100 camera clock rules" },
+      { name: "updateCameraClockRule()", call: () => api.updateCameraClockRule("r1", input), reason: "overlaps another rule for this camera" },
+    ])("$name carries the reason of a 409, which tells an overlap from the cap", async ({ call, reason }) => {
+      fetchMock.mockResolvedValue({ ...response(409), text: async () => reason + "\n" });
+      await expect(call()).rejects.toMatchObject({ status: 409, reason });
+    });
+
+    it.each([
+      { name: "a foreign rule", call: () => api.updateCameraClockRule("r9", input), status: 404, message: "PUT /camera-clock-rules/r9 failed: 404" },
+      { name: "a delete of a foreign rule", call: () => api.deleteCameraClockRule("r9"), status: 404, message: "DELETE /camera-clock-rules/r9 failed: 404" },
+    ])("rejects $name with the status and no reason", async ({ call, status, message }) => {
+      const text = vi.fn(async () => "overlaps another rule for this camera");
+      fetchMock.mockResolvedValue({ ...response(status), text });
+      const error = await call().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status, message, reason: null });
+      expect(text).not.toHaveBeenCalled();
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it("redirects to login on 401", async () => {
+      fetchMock.mockResolvedValue(response(401));
+      await expect(api.createCameraClockRule(input)).rejects.toBeInstanceOf(ApiError);
+      expect(assign).toHaveBeenCalledWith("/api/auth/login?return_to=" + encodeURIComponent("/trips?x=1"));
+    });
+  });
+
   it("revokeToken() sends DELETE and rejects on failure", async () => {
     fetchMock.mockResolvedValueOnce({ status: 204, ok: true, json: async () => { throw new Error("no body"); } });
     await expect(api.revokeToken("t1")).resolves.toBeUndefined();

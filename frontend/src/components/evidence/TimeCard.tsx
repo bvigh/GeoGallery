@@ -6,8 +6,10 @@ import {
   cameraClock,
   checkSentence,
   NOT_RECORDED,
+  rereadClockRuleNote,
   rereadSentence,
   REREAD_NOT_RECORDED,
+  retimeSentence,
   timeOriginChip,
   VIDEO_TIME_MAY_BE_END,
   zoneChip,
@@ -86,6 +88,8 @@ export function TimeCard({ item, time, inert = false }: TimeCardProps) {
   // Only a container time can be the end of the clip; a modified date cannot.
   const timeFromContainer = evidence ? evidence.src === "container" : file?.rule_today?.source === "container";
   const offsetTag = file?.file.offset_tag ?? evidence?.offset_tag ?? null;
+  const retime = retimeSentence(evidence, item.taken_at);
+  const rereadRuleNote = file ? rereadClockRuleNote(file) : null;
 
   const checks = (file?.checks ?? []).flatMap((check) => {
     // Decided below, from where the stored time came from, and shown beside the duration.
@@ -96,6 +100,7 @@ export function TimeCard({ item, time, inert = false }: TimeCardProps) {
 
   // Every other instant: UTC and the browser zone, never a camera clock.
   const otherInstants: [label: string, iso: string | null][] = [
+    ["Before re-time", retime ? (evidence?.retimed_from ?? null) : null],
     ["GPS clock", evidence?.gps_utc ?? file?.file.gps_stamp ?? null],
     ["Container time", evidence?.creation_time ?? file?.file.video?.creation_time ?? null],
     ["File modified", evidence?.file_mtime ?? null],
@@ -133,6 +138,7 @@ export function TimeCard({ item, time, inert = false }: TimeCardProps) {
           <span>{zone.warning}</span>
         </p>
       )}
+      {retime && <p className="text-xs">{retime}</p>}
 
       {isVideo && (duration !== null || timeFromContainer) && (
         <p className="text-xs text-muted-foreground">
@@ -157,6 +163,7 @@ export function TimeCard({ item, time, inert = false }: TimeCardProps) {
         </div>
       )}
       {file && <p className="text-xs">{rereadSentence(file, item.media_type, evidence)}</p>}
+      {rereadRuleNote && <p className="text-xs text-muted-foreground">{rereadRuleNote}</p>}
 
       {checks.length > 0 && (
         <ul className="space-y-1">

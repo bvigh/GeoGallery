@@ -86,7 +86,7 @@ func TestRegisterMedia_Integration_StoresEvidence(t *testing.T) {
 
 			var got map[string]any
 			require.NoError(t, json.Unmarshal(evidence, &got))
-			assert.Len(t, got, 21, "every key is always present")
+			assert.Len(t, got, 23, "every key is always present")
 			for key, want := range tt.wantEvidence {
 				assert.Equal(t, want, got[key], key)
 			}

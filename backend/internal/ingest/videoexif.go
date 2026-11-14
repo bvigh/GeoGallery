@@ -12,7 +12,8 @@ var panaExifOffsets = []int{0x10, 0x4068, 0x4080}
 
 // VideoExif reads the EXIF a camera keeps inside a video, within head, the start of the file, and
 // returns it when the camera rules date the make's videos from it (CameraRule.VideoTimeFromExif) and
-// it holds a capture time. That time is read like a photo's, with zone. Only Panasonic's PANA box is
+// it holds a capture time. That time is read like a photo's, with zone, so the owner's clock rule for
+// the camera applies to its videos too (the model comes from that EXIF). Only Panasonic's PANA box is
 // read, and only when it lies within head: Panasonic writes moov before the media data. The position
 // and the dimensions are left out, because a video's location comes from its container tag and its
 // size from ffprobe. Decoding costs what ExtractExif costs, so callers take an EXIF decode slot.

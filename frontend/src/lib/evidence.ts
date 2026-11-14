@@ -3,13 +3,15 @@
 // "correct", 100% is only explained as a same-instant point for an exact bracket, and a confidence
 // is never described as accuracy.
 
-import { formatDuration } from "@/lib/time";
+import { cameraName, formatUtcOffset } from "@/lib/clockRules";
+import { formatDuration, formatOffset } from "@/lib/time";
 import type {
   Bracket,
   BracketShape,
   CaptureEvidence,
   CaptureSource,
   Estimate,
+  EvidenceClockRule,
   FileReread,
   MediaItem,
   OtherFormat,
@@ -289,11 +291,13 @@ export interface ZoneChip {
 }
 
 interface ZoneFacts {
+  recorded: boolean; // from capture_evidence, not the file re-read
   rule: ZoneRule | null;
   wallMinusGpsS: number | null;
   offsetMin: number | null;
   offsetTag: string | null;
   offsetIgnored: boolean;
+  clockRule: EvidenceClockRule | null;
   cameraZone: string;
   cameraZoneUtcFallback: boolean;
 }
@@ -305,22 +309,27 @@ function zoneFacts(
 ): ZoneFacts | null {
   if (evidence) {
     return {
+      recorded: true,
       rule: evidence.zone,
       wallMinusGpsS: evidence.wall_minus_gps_s,
       offsetMin: evidence.offset_used_min,
       offsetTag: evidence.offset_tag,
       offsetIgnored: evidence.offset_ignored,
+      // Rows recorded before clock rules existed lack the key.
+      clockRule: evidence.clock_rule ?? null,
       cameraZone: evidence.camera_zone,
       cameraZoneUtcFallback: evidence.camera_zone_utc_fallback,
     };
   }
   if (!reread?.rule_today) return null;
   return {
+    recorded: false,
     rule: reread.rule_today.zone_rule,
     wallMinusGpsS: reread.file.wall_minus_gps_s,
     offsetMin: reread.rule_today.offset_min,
     offsetTag: reread.file.offset_tag,
     offsetIgnored: reread.file.offset_ignored,
+    clockRule: reread.rule_today.clock_rule ?? null,
     cameraZone: reread.rule_today.zone_name ?? serverZone.name,
     cameraZoneUtcFallback: serverZone.utc_fallback,
   };
@@ -334,6 +343,8 @@ function zoneChipText(facts: ZoneFacts & { rule: ZoneRule }): string {
     }
     case "offset":
       return "OffsetTimeOriginal";
+    case "clock_rule":
+      return facts.clockRule ? clockRuleName(facts.clockRule) : "Your camera clock rule";
     case "camera": {
       const zone =
         facts.cameraZone === SERVER_ZONE_UNSET
@@ -342,6 +353,20 @@ function zoneChipText(facts: ZoneFacts & { rule: ZoneRule }): string {
       return `${zone}; nothing in the file confirms this`;
     }
   }
+}
+
+// "Your rule for Panasonic DC-TZ200: clock showed UTC+02:00", in the words of the Settings page.
+function clockRuleName(rule: EvidenceClockRule): string {
+  return `Your rule for ${cameraName(rule.make, rule.model)}: clock showed ${formatUtcOffset(rule.offset_min)}`;
+}
+
+export const CLOCK_RULE_KEEPS_TIME = "Changing this rule in Settings does not move this time.";
+
+function zoneNotes(facts: ZoneFacts): string[] {
+  const notes = facts.offsetIgnored ? [offsetIgnoredSentence(facts.offsetTag)] : [];
+  // The recorded rule is a copy: the rule itself may have been changed or deleted since.
+  if (facts.rule === "clock_rule" && facts.recorded) notes.push(CLOCK_RULE_KEEPS_TIME);
+  return notes;
 }
 
 // How the UTC offset was obtained, from the recorded evidence or else the file re-read. Null when
@@ -355,7 +380,7 @@ export function zoneChip(
   if (!facts || facts.rule === null) return null;
   return {
     text: zoneChipText({ ...facts, rule: facts.rule }),
-    notes: facts.offsetIgnored ? [offsetIgnoredSentence(facts.offsetTag)] : [],
+    notes: zoneNotes(facts),
     warning:
       facts.rule === "camera" && facts.cameraZoneUtcFallback
         ? "This time was read as UTC, because CAMERA_TIMEZONE is unset and the server's zone is UTC."
@@ -363,23 +388,21 @@ export function zoneChip(
   };
 }
 
-export type OffsetWord = "measured" | "declared" | "assumed" | "file date";
+export type OffsetWord = "measured" | "declared" | "your rule" | "assumed" | "file date";
 
 export interface CameraClock {
   text: string;
   word: OffsetWord | null;
 }
 
-const OFFSET_WORD: Record<ZoneRule, OffsetWord> = { gps: "measured", offset: "declared", camera: "assumed" };
+const OFFSET_WORD: Record<ZoneRule, OffsetWord> = {
+  gps: "measured",
+  offset: "declared",
+  clock_rule: "your rule",
+  camera: "assumed",
+};
 
 const NO_WALL_CLOCK_VIDEO: CameraClock = { text: "No wall clock was written. A video container stores UTC.", word: null };
-
-export function formatOffset(minutes: number): string {
-  const absolute = Math.abs(minutes);
-  const hours = String(Math.floor(absolute / 60)).padStart(2, "0");
-  const rest = String(absolute % 60).padStart(2, "0");
-  return `${minutes < 0 ? "-" : "+"}${hours}:${rest}`;
-}
 
 function wallClock(wall: string | null, offsetMin: number | null, rule: ZoneRule | null): CameraClock {
   const offset = offsetMin === null ? "" : ` ${formatOffset(offsetMin)}`;
@@ -459,4 +482,25 @@ export function rereadSentence(
     case "other":
       return `Today's rules differ by ${delta}.`;
   }
+}
+
+// Today's reading used one of the owner's clock rules and differs from the stored time: say which
+// rule, and that a stored time does not follow it on its own.
+export function rereadClockRuleNote(reread: Pick<FileReread, "class" | "rule_today">): string | null {
+  const rule = reread.rule_today;
+  if (rule?.zone_rule !== "clock_rule" || !rule.clock_rule) return null;
+  if (reread.class !== "whole_offset" && reread.class !== "other") return null;
+  const { make, model, offset_min } = rule.clock_rule;
+  return `Today's reading uses your rule for ${cameraName(make, model)} (clock showed ${formatUtcOffset(offset_min)}). A stored time moves only when an administrator runs server retime.`;
+}
+
+// Says that server retime moved the stored time, and by how much, or null for any other writer.
+// The earlier time itself is listed with the other instants.
+export function retimeSentence(evidence: CaptureEvidence | null, takenAt: string | null): string | null {
+  if (evidence?.by !== "retime") return null;
+  const from = evidence.retimed_from ?? null;
+  if (from === null) return "Re-timed on the server. The time stored before was not recorded.";
+  const seconds = takenAt === null ? Number.NaN : (Date.parse(takenAt) - Date.parse(from)) / 1000;
+  if (Number.isNaN(seconds) || seconds === 0) return "Re-timed on the server.";
+  return `Re-timed on the server: ${formatDuration(seconds)} ${seconds < 0 ? "earlier" : "later"} than the time stored before.`;
 }

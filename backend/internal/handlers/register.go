@@ -23,9 +23,12 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+// registrarDB is what registerMedia needs: the media row and its track point, and Query for the
+// owner's clock rules (loadClockRules).
 type registrarDB interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 type registrarStorage interface {
@@ -37,7 +40,8 @@ type MediaRegistrar struct {
 	db      registrarDB
 	storage registrarStorage
 	// cameraZone is the zone EXIF capture times are read in when the photo's own clocks do not say
-	// otherwise (ingest.ExtractExif). A zero value reads them as UTC.
+	// otherwise (ingest.ExtractExif). A zero value reads them as UTC. Its Clock is never used:
+	// registerMedia reads every file with the clock rules of the owner it ingests for.
 	cameraZone ingest.CameraZone
 }
 
@@ -60,17 +64,17 @@ func inExifDecodeSlot[T any](ctx context.Context, decode func() T) (T, error) {
 	return decode(), nil
 }
 
-// extractExif is ingest.ExtractExif in one of the exifDecodeSlots.
-func (r *MediaRegistrar) extractExif(ctx context.Context, head []byte) (ingest.ExifData, error) {
+// extractExifInSlot is ingest.ExtractExif in one of the exifDecodeSlots.
+func extractExifInSlot(ctx context.Context, head []byte, zone ingest.CameraZone) (ingest.ExifData, error) {
 	return inExifDecodeSlot(ctx, func() ingest.ExifData {
-		return ingest.ExtractExif(bytes.NewReader(head), r.cameraZone)
+		return ingest.ExtractExif(bytes.NewReader(head), zone)
 	})
 }
 
-// videoExif is ingest.VideoExif in one of the exifDecodeSlots.
-func (r *MediaRegistrar) videoExif(ctx context.Context, head []byte) (videoExif, error) {
+// videoExifInSlot is ingest.VideoExif in one of the exifDecodeSlots.
+func videoExifInSlot(ctx context.Context, head []byte, zone ingest.CameraZone) (videoExif, error) {
 	return inExifDecodeSlot(ctx, func() videoExif {
-		e, ok := ingest.VideoExif(head, r.cameraZone)
+		e, ok := ingest.VideoExif(head, zone)
 		return videoExif{e, ok}
 	})
 }
@@ -86,6 +90,11 @@ type videoExif struct {
 // duplicate is found before the file is probed, transcoded or uploaded. Two concurrent calls with
 // the same file can both miss that lookup: the INSERT's ON CONFLICT settles it, and the object
 // uploaded for the losing call, or for an INSERT the database rejected, is deleted again.
+//
+// The file is read with ownerID's camera clock rules, loaded once per call before its EXIF is
+// decoded. They describe that owner's cameras, so they never apply to another owner's file. When
+// they cannot be loaded the file fails: read without them, it would be stored at a time its owner
+// has said is wrong, and a later upload of it would be skipped as a duplicate.
 func (r *MediaRegistrar) registerMedia(
 	ctx context.Context,
 	ownerID string,
@@ -102,8 +111,15 @@ func (r *MediaRegistrar) registerMedia(
 		return "", false, fmt.Errorf("read head: %w", err)
 	}
 
+	rules, err := loadClockRules(ctx, r.db, ownerID)
+	if err != nil {
+		return "", false, err
+	}
+	zone := r.cameraZone
+	zone.Clock = rules
+
 	ext := strings.ToLower(filepath.Ext(filename))
-	exifData, err := r.extractExif(ctx, head)
+	exifData, err := extractExifInSlot(ctx, head, zone)
 	if err != nil {
 		return "", false, fmt.Errorf("wait to read exif: %w", err)
 	}
@@ -125,11 +141,12 @@ func (r *MediaRegistrar) registerMedia(
 		return "", false, fmt.Errorf("look up duplicate: %w", err)
 	}
 
-	if probeVideo && r.cameraZone.Rules.DatesVideosFromExif() {
+	if probeVideo && zone.Rules.DatesVideosFromExif() {
 		// A make whose camera rule says so is dated from the EXIF inside the video, as a photo would
 		// be: its container time is not UTC. Only the capture time and the camera come from it, after
-		// the hash, so probeVideo and the dedup key stay what they were.
-		v, err := r.videoExif(ctx, head)
+		// the hash, so probeVideo and the dedup key stay what they were. The owner's clock rules apply
+		// to it as to a photo, for the model this EXIF names.
+		v, err := videoExifInSlot(ctx, head, zone)
 		if err != nil {
 			return "", false, fmt.Errorf("wait to read video exif: %w", err)
 		}
@@ -201,7 +218,7 @@ func (r *MediaRegistrar) registerMedia(
 	if takenAt == nil {
 		takenAt = fallbackMtime
 	}
-	evidence := newCaptureEvidence(exifData, probe, fallbackMtime, r.cameraZone)
+	evidence := newCaptureEvidence(exifData, probe, fallbackMtime, zone)
 	if takenAt != nil && !jsonCanCarry(*takenAt) {
 		slog.Warn("register: capture time outside the years JSON can carry, storing none", "filename", filename, "year", takenAt.UTC().Year())
 		takenAt = nil
@@ -288,32 +305,38 @@ const (
 // captureEvidence is media.capture_evidence: how taken_at was derived, with the inputs that lost.
 // Those are computed at ingest and cannot be recovered later. Every key is always present.
 type captureEvidence struct {
-	V                     int      `json:"v"`
-	By                    string   `json:"by"`
-	Src                   string   `json:"src"`
-	Zone                  *string  `json:"zone"`
-	Wall                  *string  `json:"wall"`
-	GPSUTC                *string  `json:"gps_utc"`
-	WallMinusGPSS         *float64 `json:"wall_minus_gps_s"`
-	OffsetTag             *string  `json:"offset_tag"`
-	OffsetIgnored         bool     `json:"offset_ignored"`
-	OffsetUsedMin         *int     `json:"offset_used_min"`
-	CameraZone            string   `json:"camera_zone"`
-	CameraZoneUTCFallback bool     `json:"camera_zone_utc_fallback"`
-	Make                  *string  `json:"make"`
-	Model                 *string  `json:"model"`
-	ExifPartial           bool     `json:"exif_partial"`
-	CreationTime          *string  `json:"creation_time"`
-	FileMtime             *string  `json:"file_mtime"`
-	DurationS             *float64 `json:"duration_s"`
-	Encoder               *string  `json:"encoder"`
-	Codec                 *string  `json:"codec"`
-	Transcoded            bool     `json:"transcoded"`
+	V  int    `json:"v"`
+	By string `json:"by"` // "ingest", or "retime" once server retime has moved taken_at
+	// RetimedFrom is taken_at (RFC 3339, UTC) before server retime moved it; null from ingest.
+	RetimedFrom   *string  `json:"retimed_from"`
+	Src           string   `json:"src"`
+	Zone          *string  `json:"zone"`
+	Wall          *string  `json:"wall"`
+	GPSUTC        *string  `json:"gps_utc"`
+	WallMinusGPSS *float64 `json:"wall_minus_gps_s"`
+	OffsetTag     *string  `json:"offset_tag"`
+	OffsetIgnored bool     `json:"offset_ignored"`
+	OffsetUsedMin *int     `json:"offset_used_min"`
+	// ClockRule is the owner's clock rule that gave the offset, set exactly when Zone is
+	// ingest.ZoneClockRule.
+	ClockRule             *evidenceClockRule `json:"clock_rule"`
+	CameraZone            string             `json:"camera_zone"`
+	CameraZoneUTCFallback bool               `json:"camera_zone_utc_fallback"`
+	Make                  *string            `json:"make"`
+	Model                 *string            `json:"model"`
+	ExifPartial           bool               `json:"exif_partial"`
+	CreationTime          *string            `json:"creation_time"`
+	FileMtime             *string            `json:"file_mtime"`
+	DurationS             *float64           `json:"duration_s"`
+	Encoder               *string            `json:"encoder"`
+	Codec                 *string            `json:"codec"`
+	Transcoded            bool               `json:"transcoded"`
 }
 
 // newCaptureEvidence records how registerMedia derived taken_at. mtime is the caller's fallback
 // time. A wall tag that exists but does not parse records the origin that actually applied, while
-// Wall still shows its text.
+// Wall still shows its text. zone is the one the EXIF was read with; its clock rules are not
+// recorded, only the one that applied (e.ClockRule).
 func newCaptureEvidence(e ingest.ExifData, probe ingest.VideoProbeResult, mtime *time.Time, zone ingest.CameraZone) captureEvidence {
 	ev := captureEvidence{
 		V:                     1,
@@ -345,6 +368,9 @@ func newCaptureEvidence(e ingest.ExifData, probe ingest.VideoProbeResult, mtime 
 		_, seconds := e.TakenAt.Zone()
 		minutes := seconds / 60
 		ev.OffsetUsedMin = &minutes
+		if zoneRule == ingest.ZoneClockRule {
+			ev.ClockRule = newEvidenceClockRule(e.ClockRule)
+		}
 	}
 	return ev
 }
@@ -366,12 +392,13 @@ func captureSource(e ingest.ExifData, probe ingest.VideoProbeResult, mtime *time
 }
 
 // timeDropped records that no taken_at was stored although a source gave one, because JSON could not
-// carry its year (jsonCanCarry). No source applied, so none is named, while the inputs stay: wall,
-// creation_time and file_mtime still show what was refused.
+// carry its year (jsonCanCarry). No source applied, so none is named, nor a zone or a clock rule,
+// while the inputs stay: wall, creation_time and file_mtime still show what was refused.
 func (c captureEvidence) timeDropped() captureEvidence {
 	c.Src = captureSrcNone
 	c.Zone = nil
 	c.OffsetUsedMin = nil
+	c.ClockRule = nil
 	return c
 }
 

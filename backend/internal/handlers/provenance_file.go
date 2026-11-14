@@ -98,11 +98,13 @@ type rereadVideo struct {
 
 // rereadRule is the capture time today's rules read from the file.
 type rereadRule struct {
-	Source    string    `json:"source"`
-	ZoneRule  *string   `json:"zone_rule"`
-	OffsetMin *int      `json:"offset_min"` // nil for a container time
-	ZoneName  *string   `json:"zone_name"`  // set only when ZoneRule is "camera"
-	TakenAt   time.Time `json:"taken_at"`
+	Source    string  `json:"source"`
+	ZoneRule  *string `json:"zone_rule"`
+	OffsetMin *int    `json:"offset_min"` // nil for a container time
+	ZoneName  *string `json:"zone_name"`  // set only when ZoneRule is "camera"
+	// ClockRule is the owner's clock rule as it is today, set only when ZoneRule is "clock_rule".
+	ClockRule *evidenceClockRule `json:"clock_rule"`
+	TakenAt   time.Time          `json:"taken_at"`
 }
 
 type rereadCheck struct {
@@ -128,7 +130,8 @@ type fileRead struct {
 	tags []ingest.Tag
 }
 
-// File serves GET /api/media/{id}/provenance/file: the stored file read again with today's rules.
+// File serves GET /api/media/{id}/provenance/file: the stored file read again with today's rules,
+// which are the server's camera zone and camera rules and the owner's clock rules as they are now.
 // It only reports, and never moves taken_at. A foreign or shared item is 404.
 func (h *ProvenanceHandler) File(w http.ResponseWriter, r *http.Request) {
 	ownerID := auth.MustUser(r.Context()).ID
@@ -154,7 +157,21 @@ func (h *ProvenanceHandler) File(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	read, err := h.readFile(ctx, item)
+	// The owner's clock rules, loaded as ingest loads them. Read without them, an item ingested under
+	// a rule would look off by that rule's correction, so a failure fails the request. It is the
+	// database's, not the file's, so it is a 500 and not a 502.
+	rules, err := loadClockRules(ctx, h.db, ownerID)
+	if err != nil {
+		if !rereadStopped(ctx, w, "load clock rules") {
+			slog.Error("provenance file: load clock rules failed", "err", err)
+			http.Error(w, "db error", http.StatusInternalServerError)
+		}
+		return
+	}
+	zone := h.cameraZone
+	zone.Clock = rules
+
+	read, err := h.readFile(ctx, item, zone)
 	if err != nil {
 		if !rereadStopped(ctx, w, "read file") {
 			slog.Error("provenance file: read failed", "err", err)
@@ -229,9 +246,9 @@ func utcTime(t *time.Time) *time.Time {
 	return &u
 }
 
-// readFile waits for a re-read slot of the file's kind. The wait is inside ctx, so an exhausted wait
-// is the ordinary 504.
-func (h *ProvenanceHandler) readFile(ctx context.Context, item rereadItem) (fileRead, error) {
+// readFile waits for a re-read slot of the file's kind, then reads the file with zone. The wait is
+// inside ctx, so an exhausted wait is the ordinary 504.
+func (h *ProvenanceHandler) readFile(ctx context.Context, item rereadItem, zone ingest.CameraZone) (fileRead, error) {
 	slots, read := h.photoSlots, h.readPhoto
 	if isVideoMedia(item.mediaType) {
 		slots, read = h.probeSlots, h.readVideo
@@ -242,18 +259,18 @@ func (h *ProvenanceHandler) readFile(ctx context.Context, item rereadItem) (file
 	case <-ctx.Done():
 		return fileRead{}, ctx.Err()
 	}
-	return read(ctx, item.storageKey)
+	return read(ctx, item.storageKey, zone)
 }
 
 // readPhoto takes one ranged GET. Photos are never transcoded, so the object is the original. The
 // decode waits for one of the exifDecodeSlots that uploads use, so re-reads add nothing to what
 // decoding can take in this process; photoSlots only limits the heads fetched and held.
-func (h *ProvenanceHandler) readPhoto(ctx context.Context, key string) (fileRead, error) {
+func (h *ProvenanceHandler) readPhoto(ctx context.Context, key string, zone ingest.CameraZone) (fileRead, error) {
 	head, err := h.storage.ReadHead(ctx, key, mediaHeadSize)
 	if err != nil {
 		return fileRead{}, err
 	}
-	return inExifDecodeSlot(ctx, func() fileRead { return newPhotoRead(head, h.cameraZone) })
+	return inExifDecodeSlot(ctx, func() fileRead { return newPhotoRead(head, zone) })
 }
 
 func newPhotoRead(head []byte, zone ingest.CameraZone) fileRead {
@@ -288,9 +305,12 @@ func exifFileRead(e ingest.ExifData, zone ingest.CameraZone) (rereadFile, *rerea
 		OffsetMin: &offsetMin,
 		TakenAt:   *takenAt,
 	}
-	if e.TakenAtZone == ingest.ZoneCamera {
+	switch e.TakenAtZone {
+	case ingest.ZoneCamera:
 		name := zone.Name()
 		rule.ZoneName = &name
+	case ingest.ZoneClockRule:
+		rule.ClockRule = newEvidenceClockRule(e.ClockRule)
 	}
 	return file, rule
 }
@@ -299,17 +319,14 @@ func exifFileRead(e ingest.ExifData, zone ingest.CameraZone) (rereadFile, *rerea
 // often at the end. When a camera rule dates some videos from the EXIF inside them, it first takes
 // one ranged GET of the head ingest read that EXIF from, and decodes it in one of the
 // exifDecodeSlots, like a photo.
-func (h *ProvenanceHandler) readVideo(ctx context.Context, key string) (fileRead, error) {
+func (h *ProvenanceHandler) readVideo(ctx context.Context, key string, zone ingest.CameraZone) (fileRead, error) {
 	var embedded videoExif
-	if h.cameraZone.Rules.DatesVideosFromExif() {
+	if zone.Rules.DatesVideosFromExif() {
 		head, err := h.storage.ReadHead(ctx, key, mediaHeadSize)
 		if err != nil {
 			return fileRead{}, err
 		}
-		embedded, err = inExifDecodeSlot(ctx, func() videoExif {
-			e, ok := ingest.VideoExif(head, h.cameraZone)
-			return videoExif{e, ok}
-		})
+		embedded, err = videoExifInSlot(ctx, head, zone)
 		if err != nil {
 			return fileRead{}, err
 		}
@@ -322,7 +339,7 @@ func (h *ProvenanceHandler) readVideo(ctx context.Context, key string) (fileRead
 	if err != nil {
 		return fileRead{}, err
 	}
-	return newVideoRead(probe, embedded, h.cameraZone), nil
+	return newVideoRead(probe, embedded, zone), nil
 }
 
 // newVideoRead reads the time from the video's EXIF when the camera rules date it from there, as

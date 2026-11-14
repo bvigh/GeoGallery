@@ -4,11 +4,11 @@ import {
   bracketPoints,
   cameraClock,
   checkSentence,
+  CLOCK_RULE_KEEPS_TIME,
   confidenceNote,
   contextPointKind,
   formatConfidence,
   formatDistance,
-  formatOffset,
   formatTimeNote,
   independenceLine,
   ITEM_GONE,
@@ -22,7 +22,9 @@ import {
   REMATCH_HEADING,
   REMATCH_SEGMENT_LABEL,
   REREAD_NOT_RECORDED,
+  rereadClockRuleNote,
   rereadSentence,
+  retimeSentence,
   shapeSentence,
   showsAloneEstimate,
   STANDING_LINE,
@@ -36,6 +38,7 @@ import type {
   Bracket,
   CaptureEvidence,
   Estimate,
+  EvidenceClockRule,
   FileReread,
   OtherFormat,
   OtherPoint,
@@ -138,6 +141,7 @@ function evidence(overrides: Partial<CaptureEvidence> = {}): CaptureEvidence {
   return {
     v: 1,
     by: "ingest",
+    retimed_from: null,
     src: "exif_original",
     zone: "camera",
     wall: "2000:01:01 12:00:00",
@@ -146,6 +150,7 @@ function evidence(overrides: Partial<CaptureEvidence> = {}): CaptureEvidence {
     offset_tag: null,
     offset_ignored: false,
     offset_used_min: 60,
+    clock_rule: null,
     camera_zone: "Etc/GMT-1",
     camera_zone_utc_fallback: false,
     make: null,
@@ -192,12 +197,30 @@ function rule(overrides: Partial<NonNullable<FileReread["rule_today"]>> = {}): N
     zone_rule: "camera",
     offset_min: 60,
     zone_name: "Etc/GMT-1",
+    clock_rule: null,
     taken_at: "2000-01-01T11:00:00Z",
     ...overrides,
   };
 }
 
 const serverZone: ServerCameraZone = { name: "Etc/GMT-1", set: true, utc_fallback: false, offset_now_min: 60 };
+
+function clockRule(overrides: Partial<EvidenceClockRule> = {}): EvidenceClockRule {
+  return { id: "r1", make: "Panasonic", model: "DC-TZ200", offset_min: 120, starts_on: null, ends_on: null, ...overrides };
+}
+
+// A wall clock read at the owner's rule for this camera.
+function byClockRule(overrides: Partial<CaptureEvidence> = {}): CaptureEvidence {
+  return evidence({ zone: "clock_rule", offset_used_min: 120, make: "Panasonic", model: "DC-TZ200", clock_rule: clockRule(), ...overrides });
+}
+
+// Evidence recorded before clock rules existed: it lacks both of their keys.
+function olderEvidence(overrides: Partial<CaptureEvidence> = {}): CaptureEvidence {
+  const older = evidence(overrides);
+  delete older.clock_rule;
+  delete older.retimed_from;
+  return older;
+}
 
 describe("stateBadge", () => {
   it.each<[PlacementState, string]>([
@@ -670,16 +693,47 @@ describe("zoneChip", () => {
   });
 });
 
-describe("formatOffset", () => {
-  it.each([
-    [0, "+00:00"],
-    [60, "+01:00"],
-    [330, "+05:30"],
-    [345, "+05:45"],
-    [-210, "-03:30"],
-    [-600, "-10:00"],
-  ])("%d minutes", (minutes, want) => {
-    expect(formatOffset(minutes)).toBe(want);
+describe("zoneChip for a clock rule", () => {
+  const ruleChip = "Your rule for Panasonic DC-TZ200: clock showed UTC+02:00";
+
+  it("names the camera and the offset the rule gave, and that changing the rule does not move the time", () => {
+    expect(zoneChip(byClockRule(), null, serverZone)).toEqual({
+      text: ruleChip,
+      notes: [CLOCK_RULE_KEEPS_TIME],
+      warning: null,
+    });
+    expect(CLOCK_RULE_KEEPS_TIME).toBe("Changing this rule in Settings does not move this time.");
+  });
+
+  it("names the rule as it was recorded, whatever it says today", () => {
+    const chip = zoneChip(byClockRule({ clock_rule: clockRule({ make: "Canon", model: "Canon EOS R5", offset_min: -330 }) }), null, serverZone);
+    expect(chip?.text).toBe("Your rule for Canon EOS R5: clock showed UTC-05:30");
+  });
+
+  it("keeps the ignored offset tag beside it", () => {
+    const chip = zoneChip(byClockRule({ offset_ignored: true, offset_tag: "+01:00" }), null, serverZone);
+    expect(chip?.notes).toEqual(["The file declares +01:00, which is ignored for this make.", CLOCK_RULE_KEEPS_TIME]);
+  });
+
+  it("gives no UTC warning: the rule set the offset, not the camera zone", () => {
+    expect(zoneChip(byClockRule({ camera_zone_utc_fallback: true }), null, serverZone)?.warning).toBeNull();
+  });
+
+  it("still has a chip when the recorded rule is missing", () => {
+    expect(zoneChip(byClockRule({ clock_rule: null }), null, serverZone)?.text).toBe("Your camera clock rule");
+  });
+
+  it("uses the re-read's rule when nothing was recorded, which is today's and so moves nothing", () => {
+    const chip = zoneChip(
+      null,
+      reread(rule({ zone_rule: "clock_rule", offset_min: 120, zone_name: null, clock_rule: clockRule() })),
+      serverZone
+    );
+    expect(chip).toEqual({ text: ruleChip, notes: [], warning: null });
+  });
+
+  it("reads evidence recorded before clock rules existed as before", () => {
+    expect(zoneChip(olderEvidence(), null, serverZone)?.text).toBe("Etc/GMT-1; nothing in the file confirms this");
   });
 });
 
@@ -700,6 +754,7 @@ describe("cameraClock", () => {
       "declared",
     ],
     ["the camera zone", evidence({ zone: "camera", offset_used_min: 0 }), "2000:01:01 12:00:00 +00:00", "assumed"],
+    ["the owner's clock rule", byClockRule(), "2000:01:01 12:00:00 +02:00", "your rule"],
     ["the general date tag", evidence({ src: "exif_ifd0", zone: "camera" }), "2000:01:01 12:00:00 +01:00", "assumed"],
     ["a video container", evidence({ src: "container", zone: null, offset_used_min: null, wall: null }), video, null],
     [
@@ -723,6 +778,12 @@ describe("cameraClock", () => {
     ["the GPS clock", reread(rule({ zone_rule: "gps" })), "2000:01:01 12:00:00 +01:00", "measured"],
     ["the offset tag", reread(rule({ zone_rule: "offset", offset_min: 120 })), "2000:01:01 12:00:00 +02:00", "declared"],
     ["the camera zone", reread(rule({ zone_rule: "camera" })), "2000:01:01 12:00:00 +01:00", "assumed"],
+    [
+      "the owner's clock rule",
+      reread(rule({ zone_rule: "clock_rule", offset_min: 120, zone_name: null, clock_rule: clockRule() })),
+      "2000:01:01 12:00:00 +02:00",
+      "your rule",
+    ],
     [
       "a container time",
       reread(rule({ source: "container", zone_rule: null, offset_min: null, zone_name: null }), { wall_clock: null }),
@@ -846,6 +907,64 @@ describe("rereadSentence", () => {
 
   it("never calls agreement correct", () => {
     expect(rereadSentence({ class: "same", delta_s: 0 }, "photo", null)).not.toMatch(/correct/i);
+  });
+});
+
+describe("rereadClockRuleNote", () => {
+  const byRule = rule({ zone_rule: "clock_rule", offset_min: 120, zone_name: null, clock_rule: clockRule() });
+  const note =
+    "Today's reading uses your rule for Panasonic DC-TZ200 (clock showed UTC+02:00). A stored time moves only when an administrator runs server retime.";
+
+  it.each(["whole_offset", "other"] as const)("names today's rule when the reading differs (%s)", (cls) => {
+    expect(rereadClockRuleNote({ ...reread(byRule), class: cls })).toBe(note);
+  });
+
+  it.each(["same", "no_file_time", "stored_has_no_time", "unverifiable_transcoded"] as const)(
+    "says nothing when the class is %s",
+    (cls) => {
+      expect(rereadClockRuleNote({ ...reread(byRule), class: cls })).toBeNull();
+    }
+  );
+
+  it.each([
+    ["the camera zone", reread(rule())],
+    ["no capture time", reread(null)],
+    ["a clock rule without its rule", reread(rule({ zone_rule: "clock_rule", clock_rule: null }))],
+  ])("says nothing for %s", (_name, input) => {
+    expect(rereadClockRuleNote({ ...input, class: "whole_offset" })).toBeNull();
+  });
+});
+
+describe("retimeSentence", () => {
+  const takenAt = "2019-03-13T17:28:15Z";
+
+  it("says how far server retime moved the time", () => {
+    expect(retimeSentence(evidence({ by: "retime", retimed_from: "2019-03-13T18:28:15Z" }), takenAt)).toBe(
+      "Re-timed on the server: 1 h earlier than the time stored before."
+    );
+    expect(retimeSentence(evidence({ by: "retime", retimed_from: "2019-03-13T16:58:15Z" }), takenAt)).toBe(
+      "Re-timed on the server: 30 min later than the time stored before."
+    );
+  });
+
+  it("says so plainly when there is no time to compare with", () => {
+    expect(retimeSentence(evidence({ by: "retime", retimed_from: "2019-03-13T18:28:15Z" }), null)).toBe("Re-timed on the server.");
+    expect(retimeSentence(evidence({ by: "retime", retimed_from: "garbled" }), takenAt)).toBe("Re-timed on the server.");
+  });
+
+  it("says when the earlier time was not recorded", () => {
+    expect(retimeSentence(evidence({ by: "retime", retimed_from: null }), takenAt)).toBe(
+      "Re-timed on the server. The time stored before was not recorded."
+    );
+  });
+
+  it.each([
+    ["ingest", evidence()],
+    ["backfill", evidence({ by: "backfill" })],
+    ["evidence recorded before clock rules existed", olderEvidence()],
+    ["no evidence", null],
+  ])("has nothing to say for %s", (_name, input) => {
+    expect(retimeSentence(input, takenAt)).toBeNull();
   });
 });
 

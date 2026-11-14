@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { browserTimeZone, formatDuration, formatInstant } from "@/lib/time";
+import { browserTimeZone, formatDuration, formatInstant, formatOffset } from "@/lib/time";
 
 // CI runners are UTC, so every expectation names its zone, and the locale is fixed.
 const british = { locale: "en-GB" };
@@ -101,5 +101,20 @@ describe("formatDuration", () => {
     [-3600, "1 h"],
   ])("ignores the sign of %d", (seconds, want) => {
     expect(formatDuration(seconds)).toBe(want);
+  });
+});
+
+describe("formatOffset", () => {
+  it.each([
+    [0, "+00:00"],
+    [60, "+01:00"],
+    [330, "+05:30"],
+    [345, "+05:45"],
+    [-210, "-03:30"],
+    [-600, "-10:00"],
+    [-720, "-12:00"],
+    [840, "+14:00"],
+  ])("%d minutes", (minutes, want) => {
+    expect(formatOffset(minutes)).toBe(want);
   });
 });

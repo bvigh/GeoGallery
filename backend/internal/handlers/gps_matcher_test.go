@@ -35,6 +35,8 @@ func (r *mockRows) Scan(dest ...any) error {
 		switch p := d.(type) {
 		case *string:
 			*p = row[i].(string)
+		case *int:
+			*p = row[i].(int)
 		case **string:
 			if row[i] == nil {
 				*p = nil
@@ -145,7 +147,8 @@ func TestRunGPSMatcher_BracketedMedia_UpdatesLocation(t *testing.T) {
 
 	queryRowCall := 0
 	var execLng, execLat, execConf float64
-	var execID string
+	var execID, execOwner string
+	var execTakenAt time.Time
 
 	db := &mockMatcherDB{
 		queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
@@ -165,6 +168,8 @@ func TestRunGPSMatcher_BracketedMedia_UpdatesLocation(t *testing.T) {
 			execLat = args[1].(float64)
 			execConf = args[2].(float64)
 			execID = args[3].(string)
+			execOwner = args[4].(string)
+			execTakenAt = args[5].(time.Time)
 			return pgconn.CommandTag{}, nil
 		},
 	}
@@ -173,6 +178,9 @@ func TestRunGPSMatcher_BracketedMedia_UpdatesLocation(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "media-1", execID)
+	// The write applies only to the row as listed (TestRunRetime_Integration_OverlappingMatcherWritesNothingStale).
+	assert.Equal(t, testOwnerID, execOwner)
+	assert.True(t, takenAt.Equal(execTakenAt))
 	// midpoint between before and after
 	assert.InDelta(t, (beforeLat+afterLat)/2, execLat, 0.0001)
 	assert.InDelta(t, (beforeLng+afterLng)/2, execLng, 0.0001)

@@ -20,9 +20,10 @@ import (
 
 // Where ExifData.TakenAt's UTC offset came from.
 const (
-	ZoneGPS    = "gps"    // the camera clock measured against the photo's GPS timestamp
-	ZoneOffset = "offset" // the photo's OffsetTimeOriginal tag
-	ZoneCamera = "camera" // the camera timezone (CAMERA_TIMEZONE)
+	ZoneGPS       = "gps"        // the camera clock measured against the photo's GPS timestamp
+	ZoneClockRule = "clock_rule" // the owner's clock rule for the camera (CameraZone.Clock)
+	ZoneOffset    = "offset"     // the photo's OffsetTimeOriginal tag
+	ZoneCamera    = "camera"     // the camera timezone (CAMERA_TIMEZONE)
 )
 
 // The tags a wall clock can come from (RawExif.WallTag), under EXIF's names. imagemeta calls IFD0's
@@ -36,7 +37,10 @@ type ExifData struct {
 	Lat         *float64
 	Lng         *float64
 	TakenAt     *time.Time
-	TakenAtZone string // ZoneGPS, ZoneOffset or ZoneCamera; empty without TakenAt
+	TakenAtZone string // ZoneGPS, ZoneClockRule, ZoneOffset or ZoneCamera; empty without TakenAt
+	// ClockRule is the owner's rule that gave TakenAt its offset: nil unless TakenAtZone is
+	// ZoneClockRule. It is a copy, so what ingest records survives a later change to the rule.
+	ClockRule   *ClockRule
 	CameraModel string // after CleanTag
 	WidthPx     *int
 	HeightPx    *int
@@ -58,14 +62,18 @@ type RawExif struct {
 }
 
 // CameraZone is how ingest reads camera clocks: the zone they are assumed to show, with what ingest
-// records about where it came from, and the camera rules that say which of a file's own clocks not
-// to trust. time.Local's name is "Local", which would hide a container running in UTC. A zero
-// CameraZone reads wall clocks as UTC and applies no camera rules.
+// records about where it came from, the camera rules that say which of a file's own clocks not to
+// trust, and the owner's clock rules for their own cameras. time.Local's name is "Local", which
+// would hide a container running in UTC. A zero CameraZone reads wall clocks as UTC and applies no
+// rules of either kind.
 type CameraZone struct {
 	Loc         *time.Location // CAMERA_TIMEZONE, or time.Local when unset
 	Set         bool           // CAMERA_TIMEZONE was set
 	UTCFallback bool           // unset, and the server's zone is UTC all year
-	Rules       CameraRules    // CAMERA_RULES_FILE
+	Rules       CameraRules    // CAMERA_RULES_FILE: what a make writes, for every user
+	// Clock holds the clock rules of the owner whose files are read (camera_clock_rules). Unlike
+	// Rules, they describe that user's own cameras, so a CameraZone carrying them serves one owner.
+	Clock ClockRules
 }
 
 // Name returns the IANA name when Set, otherwise "server zone (unset)".
@@ -126,8 +134,9 @@ var exifTagsRead = map[string]string{
 
 // ExtractExif reads the EXIF block of the image at the start of r, which may be only the head of
 // the file. Anything that is not a supported image gives an empty result. zone holds the timezone
-// camera clocks are assumed to show (CAMERA_TIMEZONE; nil Loc means UTC) and the camera rules.
-// takenAt explains how the capture time is read, and Raw keeps what it read it from.
+// camera clocks are assumed to show (CAMERA_TIMEZONE; nil Loc means UTC), the camera rules and the
+// owner's clock rules. takenAt explains how the capture time is read, and Raw keeps what it read it
+// from.
 func ExtractExif(r io.ReadSeeker, zone CameraZone) ExifData {
 	tags, err := readExifTags(r)
 	var result ExifData
@@ -137,11 +146,7 @@ func ExtractExif(r io.ReadSeeker, zone CameraZone) ExifData {
 		result.Lng = &lng
 	}
 
-	cameraZone := zone.Loc
-	if cameraZone == nil {
-		cameraZone = time.UTC
-	}
-	result.TakenAt, result.TakenAtZone = tags.takenAt(cameraZone, zone.Rules)
+	result.TakenAt, result.TakenAtZone, result.ClockRule = tags.takenAt(zone)
 	result.Raw = tags.raw(zone.Rules)
 	result.Raw.Partial = err != nil && len(tags) > 0
 
@@ -278,31 +283,45 @@ func (t exifTags) coordinate(value, ref, negative string) (float64, bool) {
 
 const exifTimeLayout = "2006:01:02 15:04:05"
 
-// takenAt reads the capture time. EXIF stores it as a wall clock, so the zone is chosen here, and
-// never from the server's own timezone (that made the same photo an hour or two apart between a
-// native and a Docker server):
+// takenAt reads the capture time, with the zone rule that applied and, for ZoneClockRule, the
+// owner's rule. EXIF stores the time as a wall clock, so the zone is chosen here, and never from the
+// server's own timezone (that made the same photo an hour or two apart between a native and a
+// Docker server):
 //  1. when the photo's GPS timestamp (UTC) puts the camera clock within gpsClockTolerance of a
-//     UTC offset in real use, that offset. It is measured, so it outranks what the camera declares;
-//  2. the photo's OffsetTimeOriginal, unless the camera rules say to ignore it for the make. A
+//     UTC offset in real use, that offset. It is measured, so it outranks anything stated;
+//  2. the owner's clock rule for the camera (make and model) on the wall clock's date. It is what
+//     the owner knows of that camera, which the camera itself does not: a Panasonic DC-TZ200 left
+//     on summer time all year still writes its zone's +01:00, and no GPS timestamp;
+//  3. the photo's OffsetTimeOriginal, unless the camera rules say to ignore it for the make. A
 //     phone writes the offset its clock really shows, abroad too, and many phones write no GPS
 //     timestamp;
-//  3. otherwise cameraZone, with its daylight saving rules on that date.
-func (t exifTags) takenAt(cameraZone *time.Location, rules CameraRules) (*time.Time, string) {
+//  4. otherwise the camera zone, with its daylight saving rules on that date (nil Loc reads UTC).
+func (t exifTags) takenAt(zone CameraZone) (*time.Time, string, *ClockRule) {
 	clock := t.wallClock()
 	if !clock.parsed {
-		return nil, ""
+		return nil, "", nil
 	}
 	wall := clock.time
 	if offset, ok := t.gpsClockOffset(wall); ok {
 		at := wallAtOffset(wall, offset)
-		return &at, ZoneGPS
+		return &at, ZoneGPS, nil
 	}
-	if offset, ok := t.offsetTimeOriginal(rules); ok {
+	cameraMake, _ := t.text("Make")
+	model, _ := t.text("Model")
+	if rule, ok := zone.Clock.Match(cameraMake, model, wall); ok {
+		at := wallAtOffset(wall, time.Duration(rule.OffsetMin)*time.Minute)
+		return &at, ZoneClockRule, &rule
+	}
+	if offset, ok := t.offsetTimeOriginal(zone.Rules); ok {
 		at := wallAtOffset(wall, offset)
-		return &at, ZoneOffset
+		return &at, ZoneOffset, nil
 	}
-	at := time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, cameraZone)
-	return &at, ZoneCamera
+	loc := zone.Loc
+	if loc == nil {
+		loc = time.UTC
+	}
+	at := time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, loc)
+	return &at, ZoneCamera, nil
 }
 
 // raw collects RawExif through the helpers takenAt uses.
