@@ -462,6 +462,58 @@ func TestMigration000011_CameraClockRules(t *testing.T) {
 	assertCameraClockRulesSchema(t, dsn)
 }
 
+// Before 12, an unassigned item on a named trip's days starts an auto trip; from 12 it joins the
+// named trip. Down, the old function is back and items already in the named trip stay there.
+func TestMigration000012_TripDetectNamedTrips(t *testing.T) {
+	dsn := testdb.NewEmpty(t)
+	m := newMigrator(t, dsn)
+	migrateTo(t, m, 11)
+
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		_, err := conn.Exec(ctx, `
+			INSERT INTO trips (owner_id, name, user_edited, start_date, end_date)
+			VALUES ($1, 'Holland', TRUE, '2019-03-13', '2019-03-18')`, legacyOwnerID)
+		require.NoError(t, err)
+	})
+	// addAndDetect inserts an unassigned photo on one of Holland's days, runs auto_detect_trips and
+	// returns the trip of every photo by file name.
+	addAndDetect := func(filename string) map[string]string {
+		t.Helper()
+		trips := map[string]string{}
+		withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+			_, err := conn.Exec(ctx, `
+				INSERT INTO media (owner_id, filename, media_type, storage_key, file_hash, taken_at)
+				VALUES ($1, $2, 'photo', 'media/x/' || $2, $2, '2019-03-15 12:00:00')`, legacyOwnerID, filename)
+			require.NoError(t, err)
+			_, err = conn.Exec(ctx, `SELECT auto_detect_trips($1::uuid, 24)`, legacyOwnerID)
+			require.NoError(t, err)
+			rows, err := conn.Query(ctx, `SELECT m.filename, t.name FROM media m JOIN trips t ON t.id = m.trip_id`)
+			require.NoError(t, err)
+			for rows.Next() {
+				var file, trip string
+				require.NoError(t, rows.Scan(&file, &trip))
+				trips[file] = trip
+			}
+			require.NoError(t, rows.Err())
+		})
+		return trips
+	}
+
+	assert.Equal(t, map[string]string{"v11.jpg": "Trip 2019-03-15"}, addAndDetect("v11.jpg"))
+
+	migrateTo(t, m, 12)
+	assert.Equal(t, map[string]string{"v11.jpg": "Holland", "v12.jpg": "Holland"}, addAndDetect("v12.jpg"),
+		"the earlier run's auto trip is rebuilt into Holland")
+
+	migrateTo(t, m, 11)
+	assert.Equal(t, map[string]string{"v11.jpg": "Holland", "v12.jpg": "Holland", "down.jpg": "Trip 2019-03-15"},
+		addAndDetect("down.jpg"))
+
+	migrateTo(t, m, 12)
+	assert.Equal(t, map[string]string{"v11.jpg": "Holland", "v12.jpg": "Holland", "down.jpg": "Holland", "up.jpg": "Holland"},
+		addAndDetect("up.jpg"))
+}
+
 // clockRule is one camera_clock_rules row for the constraint cases; nil dates are NULL.
 type clockRule struct {
 	owner, make, model string

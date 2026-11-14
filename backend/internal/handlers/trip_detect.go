@@ -10,7 +10,8 @@ type tripDetectDB interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// RunTripDetect regroups ownerID's unassigned media into auto-detected trips.
+// RunTripDetect rebuilds ownerID's auto-detected trips. An unassigned item on a day that one of
+// ownerID's named (user-edited) trips covers joins that trip; the rest are grouped by gapHours.
 // Trips are personal: auto_detect_trips keeps its literal owner_id filters and must never use
 // readableMediaCond, so media shared with ownerID through an album never join ownerID's trips.
 func RunTripDetect(ctx context.Context, db tripDetectDB, ownerID string, gapHours int) error {
