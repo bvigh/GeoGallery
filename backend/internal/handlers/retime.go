@@ -94,8 +94,9 @@ const maxUTCOffset = 14 * time.Hour
 // stops after the current item, the matcher and trip detection are skipped, and ctx.Err() is
 // returned.
 //
-// GPS stays per owner: every query here filters on ownerID literally, like RunGPSMatcher, and the
-// clock rules are ownerID's own.
+// GPS stays per owner: every query here filters on ownerID literally, like RunGPSMatcher, and must
+// never use readableMediaCond: media shared with ownerID through an album are not ownerID's rows
+// (TestSharing_RetimeIgnoresSharedMedia). The clock rules are ownerID's own.
 func RunRetime(ctx context.Context, deps RetimeDeps, ownerID string, apply bool, report func(RetimeChange)) (RetimeResult, error) {
 	slog.Info("retime: started", "owner_id", ownerID, "apply", apply)
 	var res RetimeResult

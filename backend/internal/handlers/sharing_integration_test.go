@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/bvigh/geogallery/internal/geo"
+	"github.com/bvigh/geogallery/internal/ingest/exiftest"
+	"github.com/bvigh/geogallery/internal/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -489,4 +491,45 @@ func TestSharing_TripDetectIgnoresSharedMedia(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, []string{f.mediaB, b2}, decodeIDs(t, rec), "B's auto trip is regrouped from B's media only")
 	assert.Equal(t, f.tripA, *snapshotMedia(t, f.pool, f.mediaA).tripID, "A's trip assignment is untouched")
+}
+
+// RunRetime reads, moves and re-matches the owner's own rows only. Media another user shares with
+// the owner through an album are never read with the owner's rules, never listed or counted, and
+// their times, evidence and track points stay as they are, even for a camera the owner has a clock
+// rule for.
+func TestSharing_RetimeIgnoresSharedMedia(t *testing.T) {
+	pool := testdb.New(t)
+	l := seedRetimeLibrary(t, pool)
+	ctx := context.Background()
+
+	// Bob's DC-TZ200 photo, its wall clock stored as UTC; alice says the same model showed UTC+2.
+	bobTZ200 := insertRetimeRow(t, pool, l.store, retimeRow{owner: l.bob, name: "P1033627.JPG",
+		object: exiftest.JPEG(exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: "2019:01:10 12:00:00",
+			GPS: &exiftest.GPS{Lat: 47.5, Lng: 19}}),
+		takenAt: "2019-01-10T12:00:00Z", gpsSource: "exif", lat: 47.5, lng: 19})
+	insertTrack(t, pool, l.bob, "exif", "2019-01-10T12:00:00Z", 47.5, 19)
+	insertClockRule(t, pool, l.alice, "Panasonic", "DC-TZ200", 120, nil, nil)
+
+	album := insertAlbum(t, pool, l.bob, "Bob's trip")
+	insertAlbumMember(t, pool, album, l.alice)
+	insertAlbumMedia(t, pool, album, l.bobPhoto)
+	insertAlbumMedia(t, pool, album, bobTZ200)
+	before := map[string]retimedMedia{l.bobPhoto: readRetimedMedia(t, pool, l.bobPhoto), bobTZ200: readRetimedMedia(t, pool, bobTZ200)}
+
+	var changes []RetimeChange
+	res, err := RunRetime(ctx, retimeDeps(t, pool, l.store), l.alice, true, collectRetime(&changes))
+	require.NoError(t, err)
+	assert.Equal(t, RetimeResult{Checked: 9, Retimed: 5, Unchanged: 1, NotExif: 2, Mismatch: 1}, res,
+		"alice's own nine items, as without the album")
+	assert.NotContains(t, l.store.readKeys(), retimeKey(l.bob, "P1011841.JPG"))
+	assert.NotContains(t, l.store.readKeys(), retimeKey(l.bob, "P1033627.JPG"))
+	for _, c := range changes {
+		assert.NotContains(t, []string{l.bobPhoto, bobTZ200}, c.MediaID)
+	}
+
+	for id, was := range before {
+		assert.Equal(t, was, readRetimedMedia(t, pool, id), "bob's row %s", id)
+	}
+	assert.Equal(t, []string{"2018-10-23T12:10:00Z", "2019-01-10T12:00:00Z"}, retimeTrackTimes(t, pool, l.bob, "exif"))
+	assert.Equal(t, []string{"2018-10-23T12:00:00Z"}, retimeTrackTimes(t, pool, l.bob, "manual"))
 }
