@@ -14,10 +14,22 @@ function loginHref(params: Record<string, string | null>): string {
   return "/api/auth/login" + (s ? "?" + s : "");
 }
 
+// Where the backend sends the browser after signing in: the page that was opened (an album, a
+// trip), without the sign-in's own parameters. Nothing for the start page.
+function returnTo(query: URLSearchParams): string | null {
+  const rest = new URLSearchParams(query);
+  rest.delete("auth_error");
+  rest.delete("invite");
+  const s = rest.toString();
+  const path = window.location.pathname + (s ? "?" + s : "");
+  return path === "/" ? null : path;
+}
+
 export function LoginScreen() {
   const query = new URLSearchParams(window.location.search);
   const authError = query.get("auth_error");
   const invite = query.get("invite");
+  const back = returnTo(query);
   const message = authError ? AUTH_ERROR_MESSAGES[authError] ?? "Sign-in failed. Please try again." : null;
 
   return (
@@ -32,14 +44,14 @@ export function LoginScreen() {
           </p>
         )}
         <a
-          href={loginHref({ invite })}
+          href={loginHref({ invite, return_to: back })}
           className="block rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground touch:py-3"
         >
           Sign in
         </a>
         {authError && (
           <a
-            href={loginHref({ prompt: "login", invite })}
+            href={loginHref({ prompt: "login", invite, return_to: back })}
             className="mt-2 block rounded-lg border px-4 py-2 text-sm font-medium hover:bg-accent touch:py-3"
           >
             Sign in with a different account

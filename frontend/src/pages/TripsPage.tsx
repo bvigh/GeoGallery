@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { Album, Trip } from "../types";
 import { api, ApiError } from "../api/client";
 import { MediaGalleryOverlay } from "@/components/MediaGalleryOverlay";
 import { AlbumPickerDialog } from "@/components/albums/AlbumPickerDialog";
+import { useHistoryChange } from "@/lib/history";
+import { currentRoute } from "@/lib/routes";
 
 const byStartDateDesc = (a: Trip, b: Trip): number => {
   if (a.start_date === null && b.start_date === null) return 0;
@@ -44,10 +46,28 @@ function addErrorMessage(trip: Trip, album: Album, err: unknown): string {
     : text;
 }
 
+const TRIP_GONE = "That trip is not available. Trips you have not edited get new links after each upload.";
+
+// The open gallery. Opened from the URL, its trip is known only once the list has loaded, and
+// itemId is the item to open on.
+interface Gallery {
+  id: string;
+  trip: Trip | null;
+  itemId: string | null;
+}
+
+function galleryFromUrl(): Gallery | null {
+  const route = currentRoute();
+  return route.tab === "trips" && route.collectionId !== null
+    ? { id: route.collectionId, trip: null, itemId: route.itemId }
+    : null;
+}
+
 export function TripsPage() {
   const [trips, setTrips] = useState<Trip[]>([]);
+  const [tripsLoaded, setTripsLoaded] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
-  const [selectedTrip, setSelectedTrip] = useState<Trip | null>(null);
+  const [gallery, setGallery] = useState<Gallery | null>(galleryFromUrl);
   const [editName, setEditName] = useState("");
   const [editStartDate, setEditStartDate] = useState("");
   const [editEndDate, setEditEndDate] = useState("");
@@ -56,8 +76,46 @@ export function TripsPage() {
   const nextNoticeId = useRef(0);
 
   useEffect(() => {
-    api.get<Trip[]>("/trips").then((data) => setTrips(data ?? [])).catch(console.error);
+    api
+      .get<Trip[]>("/trips")
+      .then((data) => {
+        setTrips(data ?? []);
+        setTripsLoaded(true);
+      })
+      .catch(console.error);
   }, []);
+
+  const notify = useCallback((kind: Notice["kind"], text: string): number => {
+    const id = nextNoticeId.current++;
+    setNotices((prev) => [...prev, { id, kind, text }]);
+    return id;
+  }, []);
+
+  // A gallery from the URL gets its trip's name, or closes when the trip is not the caller's (any
+  // more): an upload regroups every trip nobody edited, under new IDs.
+  useEffect(() => {
+    if (!tripsLoaded || gallery === null || gallery.trip !== null) return;
+    const trip = trips.find((t) => t.id === gallery.id);
+    if (trip) {
+      setGallery({ ...gallery, trip });
+      return;
+    }
+    setGallery(null);
+    notify("error", TRIP_GONE);
+  }, [tripsLoaded, trips, gallery, notify]);
+
+  // Back or forward onto a gallery's entry while none is open (forward after back): open it again
+  // on the URL's item. It takes that entry over, as this runs before history is brought in line.
+  useHistoryChange(() => {
+    const next = galleryFromUrl();
+    if (next === null) return;
+    const trip = trips.find((t) => t.id === next.id) ?? null;
+    if (tripsLoaded && trip === null) {
+      notify("error", TRIP_GONE);
+      return;
+    }
+    setGallery((open) => open ?? { ...next, trip });
+  });
 
   const deleteTrip = async (id: string) => {
     if (!confirm("Delete this trip? Its media will be unassigned and re-grouped automatically.")) return;
@@ -74,10 +132,9 @@ export function TripsPage() {
   };
 
   const addTripToAlbum = async (trip: Trip, album: Album) => {
-    const id = nextNoticeId.current++;
+    const id = notify("pending", `Adding "${trip.name}" to "${album.name}"…`);
     const settle = (kind: Notice["kind"], text: string) =>
       setNotices((prev) => prev.map((n) => (n.id === id ? { ...n, kind, text } : n)));
-    setNotices((prev) => [...prev, { id, kind: "pending", text: `Adding "${trip.name}" to "${album.name}"…` }]);
     try {
       const { added } = await api.addToAlbum(album.id, { tripId: trip.id });
       settle("success", addedMessage(album, added));
@@ -123,7 +180,7 @@ export function TripsPage() {
           <div
             key={trip.id}
             className="rounded-lg border bg-card p-4 shadow-sm cursor-pointer hover:bg-accent transition-colors"
-            onClick={() => editing !== trip.id && setSelectedTrip(trip)}
+            onClick={() => editing !== trip.id && setGallery({ id: trip.id, trip, itemId: null })}
           >
             {editing === trip.id ? (
               <div className="flex flex-col gap-2">
@@ -252,11 +309,13 @@ export function TripsPage() {
           ))}
         </div>
       )}
-      {selectedTrip && (
+      {gallery && (
         <MediaGalleryOverlay
-          title={selectedTrip.name}
-          params={{ trip_id: selectedTrip.id }}
-          onClose={() => setSelectedTrip(null)}
+          title={gallery.trip?.name ?? ""}
+          params={{ trip_id: gallery.id }}
+          route={{ tab: "trips", collectionId: gallery.id }}
+          initialItemId={gallery.itemId}
+          onClose={() => setGallery(null)}
           onMediaDeleted={() => {
             api.get<Trip[]>("/trips").then((data) => setTrips(data ?? [])).catch(console.error);
           }}

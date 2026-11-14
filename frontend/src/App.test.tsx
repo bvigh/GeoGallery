@@ -1,7 +1,8 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { api } from "@/api/client";
+import { BACK_DEPTH_KEY } from "@/lib/history";
 import App from "@/App";
 
 vi.mock("@/api/client", () => ({
@@ -31,6 +32,36 @@ const mockApi = api as unknown as {
   me: ReturnType<typeof vi.fn>;
   logout: ReturnType<typeof vi.fn>;
 };
+
+// The URL picks the tab, so every test starts on the map's.
+beforeEach(() => {
+  window.history.replaceState(null, "", "/");
+});
+
+const ALBUM = "0b6f3c1e-5d1a-4c47-9a8e-2f0d7b9c4e11";
+const ITEM = "7c2e9d40-1b3a-4f6e-8d5c-a9e1f0b2c3d4";
+
+function currentTab(): string[] {
+  return within(screen.getByRole("navigation"))
+    .getAllByRole("button")
+    .filter((b) => b.getAttribute("aria-current") === "page")
+    .map((b) => b.textContent ?? "");
+}
+
+function url(): string {
+  return window.location.pathname + window.location.search;
+}
+
+const depth = () => (window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY] ?? 0;
+
+// The browser's back button: resolves once the popstate has been handled.
+async function back() {
+  await act(async () => {
+    const popped = new Promise((resolve) => window.addEventListener("popstate", resolve, { once: true }));
+    window.history.back();
+    await popped;
+  });
+}
 
 describe("App logout", () => {
   beforeEach(() => {
@@ -177,6 +208,100 @@ describe("App header", () => {
   });
 });
 
+describe("App URL", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockApi.me.mockResolvedValue({ id: "u1", email: "a@b.c", display_name: "Alice", role: "admin" });
+  });
+
+  it.each([
+    ["/", "Map"],
+    ["/trips", "Trips"],
+    ["/albums", "Albums"],
+    ["/game", "Game"],
+    ["/upload", "Upload"],
+    ["/settings", "Settings"],
+    ["/admin", "Admin"],
+  ])("opens the tab of %s", async (path, tab) => {
+    window.history.replaceState(null, "", path);
+    render(<App />);
+    await screen.findByRole("navigation");
+    expect(currentTab()).toEqual([tab]);
+    expect(url()).toBe(path);
+  });
+
+  it.each([
+    ["an unknown path", "/nowhere/else", "/", "Map"],
+    ["a trailing slash", "/albums/", "/albums", "Albums"],
+    ["a malformed album ID", "/albums/not-an-id?item=" + ITEM, "/albums", "Albums"],
+    ["a malformed item ID", `/albums/${ALBUM}?item=nope`, `/albums/${ALBUM}`, "Albums"],
+    ["an upper-case ID and other parameters", `/albums/${ALBUM.toUpperCase()}?x=1&item=${ITEM}`, `/albums/${ALBUM}?item=${ITEM}`, "Albums"],
+  ])("opens %s as its canonical URL", async (_name, path, canonical, tab) => {
+    window.history.replaceState(null, "", path);
+    render(<App />);
+    await screen.findByRole("navigation");
+    expect(currentTab()).toEqual([tab]);
+    expect(url()).toBe(canonical);
+  });
+
+  it("opens the map for /admin without the admin role", async () => {
+    mockApi.me.mockResolvedValue({ id: "u1", email: "a@b.c", display_name: "Alice", role: "user" });
+    window.history.replaceState(null, "", "/admin");
+    render(<App />);
+    await screen.findByRole("navigation");
+    expect(currentTab()).toEqual(["Map"]);
+    expect(url()).toBe("/");
+  });
+
+  it("gives each tab opened an entry with its URL, and back returns to the previous tab", async () => {
+    render(<App />);
+    const nav = await screen.findByRole("navigation");
+    const length = window.history.length;
+
+    await userEvent.click(within(nav).getByRole("button", { name: "Albums" }));
+    expect(url()).toBe("/albums");
+    await userEvent.click(within(nav).getByRole("button", { name: "Game" }));
+    expect(url()).toBe("/game");
+    expect(window.history.length).toBe(length + 2);
+    // The tab that is already open adds nothing.
+    await userEvent.click(within(nav).getByRole("button", { name: "Game" }));
+    expect(window.history.length).toBe(length + 2);
+
+    await back();
+    expect(currentTab()).toEqual(["Albums"]);
+    expect(screen.getByTestId("albums-page")).toBeInTheDocument();
+    await back();
+    expect(currentTab()).toEqual(["Map"]);
+    expect(url()).toBe("/");
+  });
+
+  // The page then opens the gallery on that entry, so back closes it before leaving the tab.
+  it("puts a gallery from a link on an entry of its own above its tab's", async () => {
+    window.history.replaceState(null, "", `/albums/${ALBUM}?item=${ITEM}`);
+    render(<App />);
+    await screen.findByRole("navigation");
+    expect(url()).toBe(`/albums/${ALBUM}?item=${ITEM}`);
+    expect(depth()).toBe(1);
+
+    await back();
+    expect(url()).toBe("/albums");
+    expect(depth()).toBe(0);
+    expect(currentTab()).toEqual(["Albums"]);
+  });
+
+  it("keeps the entries a reload finds under a gallery's", async () => {
+    window.history.replaceState(null, "", "/albums");
+    window.history.pushState({ [BACK_DEPTH_KEY]: 1 }, "", `/albums/${ALBUM}?item=${ITEM}`);
+    const length = window.history.length;
+    render(<App />);
+    await screen.findByRole("navigation");
+    expect(window.history.length).toBe(length);
+    expect(url()).toBe(`/albums/${ALBUM}?item=${ITEM}`);
+    expect(depth()).toBe(1);
+    await back();
+  });
+});
+
 describe("App map tab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -200,6 +325,22 @@ describe("App map tab", () => {
     expect(screen.getByTestId("map-page")).toBe(mapPage);
     expect(mapPage).toHaveAttribute("data-active", "true");
     expect(mapPage.parentElement).not.toHaveClass("hidden");
+  });
+
+  // A link to another tab must not load every located item behind it.
+  it("mounts the map page on its first visit when the app opens on another tab", async () => {
+    window.history.replaceState(null, "", "/albums");
+    render(<App />);
+    const nav = await screen.findByRole("navigation");
+    expect(screen.queryByTestId("map-page")).not.toBeInTheDocument();
+
+    await userEvent.click(within(nav).getByRole("button", { name: "Map" }));
+    const mapPage = screen.getByTestId("map-page");
+    expect(mapPage).toHaveAttribute("data-active", "true");
+
+    await userEvent.click(within(nav).getByRole("button", { name: "Albums" }));
+    expect(screen.getByTestId("map-page")).toBe(mapPage);
+    expect(mapPage).toHaveAttribute("data-active", "false");
   });
 });
 

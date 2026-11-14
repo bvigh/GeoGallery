@@ -1,8 +1,11 @@
-import { render, screen, within } from "@testing-library/react";
+import type { ComponentProps } from "react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { api, ApiError } from "../api/client";
+import { BACK_DEPTH_KEY } from "@/lib/history";
 import { TripsPage } from "./TripsPage";
+import type * as Gallery from "@/components/MediaGalleryOverlay";
 import type { Album, Trip } from "../types";
 
 vi.mock("../api/client", async (importOriginal) => {
@@ -19,10 +22,15 @@ vi.mock("../api/client", async (importOriginal) => {
   };
 });
 
+type GalleryProps = ComponentProps<typeof Gallery.MediaGalleryOverlay>;
+
+// The real overlay needs Leaflet and media URLs; the page only decides its props.
+const gallery = vi.hoisted(() => ({ props: null as GalleryProps | null }));
 vi.mock("@/components/MediaGalleryOverlay", () => ({
-  MediaGalleryOverlay: ({ title, params }: { title: string; params: Record<string, string> }) => (
-    <div data-testid="gallery" data-title={title} data-params={JSON.stringify(params)} />
-  ),
+  MediaGalleryOverlay: (props: GalleryProps) => {
+    gallery.props = props;
+    return <div data-testid="gallery" data-title={props.title} data-params={JSON.stringify(props.params)} />;
+  },
 }));
 
 const mockApi = api as unknown as Record<
@@ -70,6 +78,22 @@ function makeAlbum(overrides: Partial<Album>): Album {
 
 const family = makeAlbum({ id: "a1", name: "Family" });
 
+// The browser's back (-1) or forward (1) button: resolves once the popstate has been handled.
+async function traverse(delta: number) {
+  await act(async () => {
+    const popped = new Promise((resolve) => window.addEventListener("popstate", resolve, { once: true }));
+    window.history.go(delta);
+    await popped;
+  });
+}
+
+// Lets a traversal the history module started (leaving an entry nobody owns) land.
+async function settleHistory() {
+  await act(async () => {
+    for (let round = 0; round < 12; round++) await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
 // Cards render in API order: Iceland 2024 first.
 async function openPickerForIceland() {
   await screen.findByText("Iceland 2024");
@@ -82,6 +106,8 @@ async function openPickerForIceland() {
 describe("TripsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    gallery.props = null;
+    window.history.replaceState(null, "", "/trips");
     mockApi.get.mockResolvedValue(sampleTrips);
     mockApi.patch.mockResolvedValue({});
     mockApi.listAlbums.mockResolvedValue([family]);
@@ -110,9 +136,91 @@ describe("TripsPage", () => {
     render(<TripsPage />);
     await userEvent.click(await screen.findByText("Tokyo Winter"));
 
-    const gallery = screen.getByTestId("gallery");
-    expect(gallery).toHaveAttribute("data-title", "Tokyo Winter");
-    expect(JSON.parse(gallery.getAttribute("data-params")!)).toEqual({ trip_id: "t2" });
+    const el = screen.getByTestId("gallery");
+    expect(el).toHaveAttribute("data-title", "Tokyo Winter");
+    expect(JSON.parse(el.getAttribute("data-params")!)).toEqual({ trip_id: "t2" });
+    // In the URL, on its first item.
+    expect(gallery.props!.route).toEqual({ tab: "trips", collectionId: "t2" });
+    expect(gallery.props!.initialItemId).toBeNull();
+
+    act(() => gallery.props!.onClose());
+    expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
+  });
+
+  describe("gallery from the URL", () => {
+    const TRIP = "0b6f3c1e-5d1a-4c47-9a8e-2f0d7b9c4e11";
+    const ITEM = "7c2e9d40-1b3a-4f6e-8d5c-a9e1f0b2c3d4";
+    const named: Trip = { ...sampleTrips[0], id: TRIP, name: "Named trip", user_edited: true };
+
+    it("opens at once on the URL's item, and names the trip once the list is in", async () => {
+      let resolve!: (trips: Trip[]) => void;
+      mockApi.get.mockReturnValue(new Promise((r) => (resolve = r)));
+      window.history.replaceState(null, "", `/trips/${TRIP}?item=${ITEM}`);
+      render(<TripsPage />);
+
+      const el = screen.getByTestId("gallery");
+      expect(el).toHaveAttribute("data-title", "");
+      expect(JSON.parse(el.getAttribute("data-params")!)).toEqual({ trip_id: TRIP });
+      expect(gallery.props!.route).toEqual({ tab: "trips", collectionId: TRIP });
+      expect(gallery.props!.initialItemId).toBe(ITEM);
+
+      await act(async () => resolve([...sampleTrips, named]));
+      expect(screen.getByTestId("gallery")).toHaveAttribute("data-title", "Named trip");
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("closes and says why when the trip is not in the caller's list", async () => {
+      window.history.replaceState(null, "", `/trips/${TRIP}?item=${ITEM}`);
+      render(<TripsPage />);
+      expect(screen.getByTestId("gallery")).toBeInTheDocument();
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "That trip is not available. Trips you have not edited get new links after each upload."
+      );
+      expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
+      expect(screen.getByText("Iceland 2024")).toBeInTheDocument();
+    });
+
+    it("stays open, without a name, when the list cannot be loaded", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      mockApi.get.mockRejectedValue(new Error("offline"));
+      window.history.replaceState(null, "", `/trips/${TRIP}`);
+      render(<TripsPage />);
+      await act(async () => {});
+      expect(screen.getByTestId("gallery")).toHaveAttribute("data-title", "");
+      expect(gallery.props!.initialItemId).toBeNull();
+    });
+
+    // The gallery's entry after back closed it. The mocked gallery owns no entry, so the history
+    // module leaves it again afterwards; the real one takes it over (history.test.tsx).
+    async function forwardOntoGalleryEntry() {
+      window.history.pushState({ [BACK_DEPTH_KEY]: 1 }, "", `/trips/${TRIP}?item=${ITEM}`);
+      await traverse(-1);
+      expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
+      await traverse(1);
+    }
+
+    it("opens again on its item when forward lands on its entry", async () => {
+      mockApi.get.mockResolvedValue([...sampleTrips, named]);
+      render(<TripsPage />);
+      await screen.findByText("Named trip");
+
+      await forwardOntoGalleryEntry();
+      expect(screen.getByTestId("gallery")).toHaveAttribute("data-title", "Named trip");
+      expect(gallery.props!.route).toEqual({ tab: "trips", collectionId: TRIP });
+      expect(gallery.props!.initialItemId).toBe(ITEM);
+      await settleHistory();
+    });
+
+    it("says why when forward lands on the entry of a trip that is gone", async () => {
+      render(<TripsPage />);
+      await screen.findByText("Iceland 2024");
+
+      await forwardOntoGalleryEntry();
+      expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent("That trip is not available.");
+      await settleHistory();
+    });
   });
 
   it("opens the album picker for a trip without opening its gallery", async () => {

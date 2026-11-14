@@ -10,7 +10,7 @@ import { AuthContext } from "@/components/auth/AuthContext";
 import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
 import { emptyFilters } from "@/lib/filters";
 import { browserTimeZone, formatInstant } from "@/lib/time";
-import { BACK_DEPTH_KEY } from "@/lib/useCloseOnBack";
+import { BACK_DEPTH_KEY } from "@/lib/history";
 import type { Album, CurrentUser, MediaItem, Trip } from "../types";
 
 vi.mock("../api/client", () => ({

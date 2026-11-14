@@ -8,7 +8,7 @@ import { makeBracket, makeEstimate, makeReread, makeResponse, type ResponseOverr
 import type { EvidenceMap } from "@/components/evidence/EvidenceMap";
 import type { PickedPoint } from "@/components/evidence/PointCard";
 import { ITEM_GONE, NOT_OWNER, REMATCH_FAILED } from "@/lib/evidence";
-import { BACK_DEPTH_KEY } from "@/lib/useCloseOnBack";
+import { BACK_DEPTH_KEY } from "@/lib/history";
 import type { ProvenanceResponse } from "@/types";
 
 vi.mock("@/api/client", async (importOriginal) => {

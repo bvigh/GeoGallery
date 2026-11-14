@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import { MapPage } from "@/pages/MapPage";
 import { TripsPage } from "@/pages/TripsPage";
 import { AlbumsPage } from "@/pages/AlbumsPage";
@@ -11,9 +11,15 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { api } from "@/api/client";
 import { Map, Images, AlbumIcon, Gamepad2, Upload, Settings, Shield, LogOut } from "lucide-react";
+import { pushPage, startHistory, useHistoryChange } from "@/lib/history";
+import { currentRoute, routeUrl, tabRoute, type Route, type Tab } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
-type Tab = "map" | "trips" | "albums" | "game" | "upload" | "settings" | "admin";
+// The route in the URL, as this user may open it: the Admin tab is the map for anyone else.
+function allowedRoute(isAdmin: boolean): Route {
+  const route = currentRoute();
+  return route.tab === "admin" && !isAdmin ? tabRoute("map") : route;
+}
 
 const baseTabs: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: "map", label: "Map", icon: Map },
@@ -28,9 +34,32 @@ const adminTab = { id: "admin" as const, label: "Admin", icon: Shield };
 
 function Shell() {
   const user = useCurrentUser();
-  const [active, setActive] = useState<Tab>("map");
+  const isAdmin = user.role === "admin";
+  // The URL the app was loaded with picks the tab. The pages read the rest of it (an open gallery)
+  // when they mount.
+  const [start] = useState(() => allowedRoute(isAdmin));
+  const [active, setActive] = useState<Tab>(start.tab);
+  // The map loads every located item: not before its first visit, when a link opened another tab.
+  const [mapOpened, setMapOpened] = useState(start.tab === "map");
+  if (active === "map" && !mapOpened) setMapOpened(true);
   const [logoutError, setLogoutError] = useState(false);
-  const tabs = user.role === "admin" ? [...baseTabs, adminTab] : baseTabs;
+  const tabs = isAdmin ? [...baseTabs, adminTab] : baseTabs;
+
+  // A layout effect runs before every page's effects, so a gallery from the URL finds its history
+  // entry ready when it opens. Idempotent, as StrictMode runs it twice.
+  useLayoutEffect(() => {
+    startHistory(routeUrl(start), routeUrl(tabRoute(start.tab)));
+  }, [start]);
+
+  // Back and forward: the entry's tab. useCloseOnBack has closed the views it passed; a page that
+  // mounts for the tab opens the gallery named in the URL.
+  useHistoryChange(() => setActive(allowedRoute(isAdmin).tab));
+
+  const openTab = (tab: Tab) => {
+    if (tab === active) return;
+    pushPage(routeUrl(tabRoute(tab)));
+    setActive(tab);
+  };
 
   const logout = () => {
     setLogoutError(false);
@@ -64,7 +93,7 @@ function Shell() {
               key={id}
               title={label}
               aria-current={active === id ? "page" : undefined}
-              onClick={() => setActive(id)}
+              onClick={() => openTab(id)}
               className={cn(
                 buttonClass,
                 // 40px wide below sm, so an admin's seven tabs and Logout fit a 360px phone.
@@ -104,14 +133,16 @@ function Shell() {
           min-h-0: a clipped box is no scroll container, so as a flex item it would otherwise grow
           to its content's height and break the pages' own scrolling. */}
       <main className="min-h-0 flex-1 overflow-clip-safe">
-        {/* Hidden rather than unmounted: rebuilding the map and reloading every marker on each
-            visit is slow. Each page has an error boundary, so a crash in it or in one of its
-            fullscreen views shows a fallback there, not a blank app. */}
-        <div className={cn("h-full", active !== "map" && "hidden")}>
-          <ErrorBoundary>
-            <MapPage active={active === "map"} />
-          </ErrorBoundary>
-        </div>
+        {/* Hidden rather than unmounted after its first visit: rebuilding the map and reloading
+            every marker on each visit is slow. Each page has an error boundary, so a crash in it
+            or in one of its fullscreen views shows a fallback there, not a blank app. */}
+        {mapOpened && (
+          <div className={cn("h-full", active !== "map" && "hidden")}>
+            <ErrorBoundary>
+              <MapPage active={active === "map"} />
+            </ErrorBoundary>
+          </div>
+        )}
         {/* Keyed by the tab: opening another one starts with a fresh boundary. */}
         <ErrorBoundary key={active}>
           {active === "trips" && <TripsPage />}

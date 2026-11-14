@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { api } from "@/api/client";
 import { EditLocationModal } from "@/components/EditLocationModal";
-import { BACK_DEPTH_KEY } from "@/lib/useCloseOnBack";
+import { BACK_DEPTH_KEY } from "@/lib/history";
 
 // How many fullscreen views hold a history entry (useCloseOnBack).
 const depth = () => ((window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY] as number) ?? 0;

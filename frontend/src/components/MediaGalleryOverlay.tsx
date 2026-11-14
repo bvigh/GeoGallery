@@ -7,7 +7,8 @@ import { api, ApiError } from "@/api/client";
 import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { useVideoKeys } from "@/lib/videoKeys";
 import { describeError } from "@/lib/errors";
-import { useCloseOnBack } from "@/lib/useCloseOnBack";
+import { useCloseOnBack } from "@/lib/history";
+import { galleryRoute, routeUrl, type GalleryTab } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { AlbumMenu } from "@/components/albums/AlbumMenu";
@@ -191,6 +192,12 @@ interface Props {
   // and how. The overlay drops the item from its list once the promise resolves.
   canRemoveFromAlbum?: (item: MediaItem) => boolean;
   onRemoveFromAlbum?: (item: MediaItem) => Promise<void>;
+  // The gallery's place in the URL: its tab and trip or album. The URL then names the current item
+  // too, so a reload or a copied link opens the gallery on it again.
+  route?: { tab: GalleryTab; collectionId: string };
+  // The item to open on, from the URL. When it is not in the list, the gallery opens on the first
+  // item and says so.
+  initialItemId?: string | null;
 }
 
 export function MediaGalleryOverlay({
@@ -201,11 +208,17 @@ export function MediaGalleryOverlay({
   onMediaDeleted,
   canRemoveFromAlbum,
   onRemoveFromAlbum,
+  route,
+  initialItemId = null,
 }: Props) {
   const user = useCurrentUser();
   const [items, setItems] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentIndex, setCurrentIndex] = useState(0);
+  // Consumed by the first list that arrives; a later one starts from the first item as before.
+  const initialItemRef = useRef(initialItemId);
+  // The item from the URL is not in the gallery; said until the user moves on.
+  const [itemMissing, setItemMissing] = useState(false);
   // The URL (or why it failed) together with the item it belongs to. A separate URL state would
   // still hold the previous item's URL for the commit after a step, and a 360° viewer would
   // build a renderer and load that old texture again before the effect below replaced it.
@@ -240,8 +253,10 @@ export function MediaGalleryOverlay({
   const paramsKey = JSON.stringify(params);
   const paramsRef = useRef(params);
   paramsRef.current = params;
-  // The phone's back gesture closes the gallery instead of leaving the app.
-  useCloseOnBack(onClose);
+  // The phone's back gesture closes the gallery instead of leaving the app. Until the list is in,
+  // the URL keeps the item it was opened on.
+  const urlItemId = loading ? initialItemId : (currentItem?.id ?? null);
+  useCloseOnBack(onClose, true, route ? routeUrl(galleryRoute(route.tab, route.collectionId, urlItemId)) : null);
 
   // Fetch all matching media, sorted chronologically
   useEffect(() => {
@@ -251,8 +266,14 @@ export function MediaGalleryOverlay({
     fetchAllMedia(paramsRef.current)
       .then((data) => {
         if (cancelled) return;
-        setItems(sortByTakenAt(data));
-        setCurrentIndex(0);
+        const sorted = sortByTakenAt(data);
+        const wanted = initialItemRef.current;
+        initialItemRef.current = null;
+        const start = wanted === null ? 0 : sorted.findIndex((m) => m.id === wanted);
+        setItems(sorted);
+        setCurrentIndex(Math.max(start, 0));
+        // Deleted, or taken out of the trip or album since the link was made.
+        if (start < 0) setItemMissing(true);
       })
       .catch(console.error)
       .finally(() => {
@@ -333,6 +354,7 @@ export function MediaGalleryOverlay({
 
   function goTo(index: number) {
     setActionError(null);
+    setItemMissing(false);
     setCurrentIndex(Math.max(0, Math.min(index, items.length - 1)));
   }
   function goPrev() { goTo(currentIndex - 1); }
@@ -617,10 +639,13 @@ export function MediaGalleryOverlay({
       <div className="pointer-events-none absolute inset-0 z-10 flex flex-col p-2 sm:p-4 short:p-2">
         {/* Title on the left, truncated; the toolbar keeps its size on the right. */}
         <div className="relative z-20 flex shrink-0 items-start gap-2 touch:items-center">
-          <div className="min-w-0 truncate rounded-full bg-black/50 px-3 py-1 text-sm font-medium text-white">
-            {title}
-            {subtitle && <span className="ml-2 font-normal text-white/60">{subtitle}</span>}
-          </div>
+          {/* Empty while a gallery from the URL waits for its trip or album's name. */}
+          {title && (
+            <div className="min-w-0 truncate rounded-full bg-black/50 px-3 py-1 text-sm font-medium text-white">
+              {title}
+              {subtitle && <span className="ml-2 font-normal text-white/60">{subtitle}</span>}
+            </div>
+          )}
 
           <div className="pointer-events-auto ml-auto flex shrink-0 items-center gap-2 rounded-xl bg-black/40 px-2 py-1.5 backdrop-blur-sm touch:gap-0 touch:px-0.5 touch:py-0">
             {currentItem?.lat !== null && currentItem?.lng !== null && currentItem && (
@@ -697,11 +722,16 @@ export function MediaGalleryOverlay({
 
           {/* Below the header row, so on a phone they get the full width, not the strip left
               of the toolbar. */}
-          {((currentItem && !isOwn) || actionError) && (
+          {((currentItem && !isOwn) || actionError || itemMissing) && (
             <div className="absolute left-0 top-full mt-1 flex max-w-full flex-col items-start gap-1">
               {currentItem && !isOwn && (
                 <div className="max-w-full truncate rounded-full bg-black/50 px-3 py-1 text-xs text-white/80">
                   Shared by {currentItem.owner_name ?? "another user"}
+                </div>
+              )}
+              {itemMissing && (
+                <div role="status" className="max-w-full rounded-lg bg-black/70 px-3 py-1 text-xs text-white sm:max-w-sm">
+                  That item is not in this {route?.tab === "trips" ? "trip" : "album"}.
                 </div>
               )}
               {actionError && (
