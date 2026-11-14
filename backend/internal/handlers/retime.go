@@ -304,14 +304,14 @@ func applyRetime(ctx context.Context, pool *pgxpool.Pool, ownerID string, c Reti
 	movedExif, movedManual := false, false
 	if exifData.Lat != nil && exifData.Lng != nil {
 		p := ownTrackPoint{"exif", *exifData.Lat, *exifData.Lng}
-		if movedExif, err = moveTrackPoint(ctx, tx, ownerID, p, c.Old, c.New, []string{"exif", "manual"}); err != nil {
+		if movedExif, err = moveTrackPoint(ctx, tx, ownerID, p, c.Old, c.New); err != nil {
 			return err
 		}
 	}
 	// A manual location put a 'manual' point at taken_at (MediaHandler.UpdateLocation).
 	if gpsSource == "manual" && lat != nil && lng != nil {
 		p := ownTrackPoint{"manual", *lat, *lng}
-		if movedManual, err = moveTrackPoint(ctx, tx, ownerID, p, c.Old, c.New, []string{"manual"}); err != nil {
+		if movedManual, err = moveTrackPoint(ctx, tx, ownerID, p, c.Old, c.New); err != nil {
 			return err
 		}
 	}
@@ -388,12 +388,11 @@ type ownTrackPoint struct {
 // position, and copying that would put it at the wrong time. It yields to a point already at to,
 // as ingest's ON CONFLICT does.
 //
-// The old point stays while another item that may own it is still at from: one of ownerID's media
-// whose gps_source is in owners (the caller has already moved its own item). An item without such
-// a location never owns the point, so one that merely shares the second does not keep a stale point
-// alive. A point that stays is given the position of a remaining item with gps_source p.source, as
-// it may have held the moved item's.
-func moveTrackPoint(ctx context.Context, tx pgx.Tx, ownerID string, p ownTrackPoint, from, to time.Time, owners []string) (bool, error) {
+// The old point stays while another of ownerID's media at from may own it (the caller has already
+// moved its own item): see trackPointOwnersSQL. Any other item that merely shares the second does
+// not keep a stale point alive. A point that stays is given the position of an item that keeps it,
+// as it may have held the moved item's.
+func moveTrackPoint(ctx context.Context, tx pgx.Tx, ownerID string, p ownTrackPoint, from, to time.Time) (bool, error) {
 	var exists bool
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM gps_tracks WHERE owner_id = $1 AND source = $2 AND recorded_at = $3)`,
@@ -413,17 +412,14 @@ func moveTrackPoint(ctx context.Context, tx pgx.Tx, ownerID string, p ownTrackPo
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM gps_tracks
 		WHERE owner_id = $1 AND source = $2 AND recorded_at = $3
-		  AND NOT EXISTS (
-		      SELECT 1 FROM media
-		      WHERE owner_id = $1 AND taken_at = $3 AND gps_source = ANY($4::text[]))`,
-		ownerID, p.source, from, owners); err != nil {
+		  AND NOT EXISTS (`+trackPointOwnersSQL+`)`,
+		ownerID, p.source, from); err != nil {
 		return false, fmt.Errorf("delete old %s track point: %w", p.source, err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE gps_tracks t
 		SET location = m.location
-		FROM (SELECT location FROM media
-		      WHERE owner_id = $1 AND taken_at = $3 AND gps_source = $2 AND location IS NOT NULL
+		FROM (`+trackPointOwnersSQL+`
 		      ORDER BY id LIMIT 1) m
 		WHERE t.owner_id = $1 AND t.source = $2 AND t.recorded_at = $3`,
 		ownerID, p.source, from); err != nil {
@@ -431,3 +427,15 @@ func moveTrackPoint(ctx context.Context, tx pgx.Tx, ownerID string, p ownTrackPo
 	}
 	return true, nil
 }
+
+// trackPointOwnersSQL selects the positions of ownerID's ($1) media at the second $3 that may own
+// its $2 track point: the items that would have made it.
+//   - A 'manual' point: any item placed by hand there (MediaHandler.UpdateLocation), a video too.
+//   - An 'exif' point: a photo located from its EXIF there (insertExifGPSTrack). A video located from
+//     its container's location tag is gps_source 'exif' as well, but ingest makes no point from a
+//     tag, so a video must neither keep nor fill one. An item placed by hand has its own 'manual'
+//     point; whatever EXIF position it has is the one its owner overrode.
+const trackPointOwnersSQL = `
+		SELECT location FROM media
+		WHERE owner_id = $1 AND taken_at = $3 AND gps_source = $2 AND location IS NOT NULL
+		  AND ($2 <> 'exif' OR media_type IN ('photo', 'photo_360'))`

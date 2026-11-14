@@ -58,6 +58,7 @@ func (f *retimeHeads) readKeys() []string {
 }
 
 type retimeRow struct {
+	id                     string // "" lets the database choose
 	owner, name, mediaType string
 	object                 []byte
 	takenAt                string // RFC3339
@@ -78,13 +79,13 @@ func insertRetimeRow(t *testing.T, pool *pgxpool.Pool, store *retimeHeads, r ret
 	}
 	var id string
 	require.NoError(t, pool.QueryRow(context.Background(), `
-		INSERT INTO media (owner_id, filename, media_type, storage_key, file_hash, taken_at, gps_source, location,
+		INSERT INTO media (id, owner_id, filename, media_type, storage_key, file_hash, taken_at, gps_source, location,
 		                   camera_model, capture_evidence)
-		VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7,
+		VALUES (coalesce($12::uuid, gen_random_uuid()), $1, $2, $3, $4, $5, $6::timestamptz, $7,
 		        CASE WHEN $7::text IS NOT NULL THEN ST_SetSRID(ST_MakePoint($9, $8), 4326) END, $10, $11)
 		RETURNING id::text`,
 		r.owner, r.name, r.mediaType, key, "hash-"+key, r.takenAt, nilIfEmpty(r.gpsSource), r.lat, r.lng,
-		nilIfEmpty(r.cameraModel), r.evidence).Scan(&id))
+		nilIfEmpty(r.cameraModel), r.evidence, nilIfEmpty(r.id)).Scan(&id))
 	return id
 }
 
@@ -806,6 +807,71 @@ func TestRunRetime_Integration_UnrelatedItemAtOldTime(t *testing.T) {
 	assert.InDelta(t, 47.6, retimeTrackLat(t, pool, alice, "exif", "2022-08-06T14:33:49Z"), 1e-9)
 	assert.Equal(t, []string{"2022-08-04T11:00:00Z"}, retimeTrackTimes(t, pool, alice, "manual"),
 		"an EXIF-located photo at the old second does not keep a manual point")
+}
+
+// Only an item that would have made an 'exif' point keeps it at the old second: a photo located
+// from its EXIF. An item placed by hand has its own 'manual' point, and a video located from its
+// container's tag never makes one, so neither keeps the moved photo's point there, an hour or two
+// from where it was recorded, nor gives it a position.
+func TestRunRetime_Integration_OnlyEXIFLocatedPhotosKeepAnExifPoint(t *testing.T) {
+	pool := testdb.New(t)
+	store := newRetimeHeads()
+	alice := createUser(t, pool, "alice")
+	gpsPhoto := func(dto string, lat float64) []byte {
+		return exiftest.JPEG(exiftest.Photo{DateTimeOriginal: dto, GPS: &exiftest.GPS{Lat: lat, Lng: 19}})
+	}
+	photo := func(dto string) []byte { return exiftest.JPEG(exiftest.Photo{DateTimeOriginal: dto}) }
+
+	// An EXIF-GPS photo read as UTC, two hours late, onto the second of a correctly dated photo
+	// without an EXIF position that its owner placed by hand.
+	insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "P1.JPG", object: gpsPhoto("2021:06:03 13:08:56", 47.1),
+		takenAt: "2021-06-03T13:08:56Z", gpsSource: "exif", lat: 47.1, lng: 19})
+	insertTrack(t, pool, alice, "exif", "2021-06-03T13:08:56Z", 47.1, 19)
+	insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "IMG_20210603_150856.jpg", object: photo("2021:06:03 15:08:56"),
+		takenAt: "2021-06-03T13:08:56Z", gpsSource: "manual", lat: 46, lng: 18})
+	insertTrack(t, pool, alice, "manual", "2021-06-03T13:08:56Z", 46, 18)
+
+	// A burst from one camera, both read two hours late: one photo with an EXIF position, one
+	// without that was placed by hand. Retime takes them in ID order; either order ends the same.
+	for _, burst := range []struct {
+		day, gpsID, manualID string
+	}{
+		{"2021-06-04", "00000000-0000-4000-8000-00000000000a", "00000000-0000-4000-8000-00000000000b"},
+		{"2021-06-05", "00000000-0000-4000-8000-00000000000d", "00000000-0000-4000-8000-00000000000c"},
+	} {
+		wall := strings.ReplaceAll(burst.day, "-", ":") + " 13:08:56"
+		insertRetimeRow(t, pool, store, retimeRow{id: burst.gpsID, owner: alice, name: "P" + burst.day + "-gps.JPG",
+			object: gpsPhoto(wall, 47.2), takenAt: burst.day + "T13:08:56Z", gpsSource: "exif", lat: 47.2, lng: 19})
+		insertTrack(t, pool, alice, "exif", burst.day+"T13:08:56Z", 47.2, 19)
+		insertRetimeRow(t, pool, store, retimeRow{id: burst.manualID, owner: alice, name: "P" + burst.day + "-hand.JPG",
+			object: photo(wall), takenAt: burst.day + "T13:08:56Z", gpsSource: "manual", lat: 46, lng: 18})
+		insertTrack(t, pool, alice, "manual", burst.day+"T13:08:56Z", 46, 18)
+	}
+
+	// An EXIF-GPS photo read as UTC onto the second of a video whose location tag placed it.
+	insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "P2.JPG", object: gpsPhoto("2021:06:06 13:08:56", 47.3),
+		takenAt: "2021-06-06T13:08:56Z", gpsSource: "exif", lat: 47.3, lng: 19})
+	insertTrack(t, pool, alice, "exif", "2021-06-06T13:08:56Z", 47.3, 19)
+	video := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "20210606_150856.mp4", mediaType: "video",
+		object: []byte("\x00\x00\x00\x18ftypmp42"), takenAt: "2021-06-06T13:08:56Z", gpsSource: "exif", lat: 40, lng: 10})
+
+	res, err := RunRetime(context.Background(), retimeDeps(t, pool, store), alice, true, func(RetimeChange) {})
+	require.NoError(t, err)
+	assert.Equal(t, RetimeResult{Checked: 8, Retimed: 6, Unchanged: 1, NotExif: 1}, res)
+	assert.Equal(t, []string{
+		"2021-06-03T11:08:56Z", "2021-06-04T11:08:56Z", "2021-06-05T11:08:56Z", "2021-06-06T11:08:56Z",
+	}, retimeTrackTimes(t, pool, alice, "exif"), "no 'exif' point is left at an old second")
+	assert.InDelta(t, 47.1, retimeTrackLat(t, pool, alice, "exif", "2021-06-03T11:08:56Z"), 1e-9)
+	assert.InDelta(t, 47.3, retimeTrackLat(t, pool, alice, "exif", "2021-06-06T11:08:56Z"), 1e-9)
+	assert.Equal(t, []string{
+		"2021-06-03T13:08:56Z", // the correctly dated photo's own point stays
+		"2021-06-04T11:08:56Z", "2021-06-05T11:08:56Z",
+	}, retimeTrackTimes(t, pool, alice, "manual"))
+
+	m := readRetimedMedia(t, pool, video)
+	require.NotNil(t, m.lat)
+	assert.Equal(t, "exif", *m.gpsSource, "the video keeps its tag's location")
+	assert.InDelta(t, 40, *m.lat, 1e-9)
 }
 
 // A moved point takes its weight away from interpolations near the old time, including items that

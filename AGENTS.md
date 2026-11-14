@@ -278,7 +278,7 @@ A change to a rule of either kind, a deleted clock rule included, applies to new
 - It changes only rows whose stored `taken_at` is that EXIF wall clock at some quarter-hour offset of at most 14 h (`sameWallClock`), within `retimeTolerance` (5 s: a Panasonic MP4's container time sits a second off the wall clock in its EXIF). A row within 5 s of the new time counts as `unchanged`, one with no EXIF time as `not_exif`, and any other as `mismatched`, which is logged and left alone.
 - Per change, in one transaction that first locks the row while `taken_at` still holds the old value, it:
   - clears an interpolated location;
-  - moves the item's `exif` point (if the EXIF has a position) and `manual` point (if `gps_source = 'manual'`), writing the item's own position at the new time (`moveTrackPoint`). Nothing is created where no point existed. The old point stays while another item that could own it is still at that second, and is then given that item's position;
+  - moves the item's `exif` point (if the EXIF has a position) and `manual` point (if `gps_source = 'manual'`), writing the item's own position at the new time (`moveTrackPoint`). Nothing is created where no point existed. The old point stays while another item that would have made it is still at that second, and is then given that item's position: for an `exif` point a photo located from its EXIF (never a video located from its tag, which makes no point, nor an item placed by hand, which has its own `manual` point), for a `manual` point any item placed by hand (`trackPointOwnersSQL`);
   - when a point moved, clears interpolated locations within the match window of its old time, videos included;
   - rewrites `capture_evidence` (`retimedEvidence`): the EXIF keys (`src`, `zone`, `wall`, `gps_utc`, `wall_minus_gps_s`, `offset_tag`, `offset_ignored`, `offset_used_min`, `camera_zone`, `camera_zone_utc_fallback`, `make`, `model`, `exif_partial`, `clock_rule`) come from the re-read, `by` becomes `retime`, and `retimed_from` holds the old `taken_at` in RFC 3339 UTC. The container and file keys keep what ingest recorded, and are null on a row that had no evidence. A missing `camera_model` is filled from the EXIF.
 - It then runs `RunGPSMatcher` (interpolated rows included) and `RunTripDetect` for the owner on every `--apply`, even with nothing to change, so a re-run finishes an interrupted one.
@@ -442,7 +442,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
   - only the owner's rows, objects, tracks and trips;
   - interpolated, manual and EXIF locations;
   - unreadable objects, a failed clock rule load, and an interrupted run finished by a re-run;
-  - track points shared by bursts or by an unrelated item at the old second;
+  - track points shared by bursts or by an unrelated item at the old second; only a photo located from its EXIF keeps an `exif` point there (not an item placed by hand, in either ID order, nor a video located from its tag);
   - interpolations resting on a moved point (videos included);
   - `OffsetTimeOriginal`: a phone abroad moves, the Panasonic and a phone at home stay, a broken Exif IFD;
   - the owner's clock rule: winter photos move back, summer photos stay, another owner's camera is untouched, the evidence holds the rule, `by: "retime"` and `retimed_from`;
