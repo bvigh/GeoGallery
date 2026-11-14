@@ -242,6 +242,10 @@ func TestRunSubcommand_UsageErrors(t *testing.T) {
 		{"rebind same issuer", "rebind-issuer", []string{"--from", "a", "--to", "a"}},
 		{"scan without --user", "scan", nil},
 		{"scan stray argument", "scan", []string{"--user", "u", "extra"}},
+		{"retime without --user", "retime", nil},
+		{"retime --apply without --user", "retime", []string{"--apply"}},
+		{"retime stray argument", "retime", []string{"--user", "u", "extra"}},
+		{"retime unknown flag", "retime", []string{"--user", "u", "--dir", "/x"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -281,6 +285,160 @@ func TestScanTargetError(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
+	}
+}
+
+func TestRunRetime(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	rule := &ingest.ClockRule{ID: "r-1", Make: "Panasonic", Model: "DC-TZ200", OffsetMin: 120}
+	byRule := handlers.RetimeChange{
+		MediaID: "m-1", Filename: "P1033627.JPG",
+		Old:  time.Date(2019, 3, 13, 18, 28, 15, 0, time.UTC),
+		New:  time.Date(2019, 3, 13, 19, 28, 15, 0, time.FixedZone("", 2*3600)),
+		Zone: ingest.ZoneClockRule, ClockRule: rule, GPSSource: "interpolated",
+	}
+	byZone := handlers.RetimeChange{
+		MediaID: "m-2", Filename: "IMG 0001.JPG",
+		Old:  time.Date(2018, 10, 23, 11, 50, 53, 0, time.UTC),
+		New:  time.Date(2018, 10, 23, 11, 50, 53, 0, time.FixedZone("", 2*3600)),
+		Zone: ingest.ZoneCamera,
+	}
+	const line1 = "2019-03-13T18:28:15Z -> 2019-03-13T17:28:15Z  -1h0m0s  clock_rule(Panasonic DC-TZ200 UTC+02:00)  interpolated  m-1  P1033627.JPG\n"
+	const line2 = "2018-10-23T11:50:53Z -> 2018-10-23T09:50:53Z  -2h0m0s  camera  -  m-2  IMG 0001.JPG\n"
+	const dryRun = "dry run: nothing written; re-run with --apply\n"
+
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		userID     string
+		apply      bool
+		changes    []handlers.RetimeChange
+		res        handlers.RetimeResult
+		retimeErr  error
+		wantCalled bool
+		wantOut    string
+		wantErr    string
+	}{
+		{"dry run lists the changes", context.Background(), "active-user", false,
+			[]handlers.RetimeChange{byRule, byZone}, handlers.RetimeResult{Checked: 5, Retimed: 2, Unchanged: 1, NotExif: 1, Mismatch: 1}, nil,
+			true, line1 + line2 + "checked=5 retimed=2 unchanged=1 not_exif=1 mismatched=1 failed=0\n" + dryRun, ""},
+		{"apply", context.Background(), "active-user", true,
+			[]handlers.RetimeChange{byRule}, handlers.RetimeResult{Checked: 1, Retimed: 1}, nil,
+			true, line1 + "checked=1 retimed=1 unchanged=0 not_exif=0 mismatched=0 failed=0\n", ""},
+		{"nothing to change", context.Background(), "active-user", true,
+			nil, handlers.RetimeResult{Checked: 3, Unchanged: 3}, nil,
+			true, "checked=3 retimed=0 unchanged=3 not_exif=0 mismatched=0 failed=0\n", ""},
+		{"failed items exit non-zero", context.Background(), "active-user", true,
+			nil, handlers.RetimeResult{Checked: 2, Unchanged: 1, Failed: 1}, nil,
+			true, "checked=2 retimed=0 unchanged=1 not_exif=0 mismatched=0 failed=1\n", "1 item(s) failed"},
+		{"a failed dry run still says nothing was written", context.Background(), "active-user", false,
+			nil, handlers.RetimeResult{Checked: 1, Failed: 1}, nil,
+			true, "checked=1 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=1\n" + dryRun, "1 item(s) failed"},
+		{"retime error", context.Background(), "active-user", true,
+			nil, handlers.RetimeResult{}, errors.New("load clock rules: boom"),
+			true, "checked=0 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", "load clock rules: boom"},
+		{"interrupted", cancelled, "active-user", true,
+			[]handlers.RetimeChange{byRule}, handlers.RetimeResult{Checked: 2, Retimed: 1}, context.Canceled,
+			true, line1 + "checked=2 retimed=1 unchanged=0 not_exif=0 mismatched=0 failed=0\n", "interrupted; re-run retime to finish"},
+		{"unclaimed owner of pre-auth data accepted", context.Background(), auth.LegacyOwnerID, true,
+			nil, handlers.RetimeResult{}, nil,
+			true, "checked=0 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", ""},
+		{"disabled user accepted", context.Background(), "disabled-user", true,
+			nil, handlers.RetimeResult{}, nil,
+			true, "checked=0 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", ""},
+		{"unknown user refused before reading anything", context.Background(), "nobody", true,
+			nil, handlers.RetimeResult{}, nil,
+			false, "", `unknown user "nobody"`},
+		{"uppercase id normalised", context.Background(), "ACTIVE-USER", true,
+			nil, handlers.RetimeResult{}, nil,
+			true, "checked=0 retimed=0 unchanged=0 not_exif=0 mismatched=0 failed=0\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			retime := func(_ context.Context, ownerID string, report func(handlers.RetimeChange)) (handlers.RetimeResult, error) {
+				called = true
+				assert.Equal(t, strings.ToLower(tt.userID), ownerID)
+				for _, c := range tt.changes {
+					report(c)
+				}
+				return tt.res, tt.retimeErr
+			}
+			var out bytes.Buffer
+			err := runRetime(tt.ctx, &out, retime, scanUsers(), tt.userID, tt.apply)
+			assert.Equal(t, tt.wantCalled, called)
+			assert.Equal(t, tt.wantOut, out.String())
+			if tt.wantErr == "" {
+				assert.NoError(t, err, "exit 0")
+				return
+			}
+			require.Error(t, err, "runSubcommand exits 1 on an error from run")
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestFormatRetimeChange(t *testing.T) {
+	old := time.Date(2022, 8, 6, 14, 33, 49, 0, time.UTC)
+	tests := []struct {
+		name   string
+		change handlers.RetimeChange
+		want   string
+	}{
+		{"the GPS clock",
+			handlers.RetimeChange{MediaID: "m", Filename: "tokyo.jpg", Old: old, New: old.Add(-9 * time.Hour), Zone: ingest.ZoneGPS, GPSSource: "exif"},
+			"2022-08-06T14:33:49Z -> 2022-08-06T05:33:49Z  -9h0m0s  gps  exif  m  tokyo.jpg"},
+		{"a negative offset in a rule, and a shift with seconds",
+			handlers.RetimeChange{MediaID: "m", Filename: "a.mp4", Old: old, New: old.Add(3*time.Hour + 30*time.Minute - time.Second), Zone: ingest.ZoneClockRule,
+				ClockRule: &ingest.ClockRule{Make: "Arashi Vision", Model: "Insta360 OneRS", OffsetMin: -210}},
+			"2022-08-06T14:33:49Z -> 2022-08-06T18:03:48Z  +3h29m59s  clock_rule(Arashi Vision Insta360 OneRS UTC-03:30)  -  m  a.mp4"},
+		{"a clock_rule zone without its rule still prints the zone",
+			handlers.RetimeChange{MediaID: "m", Filename: "a.jpg", Old: old, New: old.Add(time.Hour), Zone: ingest.ZoneClockRule},
+			"2022-08-06T14:33:49Z -> 2022-08-06T15:33:49Z  +1h0m0s  clock_rule  -  m  a.jpg"},
+		{"a file name with a line break is quoted",
+			handlers.RetimeChange{MediaID: "m", Filename: "a\nchecked=0.jpg", Old: old, New: old.Add(-time.Hour), Zone: ingest.ZoneOffset, GPSSource: "manual"},
+			`2022-08-06T14:33:49Z -> 2022-08-06T13:33:49Z  -1h0m0s  offset  manual  m  "a\nchecked=0.jpg"`},
+		{"a terminal escape is quoted",
+			handlers.RetimeChange{MediaID: "m", Filename: "\x1b[2Ja.jpg", Old: old, New: old.Add(-time.Hour), Zone: ingest.ZoneCamera},
+			`2022-08-06T14:33:49Z -> 2022-08-06T13:33:49Z  -1h0m0s  camera  -  m  "\x1b[2Ja.jpg"`},
+		{"a rule's camera with a control character is quoted",
+			handlers.RetimeChange{MediaID: "m", Filename: "a.jpg", Old: old, New: old.Add(-time.Hour), Zone: ingest.ZoneClockRule,
+				ClockRule: &ingest.ClockRule{Make: "Acme\r", Model: "X 1", OffsetMin: 0}},
+			`2022-08-06T14:33:49Z -> 2022-08-06T13:33:49Z  -1h0m0s  clock_rule("Acme\r" X 1 UTC+00:00)  -  m  a.jpg`},
+		{"a stored time with milliseconds keeps them",
+			handlers.RetimeChange{MediaID: "m", Filename: "a.jpg", Old: old.Add(123 * time.Millisecond), New: old.Add(-2 * time.Hour), Zone: ingest.ZoneCamera},
+			"2022-08-06T14:33:49.123Z -> 2022-08-06T12:33:49Z  -2h0m0.123s  camera  -  m  a.jpg"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, formatRetimeChange(tt.change))
+		})
+	}
+}
+
+func TestFormatShift(t *testing.T) {
+	assert.Equal(t, "-1h0m0s", formatShift(-time.Hour))
+	assert.Equal(t, "+2h0m1s", formatShift(2*time.Hour+time.Second))
+	assert.Equal(t, "-5h30m0s", formatShift(-(5*time.Hour + 30*time.Minute)))
+	assert.Equal(t, "0s", formatShift(0))
+}
+
+func TestFormatUTCOffset(t *testing.T) {
+	tests := []struct {
+		minutes int
+		want    string
+	}{
+		{120, "UTC+02:00"},
+		{0, "UTC+00:00"},
+		{-210, "UTC-03:30"},
+		{345, "UTC+05:45"},
+		{840, "UTC+14:00"},
+		{-720, "UTC-12:00"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, formatUTCOffset(tt.minutes), tt.minutes)
 	}
 }
 

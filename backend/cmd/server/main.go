@@ -10,10 +10,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/bvigh/geogallery/internal/auth"
 	"github.com/bvigh/geogallery/internal/config"
@@ -154,8 +157,31 @@ func runSubcommand(name string, args []string, stdout io.Writer) int {
 			}
 			return runScan(ctx, stdout, scan, users, *userID, scanDir)
 		}
+	case "retime":
+		userID := fs.String("user", "", "id of the user whose media are re-read (see `server users`)")
+		apply := fs.Bool("apply", false, "write the changes; without it the command only lists them")
+		needS3 = true
+		check = func() error {
+			if *userID == "" {
+				return errors.New("--user is required (find the id with `server users`)")
+			}
+			return nil
+		}
+		run = func(ctx context.Context, env cmdEnv) error {
+			users, err := env.store.ListUsers(ctx)
+			if err != nil {
+				return err
+			}
+			logCameraTimezone(env.cfg)
+			deps := handlers.NewRetimeDeps(env.pool, env.s3,
+				time.Duration(env.cfg.GPSMatchWindowHours)*time.Hour, env.cfg.TripGapHours, cameraZone(env.cfg))
+			retime := func(ctx context.Context, ownerID string, report func(handlers.RetimeChange)) (handlers.RetimeResult, error) {
+				return handlers.RunRetime(ctx, deps, ownerID, *apply, report)
+			}
+			return runRetime(ctx, stdout, retime, users, *userID, *apply)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (available: invite, rebind-issuer, users, scan; no command starts the server)\n", name)
+		fmt.Fprintf(os.Stderr, "unknown command %q (available: invite, rebind-issuer, users, scan, retime; no command starts the server)\n", name)
 		return 2
 	}
 
@@ -231,6 +257,82 @@ func runScan(ctx context.Context, stdout io.Writer, scan scanFunc, users []auth.
 		return fmt.Errorf("%d file(s) failed to ingest; see the errors above", res.Failed)
 	}
 	return nil
+}
+
+type retimeFunc func(ctx context.Context, ownerID string, report func(handlers.RetimeChange)) (handlers.RetimeResult, error)
+
+// runRetime checks that the user exists, then prints a line per change and the counts on stdout.
+// Any user is accepted, including a disabled or unclaimed one: it is a repair, and their media's
+// times are just as wrong. A dry run (apply false) writes nothing and says so. An error, an
+// interrupt or a failed item makes the command exit 1.
+func runRetime(ctx context.Context, stdout io.Writer, retime retimeFunc, users []auth.UserRecord, userID string, apply bool) error {
+	// Postgres emits lowercase UUIDs, and the owner ID is compared with the stored one.
+	userID = strings.ToLower(userID)
+	if !slices.ContainsFunc(users, func(u auth.UserRecord) bool { return u.ID == userID }) {
+		return fmt.Errorf("unknown user %q (list users with `server users`)", userID)
+	}
+	res, err := retime(ctx, userID, func(c handlers.RetimeChange) {
+		fmt.Fprintln(stdout, formatRetimeChange(c))
+	})
+	fmt.Fprintf(stdout, "checked=%d retimed=%d unchanged=%d not_exif=%d mismatched=%d failed=%d\n",
+		res.Checked, res.Retimed, res.Unchanged, res.NotExif, res.Mismatch, res.Failed)
+	if !apply {
+		fmt.Fprintln(stdout, "dry run: nothing written; re-run with --apply")
+	}
+	switch {
+	case ctx.Err() != nil:
+		return errors.New("interrupted; re-run retime to finish")
+	case err != nil:
+		return err
+	case res.Failed > 0:
+		return fmt.Errorf("%d item(s) failed; see the errors above", res.Failed)
+	}
+	return nil
+}
+
+// formatRetimeChange is one change on one line, both times in UTC:
+//
+//	2019-03-13T18:28:15Z -> 2019-03-13T17:28:15Z  -1h0m0s  clock_rule(Panasonic DC-TZ200 UTC+02:00)  interpolated  <id>  P1033627.JPG
+//
+// The zone names where the new offset came from, and for a clock rule the rule's camera and
+// offset. The gps_source is the item's before the change ("-" without a location). The file name
+// comes last, so a space in it cannot shift the columns before it. Text a user chose (the file name,
+// the rule's camera) is quoted when it holds a control character, so it can neither break the line
+// nor reach the terminal raw.
+func formatRetimeChange(c handlers.RetimeChange) string {
+	zone := c.Zone
+	if c.Zone == ingest.ZoneClockRule && c.ClockRule != nil {
+		zone = fmt.Sprintf("%s(%s %s %s)", c.Zone, printable(c.ClockRule.Make), printable(c.ClockRule.Model),
+			formatUTCOffset(c.ClockRule.OffsetMin))
+	}
+	return fmt.Sprintf("%s -> %s  %s  %s  %s  %s  %s",
+		c.Old.UTC().Format(time.RFC3339Nano), c.New.UTC().Format(time.RFC3339Nano), formatShift(c.New.Sub(c.Old)),
+		zone, dash(c.GPSSource), c.MediaID, printable(c.Filename))
+}
+
+// printable returns s, or s quoted when it holds a control character.
+func printable(s string) string {
+	if strings.ContainsFunc(s, unicode.IsControl) {
+		return strconv.Quote(s)
+	}
+	return s
+}
+
+// formatShift writes a shift with its sign: -1h0m0s, +3h29m59s.
+func formatShift(d time.Duration) string {
+	if d > 0 {
+		return "+" + d.String()
+	}
+	return d.String()
+}
+
+// formatUTCOffset writes minutes east of UTC as UTC+02:00 or UTC-03:30.
+func formatUTCOffset(minutes int) string {
+	sign := "+"
+	if minutes < 0 {
+		sign, minutes = "-", -minutes
+	}
+	return fmt.Sprintf("UTC%s%02d:%02d", sign, minutes/60, minutes%60)
 }
 
 // cameraZone is the camera zone as ingest reads and records it, with the camera rules.
