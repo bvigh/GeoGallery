@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -221,18 +220,13 @@ func rereadExifTime(ctx context.Context, store retimeStorage, m retimeCandidate,
 		return ingest.ExifData{}, false, err
 	}
 	if video {
-		v, err := inExifDecodeSlot(ctx, func() videoExif {
-			e, ok := ingest.VideoExif(head, zone)
-			return videoExif{e, ok}
-		})
+		v, err := videoExifInSlot(ctx, head, zone)
 		if err != nil {
 			return ingest.ExifData{}, false, err
 		}
 		return v.exif, v.ok && usableTime(v.exif.TakenAt), nil
 	}
-	e, err = inExifDecodeSlot(ctx, func() ingest.ExifData {
-		return ingest.ExtractExif(bytes.NewReader(head), zone)
-	})
+	e, err = extractExifInSlot(ctx, head, zone)
 	if err != nil {
 		return ingest.ExifData{}, false, err
 	}
