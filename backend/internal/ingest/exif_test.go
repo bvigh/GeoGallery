@@ -352,6 +352,120 @@ func TestExtractExif_IgnoredOffsetDoesNotChangeTakenAt(t *testing.T) {
 	}
 }
 
+// The owner's clock rules for the tests below: the DC-TZ200 left on summer time (UTC+2) all year,
+// and the Insta360 ONE RS on UTC+1 until the end of 2022.
+var (
+	tz200Rule = ClockRule{ID: "tz200", Make: "Panasonic", Model: "DC-TZ200", OffsetMin: 120}
+	oneRSRule = ClockRule{ID: "oners", Make: "Arashi Vision", Model: "Insta360 OneRS", OffsetMin: 60, EndsOn: day(2022, 12, 31)}
+	s9Rule    = ClockRule{ID: "s9", Make: "samsung", Model: "SM-G960F", OffsetMin: 60}
+)
+
+func TestExtractExif_ClockRule(t *testing.T) {
+	zone := CameraZone{Loc: mustZone(t, "Europe/Warsaw"), Set: true, Rules: panasonicRules, Clock: ClockRules{tz200Rule, oneRSRule, s9Rule}}
+	tests := []struct {
+		name       string
+		photo      exiftest.Photo
+		want       string // RFC3339 instant
+		wantZone   string
+		wantOffset int        // seconds east of UTC in TakenAt's location
+		wantRule   *ClockRule // nil unless wantZone is ZoneClockRule
+	}{
+		{"a Panasonic winter photo is read at the rule's +02:00, an hour before the camera zone",
+			exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: "2019:01:15 12:00:00", OffsetTimeOriginal: "+01:00"},
+			"2019-01-15T10:00:00Z", ZoneClockRule, 2 * 3600, &tz200Rule},
+		{"a Panasonic summer photo gives the instant the camera zone gave",
+			exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: "2019:07:15 12:00:00", OffsetTimeOriginal: "+01:00"},
+			"2019-07-15T10:00:00Z", ZoneClockRule, 2 * 3600, &tz200Rule},
+		{"IFD0 DateTime is read by the rule too",
+			exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200", DateTime: "2019:01:15 12:00:00"},
+			"2019-01-15T10:00:00Z", ZoneClockRule, 2 * 3600, &tz200Rule},
+		{"make and model match without case and surrounding space",
+			exiftest.Photo{Make: "PANASONIC", Model: " dc-tz200 ", DateTimeOriginal: "2019:01:15 12:00:00"},
+			"2019-01-15T10:00:00Z", ZoneClockRule, 2 * 3600, &tz200Rule},
+		{"the GPS clock beats a rule",
+			exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: "2019:01:15 12:00:00", GPS: gpsAt(t, "2019-01-15T11:00:02Z")},
+			"2019-01-15T11:00:00Z", ZoneGPS, 3600, nil},
+		{"a stale GPS fix falls through to the rule",
+			exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: "2019:01:15 12:00:00", GPS: gpsAt(t, "1970-01-01T00:00:00Z")},
+			"2019-01-15T10:00:00Z", ZoneClockRule, 2 * 3600, &tz200Rule},
+		{"a rule beats a trusted OffsetTimeOriginal",
+			exiftest.Photo{Make: "samsung", Model: "SM-G960F", DateTimeOriginal: "2019:07:15 12:00:00", OffsetTimeOriginal: "+02:00"},
+			"2019-07-15T11:00:00Z", ZoneClockRule, 3600, &s9Rule},
+		{"another model of the make keeps its OffsetTimeOriginal",
+			exiftest.Photo{Make: "samsung", Model: "SM-S921B", DateTimeOriginal: "2019:07:15 12:00:00", OffsetTimeOriginal: "+02:00"},
+			"2019-07-15T10:00:00Z", ZoneOffset, 2 * 3600, nil},
+		{"another model of the make reads the camera zone",
+			exiftest.Photo{Make: "Panasonic", Model: "DC-TZ100", DateTimeOriginal: "2019:01:15 12:00:00", OffsetTimeOriginal: "+01:00"},
+			"2019-01-15T11:00:00Z", ZoneCamera, 0, nil},
+		{"no Model tag, no rule",
+			exiftest.Photo{Make: "Panasonic", DateTimeOriginal: "2019:01:15 12:00:00"},
+			"2019-01-15T11:00:00Z", ZoneCamera, 0, nil},
+		{"no Make tag, no rule",
+			exiftest.Photo{Model: "DC-TZ200", DateTimeOriginal: "2019:01:15 12:00:00"},
+			"2019-01-15T11:00:00Z", ZoneCamera, 0, nil},
+		{"the ONE RS in summer 2022 is read at +01:00",
+			exiftest.Photo{Make: "Arashi Vision", Model: "Insta360 OneRS", DateTimeOriginal: "2022:07:01 12:00:00"},
+			"2022-07-01T11:00:00Z", ZoneClockRule, 3600, &oneRSRule},
+		{"the ONE RS on the rule's last evening",
+			exiftest.Photo{Make: "Arashi Vision", Model: "Insta360 OneRS", DateTimeOriginal: "2022:12:31 23:59:59"},
+			"2022-12-31T22:59:59Z", ZoneClockRule, 3600, &oneRSRule},
+		{"the ONE RS from 2023 on reads the camera zone",
+			exiftest.Photo{Make: "Arashi Vision", Model: "Insta360 OneRS", DateTimeOriginal: "2023:07:01 12:00:00"},
+			"2023-07-01T10:00:00Z", ZoneCamera, 0, nil},
+		{"another Insta360 model is unaffected",
+			exiftest.Photo{Make: "Arashi Vision", Model: "Insta360 X3", DateTimeOriginal: "2022:07:01 12:00:00"},
+			"2022-07-01T10:00:00Z", ZoneCamera, 0, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractExif(bytes.NewReader(exiftest.JPEG(tt.photo)), zone)
+			require.NotNil(t, got.TakenAt)
+			want, err := time.Parse(time.RFC3339, tt.want)
+			require.NoError(t, err)
+			assert.True(t, want.Equal(*got.TakenAt), "got %s, want %s", got.TakenAt.UTC().Format(time.RFC3339), tt.want)
+			assert.Equal(t, tt.wantZone, got.TakenAtZone)
+			if tt.wantZone != ZoneCamera {
+				_, offset := got.TakenAt.Zone()
+				assert.Equal(t, tt.wantOffset, offset)
+			}
+			assert.Equal(t, tt.wantRule, got.ClockRule)
+		})
+	}
+
+	t.Run("a rule changes only the time: the raw tags are recorded as before", func(t *testing.T) {
+		photo := exiftest.JPEG(exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: "2019:01:15 12:00:00", OffsetTimeOriginal: "+01:00"})
+		without := zone
+		without.Clock = nil
+		withRule := ExtractExif(bytes.NewReader(photo), zone)
+		withoutRule := ExtractExif(bytes.NewReader(photo), without)
+
+		assert.Equal(t, withoutRule.Raw, withRule.Raw)
+		assert.Equal(t, "DC-TZ200", withRule.CameraModel)
+		assert.Equal(t, ZoneCamera, withoutRule.TakenAtZone)
+		assert.Nil(t, withoutRule.ClockRule)
+		assert.Equal(t, time.Hour, withoutRule.TakenAt.Sub(*withRule.TakenAt), "the rule moves the winter photo an hour earlier")
+	})
+
+	t.Run("a summer photo gives the same instant with the rule as without it", func(t *testing.T) {
+		photo := exiftest.JPEG(exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: "2019:07:15 12:00:00", OffsetTimeOriginal: "+01:00"})
+		without := zone
+		without.Clock = nil
+		withRule := ExtractExif(bytes.NewReader(photo), zone)
+		withoutRule := ExtractExif(bytes.NewReader(photo), without)
+
+		require.NotNil(t, withRule.TakenAt)
+		require.NotNil(t, withoutRule.TakenAt)
+		assert.True(t, withoutRule.TakenAt.Equal(*withRule.TakenAt))
+	})
+
+	t.Run("no wall clock, no rule", func(t *testing.T) {
+		got := ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200"})), zone)
+		assert.Nil(t, got.TakenAt)
+		assert.Empty(t, got.TakenAtZone)
+		assert.Nil(t, got.ClockRule)
+	})
+}
+
 func TestCleanTag(t *testing.T) {
 	tests := []struct{ name, in, want string }{
 		{"plain", "Lavf60.16.100", "Lavf60.16.100"},
@@ -435,6 +549,34 @@ func TestExtractExif_OffsetIndependentOfProcessZone(t *testing.T) {
 		require.NotNil(t, got.TakenAt, name)
 		assert.Equal(t, "2025-07-14T14:30:00Z", got.TakenAt.UTC().Format(time.RFC3339), name)
 		assert.Equal(t, ZoneOffset, got.TakenAtZone, name)
+	}
+}
+
+// A clock rule's period and offset do not depend on the process's own zone either: around the rule's
+// last midnight, a zone west or east of UTC must not move a photo into or out of the period.
+func TestExtractExif_ClockRuleIndependentOfProcessZone(t *testing.T) {
+	saved := time.Local
+	t.Cleanup(func() { time.Local = saved })
+
+	rule := ClockRule{ID: "r", Make: "Panasonic", Model: "DC-TZ200", OffsetMin: 120, StartsOn: day(2019, 1, 1), EndsOn: day(2019, 12, 31)}
+	zone := CameraZone{Loc: mustZone(t, "Europe/Warsaw"), Set: true, Rules: panasonicRules, Clock: ClockRules{rule}}
+	tests := []struct {
+		wall, want, wantZone string
+	}{
+		{"2019:01:01 00:00:00", "2018-12-31T22:00:00Z", ZoneClockRule},
+		{"2018:12:31 23:59:59", "2018-12-31T22:59:59Z", ZoneCamera},
+		{"2019:12:31 23:30:00", "2019-12-31T21:30:00Z", ZoneClockRule},
+		{"2020:01:01 00:30:00", "2019-12-31T23:30:00Z", ZoneCamera},
+	}
+	for _, name := range []string{"UTC", "America/New_York", "Asia/Kolkata", "Pacific/Kiritimati", "Pacific/Pago_Pago"} {
+		time.Local = mustZone(t, name)
+		for _, tt := range tests {
+			photo := exiftest.JPEG(exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: tt.wall})
+			got := ExtractExif(bytes.NewReader(photo), zone)
+			require.NotNil(t, got.TakenAt, "%s %s", name, tt.wall)
+			assert.Equal(t, tt.want, got.TakenAt.UTC().Format(time.RFC3339), "%s %s", name, tt.wall)
+			assert.Equal(t, tt.wantZone, got.TakenAtZone, "%s %s", name, tt.wall)
+		}
 	}
 }
 

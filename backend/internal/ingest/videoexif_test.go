@@ -74,6 +74,32 @@ func TestVideoExif(t *testing.T) {
 		assert.Equal(t, "2021-02-10T06:30:00Z", got.TakenAt.UTC().Format(time.RFC3339))
 	})
 
+	t.Run("the owner's clock rule applies, with the model from the video's EXIF", func(t *testing.T) {
+		zone := warsaw
+		zone.Clock = ClockRules{tz200Rule}
+		got, ok := VideoExif(exiftest.PanasonicMP4(panasonicClip), zone)
+		require.True(t, ok)
+		require.NotNil(t, got.TakenAt)
+		assert.Equal(t, "2021-02-10T13:30:00Z", got.TakenAt.UTC().Format(time.RFC3339), "15:30 at the rule's +02:00, not Warsaw's winter +01:00")
+		assert.Equal(t, ZoneClockRule, got.TakenAtZone)
+		assert.Equal(t, &tz200Rule, got.ClockRule)
+	})
+
+	t.Run("a clock rule for another model leaves the camera zone", func(t *testing.T) {
+		zone := warsaw
+		zone.Clock = ClockRules{{ID: "tz100", Make: "Panasonic", Model: "DC-TZ100", OffsetMin: 120}}
+		got, ok := VideoExif(exiftest.PanasonicMP4(panasonicClip), zone)
+		require.True(t, ok)
+		assert.Equal(t, "2021-02-10T14:30:00Z", got.TakenAt.UTC().Format(time.RFC3339))
+		assert.Equal(t, ZoneCamera, got.TakenAtZone)
+		assert.Nil(t, got.ClockRule)
+	})
+
+	t.Run("a clock rule does not make a video dated from its EXIF", func(t *testing.T) {
+		_, ok := VideoExif(exiftest.PanasonicMP4(panasonicClip), CameraZone{Loc: warsaw.Loc, Clock: ClockRules{tz200Rule}})
+		assert.False(t, ok, "only the camera rules' video_time_from_exif does")
+	})
+
 	t.Run("the rules decide", func(t *testing.T) {
 		head := exiftest.PanasonicMP4(panasonicClip)
 		for name, rules := range map[string]CameraRules{

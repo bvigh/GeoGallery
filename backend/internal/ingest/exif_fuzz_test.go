@@ -22,6 +22,7 @@ func FuzzExtractExif(f *testing.F) {
 	for _, seed := range [][]byte{
 		exiftest.JPEG(photo), exiftest.TIFF(photo), exiftest.PNG(photo), exiftest.WebP(photo), exiftest.HEIF(photo),
 		exiftest.JPEG(exiftest.Photo{DateTime: "2009:04:15 10:20:30", BrokenExifIFD: true}),
+		exiftest.JPEG(exiftest.Photo{Make: photo.Make, Model: photo.Model, DateTimeOriginal: photo.DateTimeOriginal}), // read by the clock rule below
 	} {
 		f.Add(seed)
 	}
@@ -30,11 +31,14 @@ func FuzzExtractExif(f *testing.F) {
 			f.Add(in.TIFF)
 		}
 	}
+	// A clock rule for the seed's camera, so the fuzzer reaches the rule's match too.
+	zone := CameraZone{Loc: time.UTC, Clock: ClockRules{{ID: "s24", Make: "samsung", Model: "SM-S921B", OffsetMin: 60}}}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		got := ExtractExif(bytes.NewReader(data), CameraZone{Loc: time.UTC})
+		got := ExtractExif(bytes.NewReader(data), zone)
 		if got.Lat != nil {
 			assert.True(t, geo.IsValidGPS(*got.Lat, *got.Lng))
 		}
+		assert.Equal(t, got.TakenAtZone == ZoneClockRule, got.ClockRule != nil, "a rule is reported exactly when it applied")
 	})
 }
 
@@ -47,13 +51,14 @@ func FuzzVideoExif(f *testing.F) {
 	for _, seed := range [][]byte{whole, whole[:len(whole)/2], whole[:0x4080], exiftest.JPEG(clip), nil} {
 		f.Add(seed)
 	}
-	zone := CameraZone{Loc: time.UTC, Rules: panasonicRules}
+	zone := CameraZone{Loc: time.UTC, Rules: panasonicRules, Clock: ClockRules{tz200Rule}}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		got, ok := VideoExif(data, zone)
 		if ok {
 			assert.NotNil(t, got.TakenAt)
 			assert.Nil(t, got.Lat)
 			assert.Nil(t, got.WidthPx)
+			assert.Equal(t, got.TakenAtZone == ZoneClockRule, got.ClockRule != nil, "a rule is reported exactly when it applied")
 		}
 	})
 }

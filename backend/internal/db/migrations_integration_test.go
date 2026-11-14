@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bvigh/geogallery/internal/testdb"
@@ -389,4 +390,207 @@ func TestMigration000010_CaptureEvidence(t *testing.T) {
 
 	migrateTo(t, m, 10)
 	assertCaptureEvidenceColumn(t, dsn)
+}
+
+// assertCameraClockRulesSchema checks the table and its constraints, and that a rule inserts with
+// its defaults.
+func assertCameraClockRulesSchema(t *testing.T, dsn string) {
+	t.Helper()
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.True(t, tableExists(ctx, t, conn, "camera_clock_rules"))
+		for _, name := range []string{
+			"camera_clock_rules_pkey", "camera_clock_rules_owner_id_fkey", "camera_clock_rules_no_overlap",
+			"camera_clock_rules_period_check", "camera_clock_rules_finite_check",
+			"camera_clock_rules_make_check", "camera_clock_rules_model_check",
+			"camera_clock_rules_utc_offset_min_check", "camera_clock_rules_note_check",
+		} {
+			assert.True(t, constraintExists(ctx, t, conn, "camera_clock_rules", name), name)
+		}
+
+		tx, err := conn.Begin(ctx)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(ctx) }()
+		var id, note string
+		var startsOn, endsOn *string
+		var stamped bool
+		require.NoError(t, tx.QueryRow(ctx, `
+			INSERT INTO camera_clock_rules (owner_id, make, model, utc_offset_min, ends_on)
+			VALUES ($1, 'Panasonic', 'DC-TZ200', 120, '2022-12-31')
+			RETURNING id::text, note, starts_on::text, ends_on::text, created_at = updated_at AND created_at <= now()`,
+			legacyOwnerID).Scan(&id, &note, &startsOn, &endsOn, &stamped))
+		assert.NotEmpty(t, id, "the id is generated")
+		assert.Empty(t, note, "the note defaults to empty, never NULL")
+		assert.Nil(t, startsOn)
+		require.NotNil(t, endsOn)
+		assert.Equal(t, "2022-12-31", *endsOn)
+		assert.True(t, stamped)
+	})
+}
+
+func TestMigration000011_CameraClockRules(t *testing.T) {
+	dsn := testdb.NewEmpty(t)
+	m := newMigrator(t, dsn)
+
+	migrateTo(t, m, 6)
+	seedLegacyData(t, dsn)
+	migrateTo(t, m, 10)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.False(t, tableExists(ctx, t, conn, "camera_clock_rules"))
+	})
+
+	migrateTo(t, m, 11)
+	assertCameraClockRulesSchema(t, dsn)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		_, err := conn.Exec(ctx, `
+			INSERT INTO camera_clock_rules (owner_id, make, model, utc_offset_min, starts_on, note)
+			VALUES ($1, 'Arashi Vision', 'Insta360 OneRS', 60, '2022-06-01', 'summer 2022')`, legacyOwnerID)
+		require.NoError(t, err, "a populated table for the down migration")
+	})
+
+	migrateTo(t, m, 10)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.False(t, tableExists(ctx, t, conn, "camera_clock_rules"))
+		var extension bool
+		require.NoError(t, conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'btree_gist')`).Scan(&extension))
+		assert.True(t, extension, "the down migration leaves btree_gist")
+		var n int
+		require.NoError(t, conn.QueryRow(ctx, `SELECT COUNT(*) FROM media`).Scan(&n))
+		assert.Equal(t, 1, n, "the down migration keeps the media rows")
+	})
+
+	migrateTo(t, m, 11)
+	assertCameraClockRulesSchema(t, dsn)
+}
+
+// clockRule is one camera_clock_rules row for the constraint cases; nil dates are NULL.
+type clockRule struct {
+	owner, make, model string
+	offset             int
+	starts, ends       *string
+	note               string
+}
+
+func day(s string) *string { return &s }
+
+func insertClockRule(ctx context.Context, tx pgx.Tx, r clockRule) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO camera_clock_rules (owner_id, make, model, utc_offset_min, starts_on, ends_on, note)
+		VALUES ($1, $2, $3, $4, $5::date, $6::date, $7)`,
+		r.owner, r.make, r.model, r.offset, r.starts, r.ends, r.note)
+	return err
+}
+
+func TestMigration000011_Constraints(t *testing.T) {
+	dsn := testdb.NewEmpty(t)
+	m := newMigrator(t, dsn)
+	migrateTo(t, m, 11)
+
+	var other string
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		require.NoError(t, conn.QueryRow(ctx,
+			`INSERT INTO users (issuer, subject) VALUES ('https://idp', 'clock-other') RETURNING id::text`).Scan(&other))
+	})
+	owner := legacyOwnerID
+	tz200 := func(starts, ends *string) clockRule {
+		return clockRule{owner: owner, make: "Panasonic", model: "DC-TZ200", offset: 120, starts: starts, ends: ends}
+	}
+	year2019 := tz200(day("2019-01-01"), day("2019-12-31"))
+
+	// Each case inserts existing, then rule, in a transaction that is rolled back. wantName is the
+	// violated constraint.
+	tests := []struct {
+		name     string
+		existing []clockRule
+		rule     clockRule
+		wantCode string
+		wantName string
+	}{
+		{"a rule", nil, year2019, "", ""},
+		{"the same camera in another case, overlapping",
+			[]clockRule{year2019},
+			clockRule{owner: owner, make: "panasonic", model: "dc-tz200", offset: 60, starts: day("2019-06-01"), ends: day("2020-06-01")},
+			"23P01", "camera_clock_rules_no_overlap"},
+		{"sharing only the last day, which is included",
+			[]clockRule{year2019}, tz200(day("2019-12-31"), day("2020-03-01")), "23P01", "camera_clock_rules_no_overlap"},
+		{"sharing only the first day, which is included",
+			[]clockRule{year2019}, tz200(nil, day("2019-01-01")), "23P01", "camera_clock_rules_no_overlap"},
+		{"two rules without bounds",
+			[]clockRule{tz200(nil, nil)}, tz200(nil, nil), "23P01", "camera_clock_rules_no_overlap"},
+		{"the next period, from the day after",
+			[]clockRule{year2019}, tz200(day("2020-01-01"), day("2020-12-31")), "", ""},
+		{"the period before, to the day before",
+			[]clockRule{year2019}, tz200(nil, day("2018-12-31")), "", ""},
+		{"a one-day rule inside",
+			[]clockRule{year2019}, tz200(day("2019-05-05"), day("2019-05-05")), "23P01", "camera_clock_rules_no_overlap"},
+		{"the same period for another model",
+			[]clockRule{year2019},
+			clockRule{owner: owner, make: "Panasonic", model: "DC-TZ100", offset: 120, starts: day("2019-01-01"), ends: day("2019-12-31")},
+			"", ""},
+		{"the same period for another make",
+			[]clockRule{year2019},
+			clockRule{owner: owner, make: "Leica", model: "DC-TZ200", offset: 120, starts: day("2019-01-01"), ends: day("2019-12-31")},
+			"", ""},
+		{"the same period for another owner",
+			[]clockRule{year2019},
+			clockRule{owner: other, make: "Panasonic", model: "DC-TZ200", offset: 120, starts: day("2019-01-01"), ends: day("2019-12-31")},
+			"", ""},
+		{"an open-ended rule overlaps a bounded one",
+			[]clockRule{year2019}, tz200(nil, nil), "23P01", "camera_clock_rules_no_overlap"},
+		{"a bounded rule overlaps an open-ended one",
+			[]clockRule{tz200(nil, nil)}, tz200(day("2030-01-01"), day("2030-01-31")), "23P01", "camera_clock_rules_no_overlap"},
+		{"no start overlaps any earlier rule",
+			[]clockRule{tz200(day("1990-01-01"), day("1990-01-01"))}, tz200(nil, day("2019-01-01")), "23P01", "camera_clock_rules_no_overlap"},
+		{"no end overlaps any later rule",
+			[]clockRule{tz200(day("2090-01-01"), nil)}, tz200(day("2019-01-01"), nil), "23P01", "camera_clock_rules_no_overlap"},
+
+		{"an untrimmed make", nil,
+			clockRule{owner: owner, make: " Panasonic", model: "DC-TZ200", offset: 120}, "23514", "camera_clock_rules_make_check"},
+		{"an untrimmed model", nil,
+			clockRule{owner: owner, make: "Panasonic", model: "DC-TZ200 ", offset: 120}, "23514", "camera_clock_rules_model_check"},
+		{"an empty make", nil,
+			clockRule{owner: owner, make: "", model: "DC-TZ200", offset: 120}, "23514", "camera_clock_rules_make_check"},
+		{"a model of 201 characters", nil,
+			clockRule{owner: owner, make: "Panasonic", model: strings.Repeat("m", 201), offset: 120}, "23514", "camera_clock_rules_model_check"},
+		{"a model of 200 characters", nil,
+			clockRule{owner: owner, make: "Panasonic", model: strings.Repeat("m", 200), offset: 120}, "", ""},
+		{"an offset that is not a quarter hour", nil, clockRule{owner: owner, make: "Panasonic", model: "DC-TZ200", offset: 7},
+			"23514", "camera_clock_rules_utc_offset_min_check"},
+		{"an offset past +14:00", nil, clockRule{owner: owner, make: "Panasonic", model: "DC-TZ200", offset: 900},
+			"23514", "camera_clock_rules_utc_offset_min_check"},
+		{"an offset past -12:00", nil, clockRule{owner: owner, make: "Panasonic", model: "DC-TZ200", offset: -735},
+			"23514", "camera_clock_rules_utc_offset_min_check"},
+		{"+14:00", nil, clockRule{owner: owner, make: "Panasonic", model: "DC-TZ200", offset: 840}, "", ""},
+		{"-12:00", nil, clockRule{owner: owner, make: "Panasonic", model: "DC-TZ200", offset: -720}, "", ""},
+		{"+05:45", nil, clockRule{owner: owner, make: "Panasonic", model: "DC-TZ200", offset: 345}, "", ""},
+		{"a first day after the last", nil, tz200(day("2019-12-31"), day("2019-01-01")), "23514", "camera_clock_rules_period_check"},
+		{"infinity is not an open bound", nil, tz200(day("2019-01-01"), day("infinity")), "23514", "camera_clock_rules_finite_check"},
+		{"a note of 501 characters", nil,
+			clockRule{owner: owner, make: "Panasonic", model: "DC-TZ200", offset: 120, note: strings.Repeat("n", 501)},
+			"23514", "camera_clock_rules_note_check"},
+		{"an unknown owner", nil,
+			clockRule{owner: "00000000-0000-0000-0000-00000000dead", make: "Panasonic", model: "DC-TZ200", offset: 120},
+			"23503", "camera_clock_rules_owner_id_fkey"},
+	}
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				tx, err := conn.Begin(ctx)
+				require.NoError(t, err)
+				defer func() { _ = tx.Rollback(ctx) }()
+				for _, r := range tc.existing {
+					require.NoError(t, insertClockRule(ctx, tx, r), "existing rule")
+				}
+
+				err = insertClockRule(ctx, tx, tc.rule)
+				if tc.wantCode == "" {
+					assert.NoError(t, err)
+					return
+				}
+				var pgErr *pgconn.PgError
+				require.True(t, errors.As(err, &pgErr), "want PgError, got %v", err)
+				assert.Equal(t, tc.wantCode, pgErr.Code)
+				assert.Equal(t, tc.wantName, pgErr.ConstraintName)
+			})
+		}
+	})
 }

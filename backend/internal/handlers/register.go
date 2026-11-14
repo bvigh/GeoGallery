@@ -288,32 +288,38 @@ const (
 // captureEvidence is media.capture_evidence: how taken_at was derived, with the inputs that lost.
 // Those are computed at ingest and cannot be recovered later. Every key is always present.
 type captureEvidence struct {
-	V                     int      `json:"v"`
-	By                    string   `json:"by"`
-	Src                   string   `json:"src"`
-	Zone                  *string  `json:"zone"`
-	Wall                  *string  `json:"wall"`
-	GPSUTC                *string  `json:"gps_utc"`
-	WallMinusGPSS         *float64 `json:"wall_minus_gps_s"`
-	OffsetTag             *string  `json:"offset_tag"`
-	OffsetIgnored         bool     `json:"offset_ignored"`
-	OffsetUsedMin         *int     `json:"offset_used_min"`
-	CameraZone            string   `json:"camera_zone"`
-	CameraZoneUTCFallback bool     `json:"camera_zone_utc_fallback"`
-	Make                  *string  `json:"make"`
-	Model                 *string  `json:"model"`
-	ExifPartial           bool     `json:"exif_partial"`
-	CreationTime          *string  `json:"creation_time"`
-	FileMtime             *string  `json:"file_mtime"`
-	DurationS             *float64 `json:"duration_s"`
-	Encoder               *string  `json:"encoder"`
-	Codec                 *string  `json:"codec"`
-	Transcoded            bool     `json:"transcoded"`
+	V  int    `json:"v"`
+	By string `json:"by"` // "ingest", or "retime" once server retime has moved taken_at
+	// RetimedFrom is taken_at (RFC 3339, UTC) before server retime moved it; null from ingest.
+	RetimedFrom   *string  `json:"retimed_from"`
+	Src           string   `json:"src"`
+	Zone          *string  `json:"zone"`
+	Wall          *string  `json:"wall"`
+	GPSUTC        *string  `json:"gps_utc"`
+	WallMinusGPSS *float64 `json:"wall_minus_gps_s"`
+	OffsetTag     *string  `json:"offset_tag"`
+	OffsetIgnored bool     `json:"offset_ignored"`
+	OffsetUsedMin *int     `json:"offset_used_min"`
+	// ClockRule is the owner's clock rule that gave the offset, set exactly when Zone is
+	// ingest.ZoneClockRule.
+	ClockRule             *evidenceClockRule `json:"clock_rule"`
+	CameraZone            string             `json:"camera_zone"`
+	CameraZoneUTCFallback bool               `json:"camera_zone_utc_fallback"`
+	Make                  *string            `json:"make"`
+	Model                 *string            `json:"model"`
+	ExifPartial           bool               `json:"exif_partial"`
+	CreationTime          *string            `json:"creation_time"`
+	FileMtime             *string            `json:"file_mtime"`
+	DurationS             *float64           `json:"duration_s"`
+	Encoder               *string            `json:"encoder"`
+	Codec                 *string            `json:"codec"`
+	Transcoded            bool               `json:"transcoded"`
 }
 
 // newCaptureEvidence records how registerMedia derived taken_at. mtime is the caller's fallback
 // time. A wall tag that exists but does not parse records the origin that actually applied, while
-// Wall still shows its text.
+// Wall still shows its text. zone is the one the EXIF was read with; its clock rules are not
+// recorded, only the one that applied (e.ClockRule).
 func newCaptureEvidence(e ingest.ExifData, probe ingest.VideoProbeResult, mtime *time.Time, zone ingest.CameraZone) captureEvidence {
 	ev := captureEvidence{
 		V:                     1,
@@ -345,6 +351,9 @@ func newCaptureEvidence(e ingest.ExifData, probe ingest.VideoProbeResult, mtime 
 		_, seconds := e.TakenAt.Zone()
 		minutes := seconds / 60
 		ev.OffsetUsedMin = &minutes
+		if zoneRule == ingest.ZoneClockRule {
+			ev.ClockRule = newEvidenceClockRule(e.ClockRule)
+		}
 	}
 	return ev
 }
@@ -366,12 +375,13 @@ func captureSource(e ingest.ExifData, probe ingest.VideoProbeResult, mtime *time
 }
 
 // timeDropped records that no taken_at was stored although a source gave one, because JSON could not
-// carry its year (jsonCanCarry). No source applied, so none is named, while the inputs stay: wall,
-// creation_time and file_mtime still show what was refused.
+// carry its year (jsonCanCarry). No source applied, so none is named, nor a zone or a clock rule,
+// while the inputs stay: wall, creation_time and file_mtime still show what was refused.
 func (c captureEvidence) timeDropped() captureEvidence {
 	c.Src = captureSrcNone
 	c.Zone = nil
 	c.OffsetUsedMin = nil
+	c.ClockRule = nil
 	return c
 }
 
