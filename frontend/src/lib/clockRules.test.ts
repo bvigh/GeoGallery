@@ -5,6 +5,7 @@ import {
   CLOCK_OFFSETS,
   formatUtcOffset,
   libraryCameraLabel,
+  ruleCameraName,
   rulePeriod,
   sameCamera,
 } from "@/lib/clockRules";
@@ -43,6 +44,17 @@ describe("cameraName", () => {
     ["NIKON CORPORATION", "NIKON D750", "NIKON CORPORATION NIKON D750"],
   ])("%s + %s", (make, model, want) => {
     expect(cameraName(make, model)).toBe(want);
+  });
+});
+
+describe("ruleCameraName", () => {
+  it.each([
+    ["Panasonic", "DC-TZ200", "Panasonic · DC-TZ200"],
+    ["Canon", "Canon EOS R5", "Canon · Canon EOS R5"],
+    // Which no Canon file matches, so it must not read like the one above.
+    ["Canon", "EOS R5", "Canon · EOS R5"],
+  ])("%s + %s, as stored", (make, model, want) => {
+    expect(ruleCameraName({ make, model })).toBe(want);
   });
 });
 

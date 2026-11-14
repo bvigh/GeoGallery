@@ -41,7 +41,12 @@ const (
 	pgCheckViolation     = "23514"
 )
 
-const clockRuleOverlapMessage = "overlaps another rule for this camera"
+// The plain-text reasons of the two 409s. The Settings dialog tells them apart by the cap's text
+// (CLOCK_RULE_CAP_REASON in frontend/src/lib/clockRules.ts).
+var (
+	clockRuleOverlapMessage = "overlaps another rule for this camera"
+	clockRuleCapMessage     = fmt.Sprintf("at most %d camera clock rules", maxClockRulesPerOwner)
+)
 
 // CameraClockRuleHandler serves the caller's camera clock rules (camera_clock_rules) and the cameras
 // in their own library that a rule can name. A rule describes one user's camera, so every query
@@ -321,7 +326,7 @@ func (h *CameraClockRuleHandler) Create(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if count >= maxClockRulesPerOwner {
-		http.Error(w, fmt.Sprintf("at most %d camera clock rules", maxClockRulesPerOwner), http.StatusConflict)
+		http.Error(w, clockRuleCapMessage, http.StatusConflict)
 		return
 	}
 	rule, err := scanClockRule(tx.QueryRow(ctx, `

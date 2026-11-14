@@ -104,7 +104,7 @@ describe("CameraClockRules", () => {
       render(<CameraClockRules />);
       expect(screen.getByText("Loading clock rules…")).toBeInTheDocument();
       answer([makeRule()]);
-      expect(await screen.findByText("Panasonic DC-TZ200")).toBeInTheDocument();
+      expect(await screen.findByText("Panasonic · DC-TZ200")).toBeInTheDocument();
       expect(screen.queryByText("Loading clock rules…")).not.toBeInTheDocument();
     });
 
@@ -118,17 +118,34 @@ describe("CameraClockRules", () => {
       ]);
       render(<CameraClockRules />);
 
-      const tz = (await screen.findByText("Panasonic DC-TZ200")).closest("li")!;
+      const tz = (await screen.findByText("Panasonic · DC-TZ200")).closest("li")!;
       expect(within(tz).getByText("Clock showed UTC+02:00 · always")).toBeInTheDocument();
       expect(within(tz).getByText("Never switched to winter time")).toBeInTheDocument();
-      expect(within(rowOf("Arashi Vision Insta360 ONE RS")).getByText("Clock showed UTC+01:00 · 2022-06-01 – 2022-09-30")).toBeInTheDocument();
-      // The make is not repeated when the model already starts with it.
-      expect(within(rowOf("Canon EOS R5")).getByText("Clock showed UTC-05:30 · from 2018-07-01")).toBeInTheDocument();
-      expect(within(rowOf("Sony ILCE-7M3")).getByText("Clock showed UTC+00:00 · until 2019-03-31")).toBeInTheDocument();
-      expect(within(rowOf("Sony DSC-RX100")).getByText("Clock showed UTC+05:45 · on 2020-01-01")).toBeInTheDocument();
+      expect(within(rowOf("Arashi Vision · Insta360 ONE RS")).getByText("Clock showed UTC+01:00 · 2022-06-01 – 2022-09-30")).toBeInTheDocument();
+      // Make and model as stored, even when the model starts with the make.
+      expect(within(rowOf("Canon · Canon EOS R5")).getByText("Clock showed UTC-05:30 · from 2018-07-01")).toBeInTheDocument();
+      expect(within(rowOf("Sony · ILCE-7M3")).getByText("Clock showed UTC+00:00 · until 2019-03-31")).toBeInTheDocument();
+      expect(within(rowOf("Sony · DSC-RX100")).getByText("Clock showed UTC+05:45 · on 2020-01-01")).toBeInTheDocument();
 
-      expect(within(tz).getByRole("button", { name: "Edit rule for Panasonic DC-TZ200, always" })).toHaveClass("touch:min-h-11");
-      expect(within(tz).getByRole("button", { name: "Delete rule for Panasonic DC-TZ200, always" })).toHaveClass("touch:min-h-11");
+      expect(within(tz).getByRole("button", { name: "Edit rule for Panasonic · DC-TZ200, always" })).toHaveClass("touch:min-h-11");
+      expect(within(tz).getByRole("button", { name: "Delete rule for Panasonic · DC-TZ200, always" })).toHaveClass("touch:min-h-11");
+    });
+
+    it("tells apart two rules that one merged camera name would show alike", async () => {
+      // A rule matches the EXIF Model exactly: Canon files write "Canon EOS R5", so the first rule
+      // never applies, and the list must not make it look like the second.
+      mockApi.listCameraClockRules.mockResolvedValue([
+        makeRule({ id: "r1", make: "Canon", model: "EOS R5" }),
+        makeRule({ id: "r2", make: "Canon", model: "Canon EOS R5" }),
+      ]);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+      render(<CameraClockRules />);
+      expect(await screen.findByText("Canon · EOS R5")).toBeInTheDocument();
+      expect(screen.getByText("Canon · Canon EOS R5")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Edit rule for Canon · EOS R5, always" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Edit rule for Canon · Canon EOS R5, always" })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Delete rule for Canon · EOS R5, always" }));
+      expect(confirmSpy).toHaveBeenLastCalledWith(expect.stringMatching(/^Delete the clock rule for Canon · EOS R5 \(always\)\?/));
     });
 
     it("says when the rules could not be loaded, and tries again", async () => {
@@ -140,7 +157,7 @@ describe("CameraClockRules", () => {
 
       mockApi.listCameraClockRules.mockResolvedValue([makeRule()]);
       await userEvent.click(screen.getByRole("button", { name: "Try again" }));
-      expect(await screen.findByText("Panasonic DC-TZ200")).toBeInTheDocument();
+      expect(await screen.findByText("Panasonic · DC-TZ200")).toBeInTheDocument();
       expect(screen.queryByText("Could not load your clock rules.")).not.toBeInTheDocument();
     });
 
@@ -151,7 +168,7 @@ describe("CameraClockRules", () => {
       // A delete starts the second load while the first is still out.
       vi.spyOn(window, "confirm").mockReturnValue(true);
       answers[0]([makeRule({ id: "r1" }), makeRule({ id: "r2", model: "DC-TZ90" })]);
-      await userEvent.click(await screen.findByRole("button", { name: "Delete rule for Panasonic DC-TZ90, always" }));
+      await userEvent.click(await screen.findByRole("button", { name: "Delete rule for Panasonic · DC-TZ90, always" }));
       await waitFor(() => expect(answers).toHaveLength(2));
       // Then a third, from a save, answers first; the older second load must not undo it.
       const dialog = await openAddDialog();
@@ -161,10 +178,10 @@ describe("CameraClockRules", () => {
       await userEvent.click(within(dialog).getByRole("button", { name: "Add rule" }));
       await waitFor(() => expect(answers).toHaveLength(3));
       answers[2]([makeRule({ id: "r1" }), makeRule({ id: "r9", model: "DC-TZ99" })]);
-      expect(await screen.findByText("Panasonic DC-TZ99")).toBeInTheDocument();
+      expect(await screen.findByText("Panasonic · DC-TZ99")).toBeInTheDocument();
       answers[1]([makeRule({ id: "r1" })]);
       await new Promise((r) => setTimeout(r, 0));
-      expect(screen.getByText("Panasonic DC-TZ99")).toBeInTheDocument();
+      expect(screen.getByText("Panasonic · DC-TZ99")).toBeInTheDocument();
     });
 
     it("stops adding at 100 rules", async () => {
@@ -290,7 +307,9 @@ describe("CameraClockRules", () => {
 
     it("says that the camera already has a rule for that period on a 409", async () => {
       vi.spyOn(console, "error").mockImplementation(() => {});
-      mockApi.createCameraClockRule.mockRejectedValue(new ApiError("POST /camera-clock-rules failed: 409", 409));
+      mockApi.createCameraClockRule.mockRejectedValue(
+        new ApiError("POST /camera-clock-rules failed: 409", 409, "overlaps another rule for this camera")
+      );
       render(<CameraClockRules />);
       const dialog = await openAddDialog();
       await camerasLoaded(dialog);
@@ -301,6 +320,29 @@ describe("CameraClockRules", () => {
       // The dialog stays open with what was entered, ready to try again.
       expect(within(dialog).getByLabelText("Clock showed")).toHaveValue("120");
       expect(within(dialog).getByRole("button", { name: "Add rule" })).toBeEnabled();
+    });
+
+    it("says the rule cap was reached on a 409 for it, even when the list on screen is behind", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const rules = (n: number) => Array.from({ length: n }, (_, i) => makeRule({ id: `r${i}`, model: `Model ${i}` }));
+      mockApi.listCameraClockRules.mockResolvedValue(rules(99));
+      mockApi.createCameraClockRule.mockRejectedValue(
+        new ApiError("POST /camera-clock-rules failed: 409", 409, "at most 100 camera clock rules")
+      );
+      render(<CameraClockRules />);
+      await screen.findByText("Panasonic · Model 98");
+      const dialog = await openAddDialog();
+      await camerasLoaded(dialog);
+      await userEvent.selectOptions(within(dialog).getByLabelText("Camera"), TZ200_LABEL);
+      await userEvent.selectOptions(within(dialog).getByLabelText("Clock showed"), "UTC+02:00");
+      // A rule added in another tab or by a script is the 100th.
+      mockApi.listCameraClockRules.mockResolvedValue(rules(100));
+      await userEvent.click(within(dialog).getByRole("button", { name: "Add rule" }));
+      expect(await within(dialog).findByText("You already have 100 rules, the most allowed. Delete one first.")).toBeInTheDocument();
+      expect(within(dialog).queryByText("This camera already has a rule for part of that period.")).not.toBeInTheDocument();
+      // The list catches up, and adding stops.
+      expect(await screen.findByText("You have 100 rules, the most allowed. Delete one to add another.")).toBeInTheDocument();
+      expect(mockApi.listCameraClockRules).toHaveBeenCalledTimes(2);
     });
 
     it("shows the server's reason for a 400", async () => {
@@ -352,7 +394,7 @@ describe("CameraClockRules", () => {
       const rule = makeRule({ starts_on: "2018-07-01", note: "Summer time all year" });
       mockApi.listCameraClockRules.mockResolvedValue([rule]);
       render(<CameraClockRules />);
-      await userEvent.click(await screen.findByRole("button", { name: "Edit rule for Panasonic DC-TZ200, from 2018-07-01" }));
+      await userEvent.click(await screen.findByRole("button", { name: "Edit rule for Panasonic · DC-TZ200, from 2018-07-01" }));
       const dialog = await screen.findByRole("dialog");
       expect(within(dialog).getByRole("heading", { name: "Edit clock rule" })).toBeInTheDocument();
       await camerasLoaded(dialog);
@@ -385,7 +427,7 @@ describe("CameraClockRules", () => {
     it("keeps a camera the library does not list as typed", async () => {
       mockApi.listCameraClockRules.mockResolvedValue([makeRule({ make: "Arashi Vision", model: "Insta360 ONE RS", utc_offset_min: 60 })]);
       render(<CameraClockRules />);
-      await userEvent.click(await screen.findByRole("button", { name: "Edit rule for Arashi Vision Insta360 ONE RS, always" }));
+      await userEvent.click(await screen.findByRole("button", { name: "Edit rule for Arashi Vision · Insta360 ONE RS, always" }));
       const dialog = await screen.findByRole("dialog");
       await camerasLoaded(dialog);
       expect(within(dialog).getByLabelText("Camera")).toHaveValue("other");
@@ -400,7 +442,7 @@ describe("CameraClockRules", () => {
       mockApi.listCameraClockRules.mockResolvedValue([makeRule()]);
       mockApi.updateCameraClockRule.mockRejectedValue(new ApiError("PUT /camera-clock-rules/r1 failed: 409", 409));
       render(<CameraClockRules />);
-      await userEvent.click(await screen.findByRole("button", { name: /^Edit rule for Panasonic DC-TZ200/ }));
+      await userEvent.click(await screen.findByRole("button", { name: /^Edit rule for Panasonic · DC-TZ200/ }));
       const dialog = await screen.findByRole("dialog");
       await camerasLoaded(dialog);
       await userEvent.click(within(dialog).getByRole("button", { name: "Save changes" }));
@@ -412,7 +454,7 @@ describe("CameraClockRules", () => {
       mockApi.listCameraClockRules.mockResolvedValue([makeRule()]);
       mockApi.updateCameraClockRule.mockRejectedValue(new ApiError("PUT /camera-clock-rules/r1 failed: 404", 404));
       render(<CameraClockRules />);
-      await userEvent.click(await screen.findByRole("button", { name: /^Edit rule for Panasonic DC-TZ200/ }));
+      await userEvent.click(await screen.findByRole("button", { name: /^Edit rule for Panasonic · DC-TZ200/ }));
       const dialog = await screen.findByRole("dialog");
       await camerasLoaded(dialog);
       mockApi.listCameraClockRules.mockResolvedValue([]);
@@ -427,11 +469,11 @@ describe("CameraClockRules", () => {
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
       mockApi.listCameraClockRules.mockResolvedValue([makeRule()]);
       render(<CameraClockRules />);
-      const button = await screen.findByRole("button", { name: "Delete rule for Panasonic DC-TZ200, always" });
+      const button = await screen.findByRole("button", { name: "Delete rule for Panasonic · DC-TZ200, always" });
 
       await userEvent.click(button);
       expect(confirmSpy).toHaveBeenLastCalledWith(
-        "Delete the clock rule for Panasonic DC-TZ200 (always)? New uploads from this camera will be read without it. Items already in your library keep their times."
+        "Delete the clock rule for Panasonic · DC-TZ200 (always)? New uploads from this camera will be read without it. Items already in your library keep their times."
       );
       expect(mockApi.deleteCameraClockRule).not.toHaveBeenCalled();
 

@@ -9,11 +9,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  cameraName,
   CLOCK_OFFSETS,
+  CLOCK_RULE_CAP_REASON,
   formatUtcOffset,
   libraryCameraLabel,
   MAX_CLOCK_RULES,
+  ruleCameraName,
   rulePeriod,
   sameCamera,
 } from "@/lib/clockRules";
@@ -36,11 +37,13 @@ const OTHER_CAMERA = "other";
 
 type CamerasState = { status: "loading" } | { status: "ready"; cameras: LibraryCamera[] } | { status: "failed" };
 
-function saveError(err: unknown, creatingAtCap: boolean): string {
+// The two 409s are told apart by the server's reason, not by the list on screen, which can be
+// behind: rules added in another tab or by a script count towards the cap too.
+function saveError(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.status === 400) return err.reason ?? "The server refused this rule.";
     if (err.status === 409) {
-      return creatingAtCap
+      return err.reason === CLOCK_RULE_CAP_REASON
         ? `You already have ${MAX_CLOCK_RULES} rules, the most allowed. Delete one first.`
         : OVERLAP_MESSAGE;
     }
@@ -51,13 +54,12 @@ function saveError(err: unknown, creatingAtCap: boolean): string {
 
 interface RuleDialogProps {
   rule: CameraClockRule | null; // null: a new rule
-  atCap: boolean; // the caller already has MAX_CLOCK_RULES rules
   onClose: () => void;
   onSaved: () => void;
 }
 
 // Mounted only while open, so every opening starts from the rule (or from nothing).
-function ClockRuleDialog({ rule, atCap, onClose, onSaved }: RuleDialogProps) {
+function ClockRuleDialog({ rule, onClose, onSaved }: RuleDialogProps) {
   const [cameras, setCameras] = useState<CamerasState>({ status: "loading" });
   // null until the user chooses: the default then follows the cameras once they have loaded.
   const [pick, setPick] = useState<string | null>(null);
@@ -135,10 +137,11 @@ function ClockRuleDialog({ rule, atCap, onClose, onSaved }: RuleDialogProps) {
       if (mounted.current) onClose();
     } catch (err) {
       console.error(err);
-      // A rule deleted elsewhere is gone from the list too.
-      if (err instanceof ApiError && err.status === 404) onSaved();
+      // A rule deleted elsewhere is gone from the list too, and a conflict can come from rules
+      // added elsewhere: the list catches up (at the cap, Add rule turns off).
+      if (err instanceof ApiError && (err.status === 404 || err.status === 409)) onSaved();
       if (!mounted.current) return;
-      setError(saveError(err, rule === null && atCap));
+      setError(saveError(err));
       setSubmitting(false);
     }
   };
@@ -335,7 +338,7 @@ export function CameraClockRules() {
   const atCap = (rules?.length ?? 0) >= MAX_CLOCK_RULES;
 
   const remove = async (rule: CameraClockRule) => {
-    const name = cameraName(rule.make, rule.model);
+    const name = ruleCameraName(rule);
     if (
       !confirm(
         `Delete the clock rule for ${name} (${rulePeriod(rule)})? New uploads from this camera will be read without it. Items already in your library keep their times.`
@@ -395,7 +398,7 @@ export function CameraClockRules() {
       {rules && rules.length > 0 && (
         <ul className="divide-y border-y">
           {rules.map((rule) => {
-            const name = cameraName(rule.make, rule.model);
+            const name = ruleCameraName(rule);
             const period = rulePeriod(rule);
             return (
               <li key={rule.id} className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1 py-2">
@@ -442,7 +445,6 @@ export function CameraClockRules() {
         <ClockRuleDialog
           key={editing?.id ?? "new"}
           rule={editing}
-          atCap={atCap}
           onClose={() => setEditing(undefined)}
           onSaved={() => {
             setError(null);

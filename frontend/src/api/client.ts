@@ -21,7 +21,7 @@ export type AlbumMediaSelection = { mediaIds: string[] } | { tripId: string };
 const BASE = "/api";
 
 export class ApiError extends Error {
-  // reason: the plain-text body of a 400 from a route whose reasons are written for the user, else null.
+  // reason: the plain-text body of a 400 or 409 from a route whose reasons are written for the user, else null.
   constructor(message: string, public status: number, public reason: string | null = null) {
     super(message);
     this.name = "ApiError";
@@ -260,12 +260,13 @@ function listCameraClockRules(): Promise<CameraClockRule[]> {
   return getList<CameraClockRule>("/camera-clock-rules");
 }
 
-// A refused rule says why in a short plain-text body, which the dialog shows as it is.
+// A refused rule says why in a short plain-text body: the dialog shows a 400's as it is, and tells
+// the two 409s (an overlap, the rule cap) apart by theirs.
 async function sendClockRule(method: "POST" | "PUT", path: string, input: CameraClockRuleInput): Promise<CameraClockRule> {
   const res = await request(path, jsonInit(method, input));
   if (!res.ok) {
     let reason: string | null = null;
-    if (res.status === 400) {
+    if (res.status === 400 || res.status === 409) {
       try {
         reason = (await res.text()).trim() || null;
       } catch {

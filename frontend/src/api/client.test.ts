@@ -469,7 +469,14 @@ describe("api client", () => {
     });
 
     it.each([
-      { name: "an overlap", call: () => api.createCameraClockRule(input), status: 409, message: "POST /camera-clock-rules failed: 409" },
+      { name: "createCameraClockRule()", call: () => api.createCameraClockRule(input), reason: "at most 100 camera clock rules" },
+      { name: "updateCameraClockRule()", call: () => api.updateCameraClockRule("r1", input), reason: "overlaps another rule for this camera" },
+    ])("$name carries the reason of a 409, which tells an overlap from the cap", async ({ call, reason }) => {
+      fetchMock.mockResolvedValue({ ...response(409), text: async () => reason + "\n" });
+      await expect(call()).rejects.toMatchObject({ status: 409, reason });
+    });
+
+    it.each([
       { name: "a foreign rule", call: () => api.updateCameraClockRule("r9", input), status: 404, message: "PUT /camera-clock-rules/r9 failed: 404" },
       { name: "a delete of a foreign rule", call: () => api.deleteCameraClockRule("r9"), status: 404, message: "DELETE /camera-clock-rules/r9 failed: 404" },
     ])("rejects $name with the status and no reason", async ({ call, status, message }) => {

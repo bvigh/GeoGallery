@@ -1,11 +1,15 @@
 // How camera clock rules and library cameras are named, on the Settings page and in the evidence
-// view alike, so a rule reads the same in both places.
+// view alike.
 
 import { formatOffset } from "@/lib/time";
 import type { CameraClockRuleInput, LibraryCamera } from "@/types";
 
 // The backend refuses a 101st rule.
 export const MAX_CLOCK_RULES = 100;
+
+// The plain-text reason of the backend's 409 for a rule past MAX_CLOCK_RULES (clockRuleCapMessage in
+// camera_clock_rules.go). Its other 409, an overlap, has another reason.
+export const CLOCK_RULE_CAP_REASON = `at most ${MAX_CLOCK_RULES} camera clock rules`;
 
 // Every offset a rule can give: UTC-12:00 to UTC+14:00 in 15-minute steps.
 export const CLOCK_OFFSETS: number[] = Array.from({ length: (840 + 720) / 15 + 1 }, (_, i) => -720 + i * 15);
@@ -15,9 +19,16 @@ export function formatUtcOffset(minutes: number): string {
 }
 
 // Make and model as one name. Many cameras repeat the make in the model ("Canon EOS R5"), and
-// that is not written twice.
+// that is not written twice. For a camera seen in the library, and for a rule that applied to a file.
 export function cameraName(make: string, model: string): string {
   return model.toLowerCase().startsWith(make.toLowerCase()) ? model : `${make} ${model}`;
+}
+
+// A rule's camera in the rule list: make and model as stored, apart. A rule matches the file's EXIF
+// Model exactly, so a typed "Canon" + "EOS R5", which no Canon file matches, must not read like
+// "Canon" + "Canon EOS R5", as cameraName would show both.
+export function ruleCameraName({ make, model }: Pick<CameraClockRuleInput, "make" | "model">): string {
+  return `${make} · ${model}`;
 }
 
 function fold(value: string): string {
