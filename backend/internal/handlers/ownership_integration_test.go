@@ -428,6 +428,32 @@ func TestOwnership_TripDetectLeavesOtherOwnersTrips(t *testing.T) {
 	assert.Equal(t, f.userA, tripOwner)
 }
 
+// A's named trip takes none of B's media on its days, and B's own detection groups them into B's
+// trips.
+func TestOwnership_NamedTripTakesOnlyItsOwnersMedia(t *testing.T) {
+	f := newOwnershipFixture(t)
+	ctx := context.Background()
+	holiday := insertTrip(t, f.pool, f.userA, "A's May", true, "2024-05-01", "2024-05-31")
+	bOnADays := insertMedia(t, f.pool, mediaFixture{owner: f.userB, filename: "b2.jpg", takenAt: "2024-05-10 12:00:00"})
+
+	require.NoError(t, RunTripDetect(ctx, f.pool, f.userA, 24))
+	assert.Nil(t, snapshotMedia(t, f.pool, bOnADays).tripID, "A's detection leaves B's media alone")
+	assert.Equal(t, holiday, *snapshotMedia(t, f.pool, f.mediaAUnlocated).tripID, "A's own media on those days joins it")
+
+	require.NoError(t, RunTripDetect(ctx, f.pool, f.userB, 24))
+	bTrip := snapshotMedia(t, f.pool, bOnADays).tripID
+	require.NotNil(t, bTrip)
+	var bTripOwner string
+	require.NoError(t, f.pool.QueryRow(ctx, `SELECT owner_id::text FROM trips WHERE id = $1`, *bTrip).Scan(&bTripOwner))
+	assert.Equal(t, f.userB, bTripOwner, "B's detection puts B's media in a trip of B's")
+
+	var foreignInATrips int
+	require.NoError(t, f.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM media m JOIN trips t ON t.id = m.trip_id
+		WHERE t.owner_id = $1 AND m.owner_id <> $1`, f.userA).Scan(&foreignInATrips))
+	assert.Zero(t, foreignInATrips, "no A trip contains B's media")
+}
+
 func uploadAs(t *testing.T, h http.Handler, userID, filename string, content []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer

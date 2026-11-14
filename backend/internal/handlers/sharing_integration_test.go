@@ -493,6 +493,18 @@ func TestSharing_TripDetectIgnoresSharedMedia(t *testing.T) {
 	assert.Equal(t, f.tripA, *snapshotMedia(t, f.pool, f.mediaA).tripID, "A's trip assignment is untouched")
 }
 
+// A named trip of B's never takes A's media shared with B, even on its days.
+func TestSharing_NamedTripIgnoresSharedMedia(t *testing.T) {
+	f := newSharingFixture(t)
+	ctx := context.Background()
+	bMay := insertTrip(t, f.pool, f.userB, "B's May", true, "2024-05-01", "2024-05-31")
+
+	require.NoError(t, RunTripDetect(ctx, f.pool, f.userB, 24))
+
+	assert.Nil(t, snapshotMedia(t, f.pool, f.mediaAUnlocated).tripID, "A's shared, unassigned media stays out of B's trip")
+	assert.Equal(t, bMay, *snapshotMedia(t, f.pool, f.mediaB).tripID, "B's own media on those days joins it")
+}
+
 // RunRetime reads, moves and re-matches the owner's own rows only. Media another user shares with
 // the owner through an album are never read with the owner's rules, never listed or counted, and
 // their times, evidence and track points stay as they are, even for a camera the owner has a clock
