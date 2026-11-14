@@ -63,7 +63,7 @@ Mostly frontend. Small enough to ship as two or three bundled PRs.
 
 360° is the owner's decision (#27). Ingest still makes a first guess, and #28 makes that guess better for new files, but a manual choice always wins.
 
-Data repairs on the existing deployments are operator work, not issues: the far dashcam rows, the esoko week rollover, the Insta360 photos and videos, and checking Hetzner. They are tracked in local notes kept out of this repository, because they describe personal location history.
+Data repairs on the existing deployments are operator work, not issues: the far dashcam rows, the Insta360 photos and videos, and checking Hetzner. The esoko week rollover is repaired, by correcting the two source logs and importing them again. They are tracked in local notes kept out of this repository, because they describe personal location history.
 
 ## M3: Browsing and organisation
 
