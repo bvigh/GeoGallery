@@ -911,7 +911,7 @@ The label says: typical distance between this format's points and photos with th
 |---|---|---|---|
 | `pair_impossible` | high | The Step 1 warning, over all estimates, grouped by format pair. | 8 pairs over 150 km/h and over 1 km. |
 | `pair_far` | low | The Step 1 warning, grouped the same way. | 39 further pairs over 1 km. |
-| `future_track_points` | high | `recorded_at > now() + interval '1 day'`, grouped by file. | 27,558 points. |
+| `future_track_points` | high | `recorded_at > now() + interval '1 day'`, grouped by file. | 27,558 points in two logs from a receiver that kept the wrong GPS week (1,024 weeks ahead). 0 since those logs were corrected and imported again. |
 | `taken_after_upload` | high | `taken_at > created_at`. | 6 items, all more than a year ahead, none located. |
 | `orphan_points` | low | An `exif` or `manual` point with no own item at that instant, with the count of estimates using it. | 34 points (32 `exif`, 2 `manual`), used by 6 estimates. |
 | `stale_estimates` | high | Own estimates in state `stale` or `no_support`. | 0 today; expected after track cleanups. |
@@ -1389,7 +1389,7 @@ Some of the rejected views need defining, so that the reopen triggers mean somet
 
 - `parseISO8601` reads a time with no offset as UTC (#23).
 - NMEA checksums are not verified and only RMC is read, so a corrupted sentence with a plausible value is stored.
-- Far-future points are stored, and the duplicate check then skips a corrected re-upload (#23). An item near such a log shows only that the nearest point is hours away, with no hint that a log is misdated.
+- Far-future points are stored (#23). Uploading the same file again stores the same times. Uploading a corrected copy adds the corrected points beside the misdated ones, which stay until they are deleted by hand. An item near such a log shows only that the nearest point is hours away, with no hint that a log is misdated.
 - `Activity` is set only by the GeoGallery format, so `activity` is empty on every row.
 - Timeline's points and KML's are not all measurements: a visit is one place at the stay's midpoint, at a position snapped to a venue that can sit far from the device, and a LineString's times are spread evenly.
 
