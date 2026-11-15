@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { AlbumMenu } from "@/components/albums/AlbumMenu";
 import { EditLocationModal } from "@/components/EditLocationModal";
+import { GoToDate, PositionField } from "@/components/GalleryJump";
 import { EvidenceView } from "@/components/evidence/EvidenceView";
 import { EditViewModal } from "@/components/viewer/EditViewModal";
 import { MiniMapOverlay, type MiniMapSize } from "@/components/map/MiniMapOverlay";
@@ -480,8 +481,10 @@ export function MediaGalleryOverlay({
   // the bottom row beside the position label.
   const mapLarge = hasMap && mapSize === "large";
   const isVideo = currentItem?.media_type === "video" || currentItem?.media_type === "video_360";
+  // The zone of the times shown, and of the days "Go to date" takes.
+  const timeZone = browserTimeZone();
   const takenAt = currentItem?.taken_at
-    ? formatInstant(currentItem.taken_at, browserTimeZone(), { seconds: false })
+    ? formatInstant(currentItem.taken_at, timeZone, { seconds: false })
     : null;
   // Only while its item is current; the effect below forgets an editor whose item went away.
   const editorOpen = editing !== null && editing.id === currentItem?.id;
@@ -593,10 +596,8 @@ export function MediaGalleryOverlay({
     );
   }
 
-  const positionLabel =
-    "min-w-0 rounded-xl bg-black/50 px-3 py-1 text-sm text-white sm:flex sm:items-baseline sm:gap-2 sm:rounded-full";
-  // Spans: an own item's label is a button.
-  const positionBody = currentItem && (
+  // The item's date and file name. Spans: an own item's are a button.
+  const itemBody = currentItem && (
     <>
       {takenAt && (
         <span className="block break-words text-white/60 sm:order-last sm:shrink-0 sm:truncate">
@@ -605,16 +606,17 @@ export function MediaGalleryOverlay({
         </span>
       )}
       <span className="flex min-w-0 items-baseline gap-2 sm:contents">
-        <span className="shrink-0 tabular-nums">
-          {currentIndex + 1} / {items.length}
-        </span>
         {currentItem.filename && (
-          <span className="min-w-0 truncate text-white/80">· {currentItem.filename}</span>
+          <span className="min-w-0 truncate text-white/80">
+            <span className="hidden sm:inline">· </span>
+            {currentItem.filename}
+          </span>
         )}
         {isOwn && <Info className="h-3.5 w-3.5 shrink-0 self-center" aria-hidden="true" />}
       </span>
     </>
   );
+  const itemBodyClass = "min-w-0 sm:flex sm:items-baseline sm:gap-2";
 
   return (
     <div className="fixed inset-0 z-[1000] overflow-hidden bg-black">
@@ -778,23 +780,34 @@ export function MediaGalleryOverlay({
             >
               {mapLarge && <NavButton direction="prev" placement="row" disabled={!hasPrev} onClick={goPrev} />}
 
-              {/* Position label. On a portrait phone, beside the map: the date, which wraps so that
-                  its zone name at the end is never cut off, then the position and the truncated
-                  file name. */}
-              {isOwn ? (
-                // The toolbar has no room for another button on a phone, and the gallery is the
-                // only way to an item without a location.
-                <button
-                  type="button"
-                  className={cn(positionLabel, "pointer-events-auto text-left hover:bg-black/70 touch:min-h-11")}
-                  onClick={() => setEvidenceOpen(true)}
-                  aria-label={`Why here? ${currentItem.filename}`}
-                >
-                  {positionBody}
-                </button>
-              ) : (
-                <div className={positionLabel}>{positionBody}</div>
-              )}
+              {/* Position label: the position field and the date jump, then the item's date and
+                  file name. On a portrait phone, beside the map, they stack: the jump controls, the
+                  date, which wraps so that its zone name at the end is never cut off, then the
+                  truncated file name. From sm one line: n / N, the file name, the date. */}
+              <div className="pointer-events-auto flex min-w-0 flex-col gap-0.5 rounded-xl bg-black/50 px-2 py-1 text-sm text-white sm:flex-row sm:items-center sm:gap-2 sm:rounded-full sm:px-3">
+                {/* Wraps the calendar onto a line of its own on the narrowest phones. */}
+                <div className="flex shrink-0 flex-wrap items-center gap-1">
+                  <PositionField index={currentIndex} count={items.length} onJump={goTo} />
+                  <GoToDate items={items} index={currentIndex} timeZone={timeZone} onJump={goTo} />
+                </div>
+                {isOwn ? (
+                  // The toolbar has no room for another button on a phone, and the gallery is the
+                  // only way to an item without a location.
+                  <button
+                    type="button"
+                    className={cn(
+                      itemBodyClass,
+                      "-mx-1 rounded-lg px-1 text-left hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 touch:min-h-11",
+                    )}
+                    onClick={() => setEvidenceOpen(true)}
+                    aria-label={`Why here? ${currentItem.filename}`}
+                  >
+                    {itemBody}
+                  </button>
+                ) : (
+                  <div className={itemBodyClass}>{itemBody}</div>
+                )}
+              </div>
 
               {mapLarge && <NavButton direction="next" placement="row" disabled={!hasNext} onClick={goNext} />}
             </div>
