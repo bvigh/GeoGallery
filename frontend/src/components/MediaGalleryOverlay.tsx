@@ -156,21 +156,6 @@ function NavButton({
 
 type MediaParams = Record<string, string | string[]>;
 
-async function fetchAllMedia(params: MediaParams): Promise<MediaItem[]> {
-  const all: MediaItem[] = [];
-  let offset = 0;
-  while (true) {
-    const page = await api.get<MediaItem[]>("/media", {
-      ...params,
-      offset: String(offset),
-    });
-    all.push(...(page ?? []));
-    if ((page ?? []).length < 500) break;
-    offset += 500;
-  }
-  return all;
-}
-
 function sortByTakenAt(items: MediaItem[]): MediaItem[] {
   return [...items].sort((a, b) => {
     if (!a.taken_at && !b.taken_at) return 0;
@@ -264,7 +249,8 @@ export function MediaGalleryOverlay({
     let cancelled = false;
     setLoading(true);
     dropped.current = false;
-    fetchAllMedia(paramsRef.current)
+    api
+      .listMedia(paramsRef.current)
       .then((data) => {
         if (cancelled) return;
         const sorted = sortByTakenAt(data);
@@ -386,7 +372,8 @@ export function MediaGalleryOverlay({
 
   // Re-fetch all media so GPS-matched neighbours get their updated coordinates
   function refreshItems() {
-    fetchAllMedia(paramsRef.current)
+    api
+      .listMedia(paramsRef.current)
       .then((data) => {
         const sorted = sortByTakenAt(data);
         setItems((prev) =>

@@ -3,13 +3,14 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -179,9 +180,15 @@ func TestList_NoParams_ReturnsAll(t *testing.T) {
 	h.List(w, withTestUser(httptest.NewRequest("GET", "/api/media", nil)))
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Regexp(t, `FROM media m JOIN users u ON u\.id = m\.owner_id\s+WHERE `+
-		regexp.QuoteMeta(readableMediaCond("m", 1))+`\s+ORDER BY`, capturedSQL, "read access is the only condition")
-	assert.Equal(t, []any{testOwnerID, defaultListLimit, 0}, capturedArgs, "owner, limit, offset")
+	sql := strings.Join(strings.Fields(capturedSQL), " ")
+	from := strings.Join(strings.Fields("FROM media m JOIN users u ON u.id = m.owner_id WHERE "+readableMediaCond("m", 1)), " ")
+	assert.Equal(t, 2, strings.Count(sql, from+" AND "), "read access starts both parts")
+	assert.Contains(t, sql, from+" AND m.taken_at IS NOT NULL ORDER BY m.taken_at DESC, m.id LIMIT $2)",
+		"dated items: read access is the only filter")
+	assert.Contains(t, sql, from+" AND m.taken_at IS NULL ORDER BY m.id LIMIT $2)", "then the undated ones")
+	assert.Regexp(t, `\) page ORDER BY page\.taken_at DESC NULLS LAST, page\.id LIMIT \$2$`, sql)
+	assert.Equal(t, []any{testOwnerID, defaultListLimit + 1}, capturedArgs, "owner, and one row more than a page")
+	assert.Empty(t, w.Header().Get(nextCursorHeader), "no rows: no next page")
 }
 
 func TestList_OwnerFieldsAndTripIDOnlyForOwnRows(t *testing.T) {
@@ -333,23 +340,265 @@ func TestList_MediaType_FilteredInSQL(t *testing.T) {
 	assert.Equal(t, []string{"photo", "video"}, capturedArgs[1])
 }
 
-func TestList_Offset_PassedThrough(t *testing.T) {
-	var capturedSQL string
-	var capturedArgs []any
+// A client paging with offset would get the first page forever if offset were ignored.
+func TestList_Offset_Returns400(t *testing.T) {
+	for _, query := range []string{"offset=500", "offset=0", "offset=", "limit=5000&offset=5000"} {
+		t.Run(query, func(t *testing.T) {
+			db := &mockDB{queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+				t.Fatal("no query with an offset")
+				return nil, nil
+			}}
 
-	db := &mockDB{queryFn: func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
-		capturedSQL = sql
+			h := &MediaHandler{db: db, storage: &mockStorage{}}
+			w := httptest.NewRecorder()
+			h.List(w, listRequest(query))
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Equal(t, "offset is not supported: pass the X-Next-Cursor header of the previous page as cursor\n", w.Body.String())
+		})
+	}
+}
+
+func TestList_Cursor_BoundAfterTheFilters(t *testing.T) {
+	takenAt := time.Date(2024, 5, 2, 12, 0, 0, 123456000, time.UTC)
+	const id = "22222222-2222-4222-8222-222222222222"
+	dated := mediaCursor{takenAt: &takenAt, id: id}.String()
+	undated := mediaCursor{id: id}.String()
+
+	tests := []struct {
+		name     string
+		query    string
+		wantArgs []any
+		want     []string // in the SQL, whitespace collapsed
+		notWant  []string
+	}{
+		{"dated", "cursor=" + dated,
+			[]any{testOwnerID, defaultListLimit + 1, takenAt, id},
+			[]string{
+				"AND m.taken_at <= $3 AND (m.taken_at < $3 OR m.id > $4) ORDER BY m.taken_at DESC, m.id LIMIT $2)",
+				"AND m.taken_at IS NULL ORDER BY m.id LIMIT $2)", // every undated item follows a dated one
+			},
+			[]string{"m.taken_at IS NOT NULL", "m.taken_at IS NULL AND m.id"}},
+		{"undated", "cursor=" + undated,
+			[]any{testOwnerID, defaultListLimit + 1, id},
+			[]string{"AND m.taken_at IS NULL AND m.id > $3 ORDER BY m.id LIMIT $2)"},
+			[]string{"m.taken_at IS NOT NULL", "m.taken_at <=", "UNION ALL"}},
+		{"after the filters and the limit", "from_date=2024-01-01&media_type=photo&limit=50&cursor=" + dated,
+			[]any{testOwnerID, "2024-01-01", []string{"photo"}, 51, takenAt, id},
+			[]string{"m.taken_at <= $5 AND (m.taken_at < $5 OR m.id > $6) ORDER BY m.taken_at DESC, m.id LIMIT $4)"},
+			nil},
+		{"an empty cursor is no cursor", "cursor=",
+			[]any{testOwnerID, defaultListLimit + 1},
+			[]string{"m.taken_at IS NOT NULL", "m.taken_at IS NULL ORDER BY m.id LIMIT $2)"},
+			[]string{"m.taken_at <="}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedSQL string
+			var capturedArgs []any
+			db := &mockDB{queryFn: func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+				capturedSQL = sql
+				capturedArgs = args
+				return emptyRows(), nil
+			}}
+
+			h := &MediaHandler{db: db, storage: &mockStorage{}}
+			w := httptest.NewRecorder()
+			h.List(w, listRequest(tt.query))
+
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			require.Len(t, capturedArgs, len(tt.wantArgs))
+			for i, want := range tt.wantArgs {
+				if wantTime, ok := want.(time.Time); ok {
+					got, ok := capturedArgs[i].(time.Time)
+					require.True(t, ok, "arg %d is a time", i+1)
+					assert.True(t, wantTime.Equal(got), "arg %d: the cursor's instant to the microsecond, got %v", i+1, got)
+					continue
+				}
+				assert.Equal(t, want, capturedArgs[i], "arg %d", i+1)
+			}
+			sql := strings.Join(strings.Fields(capturedSQL), " ")
+			for _, s := range tt.want {
+				assert.Contains(t, sql, s)
+			}
+			for _, s := range tt.notWant {
+				assert.NotContains(t, sql, s)
+			}
+		})
+	}
+}
+
+// The cursor's ID is bound as auth.CanonicalUUID spells it, as filter IDs are: Postgres only takes
+// a dash as a separator.
+func TestList_Cursor_BindsCanonicalID(t *testing.T) {
+	raw := "22222222x2222x4222x8222x222222222222"
+	cursor := base64.RawURLEncoding.EncodeToString([]byte(" " + raw))
+	var capturedArgs []any
+	db := &mockDB{queryFn: func(_ context.Context, _ string, args ...any) (pgx.Rows, error) {
 		capturedArgs = args
 		return emptyRows(), nil
 	}}
 
 	h := &MediaHandler{db: db, storage: &mockStorage{}}
 	w := httptest.NewRecorder()
-	h.List(w, listRequest("offset=500"))
+	h.List(w, listRequest("cursor="+cursor))
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, []any{testOwnerID, defaultListLimit + 1, "22222222-2222-4222-8222-222222222222"}, capturedArgs)
+}
+
+func TestList_InvalidCursor_Returns400(t *testing.T) {
+	enc := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+	const id = "22222222-2222-4222-8222-222222222222"
+	tests := []struct{ name, cursor string }{
+		{"not base64url", "not a cursor!"},
+		{"padded", base64.URLEncoding.EncodeToString([]byte(" " + id))},
+		{"no separator", enc(id)},
+		{"not an ID", enc("2024-05-02T12:00:00Z 42")},
+		{"no ID", enc("2024-05-02T12:00:00Z ")},
+		{"not a time", enc("yesterday " + id)},
+		{"no zone", enc("2024-05-02T12:00:00 " + id)},
+		{"a year RFC 3339 cannot hold", enc("10000-01-01T00:00:00Z " + id)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := &mockDB{queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+				t.Fatal("no query for an invalid cursor")
+				return nil, nil
+			}}
+
+			h := &MediaHandler{db: db, storage: &mockStorage{}}
+			w := httptest.NewRecorder()
+			h.List(w, listRequest("cursor="+url.QueryEscape(tt.cursor)))
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Equal(t, "invalid cursor\n", w.Body.String())
+		})
+	}
+}
+
+// listRow is a row of the list query for mockRows, owned by the caller, with nothing set that the
+// paging does not look at.
+func listRow(id string, takenAt *time.Time) []any {
+	var at any
+	if takenAt != nil {
+		at = *takenAt
+	}
+	return []any{id, id + ".jpg", "photo", nil, nil, nil, nil, at, "media/" + id,
+		nil, testOwnerID, nil, nil, nil, nil}
+}
+
+// Item IDs for mockRows: the cursor carries an ID, so it must be one.
+const (
+	itemA = "00000000-0000-4000-8000-00000000000a"
+	itemB = "00000000-0000-4000-8000-00000000000b"
+	itemC = "00000000-0000-4000-8000-00000000000c"
+)
+
+func TestList_NextCursor(t *testing.T) {
+	at := func(sec int) *time.Time {
+		t := time.Date(2024, 5, 2, 12, 0, sec, 0, time.UTC)
+		return &t
+	}
+	tests := []struct {
+		name       string
+		rows       [][]any
+		wantIDs    []string
+		wantCursor *mediaCursor // nil: the last page
+	}{
+		{"a row more than the page: the page ends at its last item", [][]any{
+			listRow(itemA, at(3)), listRow(itemB, at(2)), listRow(itemC, at(1)),
+		}, []string{itemA, itemB}, &mediaCursor{takenAt: at(2), id: itemB}},
+		{"an undated last item", [][]any{
+			listRow(itemA, at(3)), listRow(itemB, nil), listRow(itemC, nil),
+		}, []string{itemA, itemB}, &mediaCursor{id: itemB}},
+		{"exactly a page", [][]any{
+			listRow(itemA, at(3)), listRow(itemB, at(2)),
+		}, []string{itemA, itemB}, nil},
+		{"less than a page", [][]any{listRow(itemA, at(3))}, []string{itemA}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := &mockDB{queryFn: func(_ context.Context, _ string, args ...any) (pgx.Rows, error) {
+				assert.Equal(t, 3, args[len(args)-1], "a page of 2 asks for 3 rows")
+				return &mockRows{rows: tt.rows}, nil
+			}}
+
+			h := &MediaHandler{db: db, storage: &mockStorage{}}
+			w := httptest.NewRecorder()
+			h.List(w, listRequest("limit=2"))
+
+			require.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, tt.wantIDs, decodeListIDs(t, w.Body.Bytes()))
+			header := w.Header().Get(nextCursorHeader)
+			if tt.wantCursor == nil {
+				assert.Empty(t, header)
+				return
+			}
+			got, err := parseMediaCursor(header)
+			require.NoError(t, err, header)
+			assert.Equal(t, tt.wantCursor.id, got.id)
+			if tt.wantCursor.takenAt == nil {
+				assert.Nil(t, got.takenAt)
+			} else {
+				require.NotNil(t, got.takenAt)
+				assert.True(t, tt.wantCursor.takenAt.Equal(*got.takenAt))
+			}
+		})
+	}
+}
+
+// scanFailRows fails to scan its row number fail (1-based), as a row of an unexpected shape would.
+type scanFailRows struct {
+	*mockRows
+	fail int
+}
+
+func (r *scanFailRows) Scan(dest ...any) error {
+	if r.pos == r.fail {
+		return errors.New("cannot scan")
+	}
+	return r.mockRows.Scan(dest...)
+}
+
+// The page is the rows read, so a row that cannot be scanned is logged and left out without
+// ending the list: the cursor is the last item listed, and the next page reads the row again.
+func TestList_NextCursor_AfterARowThatFailedToScan(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	at := time.Date(2024, 5, 2, 12, 0, 0, 0, time.UTC)
+	db := &mockDB{queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+		return &scanFailRows{mockRows: &mockRows{rows: [][]any{
+			listRow(itemA, &at), listRow(itemB, &at), listRow(itemC, &at),
+		}}, fail: 2}, nil
+	}}
+
+	h := &MediaHandler{db: db, storage: &mockStorage{}}
+	w := httptest.NewRecorder()
+	h.List(w, listRequest("limit=2"))
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, capturedSQL, "OFFSET")
-	assert.Equal(t, 500, capturedArgs[len(capturedArgs)-1])
+	assert.Equal(t, []string{itemA}, decodeListIDs(t, w.Body.Bytes()))
+	got, err := parseMediaCursor(w.Header().Get(nextCursorHeader))
+	require.NoError(t, err)
+	assert.Equal(t, itemA, got.id, "the next page starts after A, so B is read again")
+	assert.Contains(t, logs.String(), "media: list row scan failed")
+}
+
+func decodeListIDs(t *testing.T, body []byte) []string {
+	t.Helper()
+	var items []struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(body, &items), string(body))
+	ids := []string{}
+	for _, it := range items {
+		ids = append(ids, it.ID)
+	}
+	return ids
 }
 
 func TestList_MultipleFilters_Combined(t *testing.T) {
@@ -373,7 +622,7 @@ func TestList_MultipleFilters_Combined(t *testing.T) {
 	assert.Contains(t, capturedSQL, "WHERE "+readableMediaCond("m", 1)+" AND")
 	assert.Equal(t, testOwnerID, capturedArgs[0])
 	assert.Equal(t, "2024-01-01", capturedArgs[1])
-	assert.Len(t, capturedArgs, 6) // owner, from_date, media_type, trip_id, limit, offset
+	assert.Len(t, capturedArgs, 5) // owner, from_date, media_type, trip_id, limit
 }
 
 func TestList_Limit_PassedThrough(t *testing.T) {
@@ -388,11 +637,11 @@ func TestList_Limit_PassedThrough(t *testing.T) {
 
 	h := &MediaHandler{db: db, storage: &mockStorage{}}
 	w := httptest.NewRecorder()
-	h.List(w, listRequest("limit=5000&offset=5000"))
+	h.List(w, listRequest("limit=5000"))
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, capturedSQL, "LIMIT $2 OFFSET $3")
-	assert.Equal(t, []any{testOwnerID, 5000, 5000}, capturedArgs)
+	assert.Equal(t, 3, strings.Count(capturedSQL, "LIMIT $2"), "both parts and the merge")
+	assert.Equal(t, []any{testOwnerID, 5001}, capturedArgs, "one row more than the page")
 }
 
 func TestList_InvalidLimit_Returns400(t *testing.T) {

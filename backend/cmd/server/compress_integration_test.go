@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -134,5 +135,20 @@ func TestRouter_MediaListIsGzipped(t *testing.T) {
 	t.Run("other routes stay plain", func(t *testing.T) {
 		rec := get("/api/albums", "gzip")
 		assert.Empty(t, rec.Header().Get("Content-Encoding"))
+	})
+	t.Run("the next page's cursor comes through compression", func(t *testing.T) {
+		_, err := pool.Exec(context.Background(), `
+			INSERT INTO media (owner_id, filename, media_type, storage_key, file_hash, taken_at)
+			SELECT $1, 'gz-' || i || '.jpg', 'photo', 'media/gz-' || i, 'hash-gz-' || i, now() - i * INTERVAL '1 hour'
+			FROM generate_series(1, 2) AS i`, userID)
+		require.NoError(t, err)
+
+		rec := get("/api/media?limit=1", "gzip")
+		assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
+		cursor := rec.Header().Get("X-Next-Cursor")
+		require.NotEmpty(t, cursor, "one of two items: a next page")
+
+		rec = get("/api/media?limit=1&cursor="+url.QueryEscape(cursor), "gzip")
+		assert.Empty(t, rec.Header().Get("X-Next-Cursor"), "the second of two is the last page")
 	})
 }

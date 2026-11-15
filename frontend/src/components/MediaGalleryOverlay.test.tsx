@@ -16,7 +16,7 @@ vi.mock("@/api/client", async (importOriginal) => {
   return {
     ApiError: actual.ApiError,
     api: {
-      get: vi.fn(),
+      listMedia: vi.fn(),
       getMediaUrl: vi.fn(),
       getKeyframes: vi.fn(),
       delete: vi.fn(),
@@ -141,7 +141,7 @@ vi.mock("@/components/viewer/Video360", () => ({
 }));
 
 const mockApi = api as unknown as Record<
-  | "get"
+  | "listMedia"
   | "getMediaUrl"
   | "getKeyframes"
   | "delete"
@@ -255,7 +255,7 @@ describe("MediaGalleryOverlay", () => {
     vi.clearAllMocks();
     leafletMap.reset();
     viewerUrls.length = 0;
-    mockApi.get.mockResolvedValue([shared, own]);
+    mockApi.listMedia.mockResolvedValue([shared, own]);
     mockApi.getMediaUrl.mockResolvedValue("https://s3.example/x");
     mockApi.getKeyframes.mockResolvedValue([]);
   });
@@ -264,7 +264,7 @@ describe("MediaGalleryOverlay", () => {
     renderOverlay({ subtitle: "by Bob" });
 
     expect(await findPosition("1 / 2")).toBeInTheDocument();
-    expect(mockApi.get).toHaveBeenCalledWith("/media", { album_id: "a1", offset: "0" });
+    expect(mockApi.listMedia).toHaveBeenCalledWith({ album_id: "a1" });
     expect(screen.getByText("Iceland")).toBeInTheDocument();
     expect(screen.getByText("by Bob")).toBeInTheDocument();
   });
@@ -293,7 +293,7 @@ describe("MediaGalleryOverlay", () => {
         <MediaGalleryOverlay {...props} params={{ album_id: "a1" }} />
       </AuthContext.Provider>
     );
-    expect(mockApi.get).toHaveBeenCalledTimes(1);
+    expect(mockApi.listMedia).toHaveBeenCalledTimes(1);
   });
 
   it("shows owner-only actions for the caller's own item and hides them for a shared one", async () => {
@@ -435,7 +435,7 @@ describe("MediaGalleryOverlay", () => {
   });
 
   it("closes once the last item is removed", async () => {
-    mockApi.get.mockResolvedValue([own]);
+    mockApi.listMedia.mockResolvedValue([own]);
     const { props } = renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum: vi.fn().mockResolvedValue(undefined) });
     await findPosition("1 / 1");
 
@@ -445,7 +445,7 @@ describe("MediaGalleryOverlay", () => {
   });
 
   it("explains a video whose picture the browser cannot decode, for that item only", async () => {
-    mockApi.get.mockResolvedValue([
+    mockApi.listMedia.mockResolvedValue([
       makeItem("hevc", { media_type: "video", taken_at: "2025-06-01T10:00:00Z" }),
       makeItem("next", { media_type: "video", taken_at: "2025-06-02T10:00:00Z" }),
     ]);
@@ -469,7 +469,7 @@ describe("MediaGalleryOverlay", () => {
   });
 
   it("does not close an album that was empty from the start", async () => {
-    mockApi.get.mockResolvedValue([]);
+    mockApi.listMedia.mockResolvedValue([]);
     const { props } = renderOverlay();
 
     expect(await screen.findByText("No media here")).toBeInTheDocument();
@@ -485,7 +485,7 @@ describe("MediaGalleryOverlay", () => {
       makeItem("second", { taken_at: "2025-06-02T10:00:00Z" }),
       makeItem("third", { taken_at: "2025-06-03T10:00:00Z" }),
     ];
-    mockApi.get.mockResolvedValue(items);
+    mockApi.listMedia.mockResolvedValue(items);
     const removals = [deferred<void>(), deferred<void>()];
     const onRemoveFromAlbum = vi.fn((item: MediaItem) => removals[item.id === "first" ? 0 : 1].promise);
     renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum });
@@ -546,7 +546,7 @@ describe("MediaGalleryOverlay", () => {
   });
 
   it("shows the item whose marker is clicked", async () => {
-    mockApi.get.mockResolvedValue([own, { ...shared, lat: 48.2, lng: 16.4 }]);
+    mockApi.listMedia.mockResolvedValue([own, { ...shared, lat: 48.2, lng: 16.4 }]);
     renderOverlay();
     await findPosition("1 / 2");
 
@@ -558,7 +558,7 @@ describe("MediaGalleryOverlay", () => {
 
   // Leaflet stacks markers by screen row, so without an offset a marker below would cover it.
   it("lifts the current item's marker above the others", async () => {
-    mockApi.get.mockResolvedValue([own, { ...shared, lat: 48.2, lng: 16.4 }]);
+    mockApi.listMedia.mockResolvedValue([own, { ...shared, lat: 48.2, lng: 16.4 }]);
     renderOverlay();
     await findPosition("1 / 2");
     const offset = (name: string) => screen.getByRole("button", { name }).getAttribute("data-z-index-offset");
@@ -572,7 +572,7 @@ describe("MediaGalleryOverlay", () => {
   });
 
   it("shows no map when no item has a location", async () => {
-    mockApi.get.mockResolvedValue([
+    mockApi.listMedia.mockResolvedValue([
       makeItem("a", { lat: null, lng: null, taken_at: "2025-06-01T10:00:00Z" }),
       makeItem("b", { lat: null, lng: null, taken_at: "2025-06-02T10:00:00Z" }),
     ]);
@@ -637,7 +637,7 @@ describe("MediaGalleryOverlay", () => {
         <MediaGalleryOverlay {...props} params={{ album_id: "a2" }} />
       </AuthContext.Provider>
     );
-    await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockApi.listMedia).toHaveBeenCalledTimes(2));
     await findPosition("1 / 2");
 
     expect(container.querySelector("[data-size]")).toHaveAttribute("data-size", "hidden");
@@ -648,7 +648,7 @@ describe("MediaGalleryOverlay", () => {
     const far = { ...shared, lat: 48.2, lng: 16.4 };
 
     it("flies to each item while the map has a size", async () => {
-      mockApi.get.mockResolvedValue([own, far]);
+      mockApi.listMedia.mockResolvedValue([own, far]);
       renderOverlay();
       await findPosition("1 / 2");
       expect(leafletMap.flyTo).toHaveBeenLastCalledWith([64.1, -21.9], 13, expect.anything());
@@ -660,7 +660,7 @@ describe("MediaGalleryOverlay", () => {
 
     // In a browser flyTo on a 0×0 map throws (NaN maths) inside the effect, which blanked the app.
     it("does not fly a map hidden through a window resize, and shows the latest item once it is back", async () => {
-      mockApi.get.mockResolvedValue([own, far]);
+      mockApi.listMedia.mockResolvedValue([own, far]);
       renderOverlay();
       await findPosition("1 / 2");
       fireEvent.click(screen.getByRole("button", { name: "Hide map" }));
@@ -698,7 +698,7 @@ describe("MediaGalleryOverlay", () => {
     it("fits a map that has no size yet to the items only once it is measured", async () => {
       leafletMap.size = { x: 0, y: 0 };
       leafletMap.measured = { x: 0, y: 0 };
-      mockApi.get.mockResolvedValue([
+      mockApi.listMedia.mockResolvedValue([
         makeItem("nogps", { lat: null, lng: null, taken_at: "2025-05-01T10:00:00Z" }),
         far,
       ]);
@@ -720,7 +720,7 @@ describe("MediaGalleryOverlay", () => {
     const flat = makeItem("flat", { media_type: "video", taken_at: "2025-06-01T10:00:00Z" });
 
     async function renderVideo() {
-      mockApi.get.mockResolvedValue([flat]);
+      mockApi.listMedia.mockResolvedValue([flat]);
       const { container } = renderOverlay();
       await waitFor(() => expect(container.querySelector("video")).toHaveAttribute("src"));
       return container.querySelector("video")!;
@@ -763,7 +763,7 @@ describe("MediaGalleryOverlay", () => {
     const editorTitle = /^Edit GPS location —/;
 
     it("keeps the gallery's keys off the editor: the arrows do nothing, Escape closes only the editor", async () => {
-      mockApi.get.mockResolvedValue([own, second]);
+      mockApi.listMedia.mockResolvedValue([own, second]);
       const { props } = renderOverlay();
       await findPosition("1 / 2");
       await userEvent.click(screen.getByRole("button", { name: "Edit GPS location" }));
@@ -786,7 +786,7 @@ describe("MediaGalleryOverlay", () => {
     });
 
     it("closes the editor when its item goes away instead of showing the next one", async () => {
-      mockApi.get.mockResolvedValue([own, second]);
+      mockApi.listMedia.mockResolvedValue([own, second]);
       const removal = deferred<void>();
       renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum: vi.fn(() => removal.promise) });
       await findPosition("1 / 2");
@@ -801,7 +801,7 @@ describe("MediaGalleryOverlay", () => {
     });
 
     it("does not reopen the editor when its item is shown again", async () => {
-      mockApi.get.mockResolvedValue([own, second]);
+      mockApi.listMedia.mockResolvedValue([own, second]);
       renderOverlay();
       await findPosition("1 / 2");
       await userEvent.click(screen.getByRole("button", { name: "Edit GPS location" }));
@@ -829,7 +829,7 @@ describe("MediaGalleryOverlay", () => {
       within(screen.getByRole("button", { name: "Close gallery" }).parentElement!).getAllByRole("button");
 
     async function openEvidence(items: MediaItem[], props: Partial<Props> = {}) {
-      mockApi.get.mockResolvedValue(items);
+      mockApi.listMedia.mockResolvedValue(items);
       const view = renderOverlay(props);
       await findPosition(`1 / ${items.length}`);
       await userEvent.click(entry());
@@ -842,7 +842,7 @@ describe("MediaGalleryOverlay", () => {
     });
 
     it("makes the position label of an own item the entry point", async () => {
-      mockApi.get.mockResolvedValue([own]);
+      mockApi.listMedia.mockResolvedValue([own]);
       renderOverlay();
       await findPosition("1 / 1");
 
@@ -862,7 +862,7 @@ describe("MediaGalleryOverlay", () => {
     });
 
     it("keeps the label's text and adds no entry on a shared item", async () => {
-      mockApi.get.mockResolvedValue([shared]);
+      mockApi.listMedia.mockResolvedValue([shared]);
       renderOverlay();
       await findPosition("1 / 1");
       expect(getPosition("1 / 1").closest("button")).toBeNull();
@@ -872,7 +872,7 @@ describe("MediaGalleryOverlay", () => {
 
     it("adds no button to the toolbar", async () => {
       const removable = { canRemoveFromAlbum: () => true, onRemoveFromAlbum: vi.fn() };
-      mockApi.get.mockResolvedValue([{ ...pano }]);
+      mockApi.listMedia.mockResolvedValue([{ ...pano }]);
       renderOverlay(removable);
       await findPosition("1 / 1");
       expect(toolbarButtons().map((b) => b.getAttribute("aria-label"))).toEqual([
@@ -892,7 +892,7 @@ describe("MediaGalleryOverlay", () => {
     });
 
     it("unmounts the viewer while the view is open, and brings it back", async () => {
-      mockApi.get.mockResolvedValue([pano]);
+      mockApi.listMedia.mockResolvedValue([pano]);
       renderOverlay();
       await screen.findByTestId("panorama");
 
@@ -921,7 +921,7 @@ describe("MediaGalleryOverlay", () => {
 
     it("does not play a video from the keys meant for the view", async () => {
       const { play } = stubMediaPlayback();
-      mockApi.get.mockResolvedValue([makeItem("v", { media_type: "video" })]);
+      mockApi.listMedia.mockResolvedValue([makeItem("v", { media_type: "video" })]);
       renderOverlay();
       await findPosition("1 / 1");
       await userEvent.click(entry());
@@ -968,12 +968,12 @@ describe("MediaGalleryOverlay", () => {
 
     it("applies a saved location to its item and refetches the list", async () => {
       await openEvidence([first, third]);
-      expect(mockApi.get).toHaveBeenCalledTimes(1);
+      expect(mockApi.listMedia).toHaveBeenCalledTimes(1);
       const refetch = deferred<MediaItem[]>();
-      mockApi.get.mockReturnValue(refetch.promise);
+      mockApi.listMedia.mockReturnValue(refetch.promise);
 
       act(() => evidence.props!.onLocationSaved("first", 12.5, 34.5));
-      expect(mockApi.get).toHaveBeenCalledTimes(2);
+      expect(mockApi.listMedia).toHaveBeenCalledTimes(2);
       act(() => evidence.props!.onClose());
       expect(await screen.findByRole("button", { name: "Marker at 12.5,34.5" })).toBeInTheDocument();
       await act(async () => refetch.resolve([{ ...first, lat: 48.2, lng: 16.4 }, third]));
@@ -981,19 +981,19 @@ describe("MediaGalleryOverlay", () => {
 
     it("leaves the other items alone when the saved item is not in the gallery", async () => {
       await openEvidence([first, third]);
-      mockApi.get.mockResolvedValue([first, third]);
+      mockApi.listMedia.mockResolvedValue([first, third]);
       act(() => evidence.props!.onLocationSaved("behind", 12.5, 34.5));
-      await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(mockApi.listMedia).toHaveBeenCalledTimes(2));
       expect(screen.queryByRole("button", { name: "Marker at 12.5,34.5" })).not.toBeInTheDocument();
     });
 
     it("refetches the list after a re-match, keeping the place", async () => {
       await openEvidence([first, third]);
       act(() => evidence.props!.onNext!());
-      mockApi.get.mockResolvedValue([first, { ...third, lat: 1, lng: 2 }]);
+      mockApi.listMedia.mockResolvedValue([first, { ...third, lat: 1, lng: 2 }]);
 
       act(() => evidence.props!.onRematched());
-      await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(mockApi.listMedia).toHaveBeenCalledTimes(2));
       act(() => evidence.props!.onClose());
       expect(await findPosition("2 / 2")).toBeInTheDocument();
       expect(await screen.findByRole("button", { name: "Marker at 1,2" })).toBeInTheDocument();
@@ -1020,7 +1020,7 @@ describe("MediaGalleryOverlay", () => {
       ["a shared 360° photo", { ...pano, owner_id: "u-bob", owner_name: "Bob" }, false],
       ["a shared 360° video", { ...video, owner_id: "u-bob", owner_name: "Bob" }, false],
     ])("offers the editor for %s: %s", async (_name, item, shown) => {
-      mockApi.get.mockResolvedValue([item]);
+      mockApi.listMedia.mockResolvedValue([item]);
       renderOverlay();
       await findPosition("1 / 1");
 
@@ -1028,7 +1028,7 @@ describe("MediaGalleryOverlay", () => {
     });
 
     it("saves the current view as default and shows it in the gallery", async () => {
-      mockApi.get.mockResolvedValue([pano]);
+      mockApi.listMedia.mockResolvedValue([pano]);
       renderOverlay();
       await waitFor(() => expect(screen.getByTestId("panorama")).toHaveAttribute("data-yaw", "0"));
       await userEvent.click(screen.getByRole("button", { name: "Edit default view" }));
@@ -1047,11 +1047,11 @@ describe("MediaGalleryOverlay", () => {
       expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
       expect(screen.getByTestId("panorama")).toHaveAttribute("data-editor", "false");
       expect(screen.getByTestId("panorama")).toHaveAttribute("data-yaw", "1");
-      expect(mockApi.get).toHaveBeenCalledTimes(1);
+      expect(mockApi.listMedia).toHaveBeenCalledTimes(1);
     });
 
     it("waits for a video's keyframes, then saves them and plays them in the gallery", async () => {
-      mockApi.get.mockResolvedValue([video]);
+      mockApi.listMedia.mockResolvedValue([video]);
       const keyframes = deferred<(typeof storedKeyframe)[]>();
       mockApi.getKeyframes.mockReturnValue(keyframes.promise);
       renderOverlay();
@@ -1077,7 +1077,7 @@ describe("MediaGalleryOverlay", () => {
     });
 
     it("stays open and says why when saving fails", async () => {
-      mockApi.get.mockResolvedValue([pano]);
+      mockApi.listMedia.mockResolvedValue([pano]);
       mockApi.updateViewSettings.mockRejectedValue(new ApiError("boom", 500));
       vi.spyOn(console, "error").mockImplementation(() => {});
       renderOverlay();
@@ -1092,7 +1092,7 @@ describe("MediaGalleryOverlay", () => {
     });
 
     it("keeps the gallery's keys off the editor: the arrows do nothing, Escape closes only the editor", async () => {
-      mockApi.get.mockResolvedValue([pano, second]);
+      mockApi.listMedia.mockResolvedValue([pano, second]);
       const { props } = renderOverlay();
       await findPosition("1 / 2");
       await waitFor(() => expect(screen.getByRole("button", { name: "Edit default view" })).toBeEnabled());
@@ -1114,7 +1114,7 @@ describe("MediaGalleryOverlay", () => {
 
     it("closes on the back gesture without closing the gallery", async () => {
       await settleHistory();
-      mockApi.get.mockResolvedValue([pano]);
+      mockApi.listMedia.mockResolvedValue([pano]);
       const { props } = renderOverlay();
       await findPosition("1 / 1");
       await waitFor(() => expect(screen.getByRole("button", { name: "Edit default view" })).toBeEnabled());
@@ -1135,7 +1135,7 @@ describe("MediaGalleryOverlay", () => {
     });
 
     it("closes the editor when its item goes away", async () => {
-      mockApi.get.mockResolvedValue([pano, second]);
+      mockApi.listMedia.mockResolvedValue([pano, second]);
       const removal = deferred<void>();
       renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum: vi.fn(() => removal.promise) });
       await findPosition("1 / 2");
@@ -1164,7 +1164,7 @@ describe("MediaGalleryOverlay", () => {
       zone.mockReturnValue({ timeZone } as Intl.ResolvedDateTimeFormatOptions);
 
     async function renderJump(items: MediaItem[] = jumpItems) {
-      mockApi.get.mockResolvedValue(items);
+      mockApi.listMedia.mockResolvedValue(items);
       const view = renderOverlay();
       await findPosition(`1 / ${items.length}`);
       return view;
@@ -1520,7 +1520,7 @@ describe("MediaGalleryOverlay", () => {
       await settleHistory();
       window.history.replaceState(null, "", "/albums");
       const list = deferred<MediaItem[]>();
-      mockApi.get.mockReturnValue(list.promise);
+      mockApi.listMedia.mockReturnValue(list.promise);
       const { unmount } = renderOverlay({ route, initialItemId: "shared" });
       await waitFor(() => expect(location()).toBe("/albums/a1?item=shared"));
       const depth = () => (window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY];
@@ -1542,7 +1542,7 @@ describe("MediaGalleryOverlay", () => {
     it("names no item while the gallery is empty", async () => {
       await settleHistory();
       window.history.replaceState(null, "", "/albums");
-      mockApi.get.mockResolvedValue([]);
+      mockApi.listMedia.mockResolvedValue([]);
       const { unmount } = renderOverlay({ route });
       expect(await screen.findByText("No media here")).toBeInTheDocument();
       await waitFor(() => expect(location()).toBe("/albums/a1"));
@@ -1623,7 +1623,7 @@ describe("MediaGalleryOverlay", () => {
 
       it("shows the placeholder, not the previous URL, while the next URL loads", async () => {
         const slow = deferred<string>();
-        mockApi.get.mockResolvedValue([first, second]);
+        mockApi.listMedia.mockResolvedValue([first, second]);
         mockApi.getMediaUrl.mockImplementation((id: string) =>
           id === "p1" ? Promise.resolve("https://s3.example/p1") : slow.promise
         );
@@ -1643,7 +1643,7 @@ describe("MediaGalleryOverlay", () => {
       });
 
       it("shows a prefetched item at once, with its own URL", async () => {
-        mockApi.get.mockResolvedValue([first, second]);
+        mockApi.listMedia.mockResolvedValue([first, second]);
         mockApi.getMediaUrl.mockImplementation((id: string) => Promise.resolve(`https://s3.example/${id}`));
         renderOverlay();
         await screen.findByTestId("panorama");

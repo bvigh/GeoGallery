@@ -1,6 +1,6 @@
 # GeoGallery roadmap
 
-As of 2026-11-14. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
+As of 2026-11-15. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
 
 Sizes: **XS** < 2 h, **S** ≤ 1 day, **M** 2–4 days, **L** a week or more.
 
@@ -8,7 +8,7 @@ Sizes: **XS** < 2 h, **S** ≤ 1 day, **M** 2–4 days, **L** a week or more.
 
 - **Phase 1 (MLP):** done.
 - **Phase 2 (sharing with friends):** done, beyond its scope: invite-only OIDC instead of a shared password, albums with members instead of a read-only view, a layout that works on phones.
-- **Phase 3 (public release):** partly done. Marker clustering is in. Pagination exists but uses offsets. The rest is under "Public release" below.
+- **Phase 3 (public release):** partly done. Marker clustering and cursor pagination (#36) are in. The rest is under "Public release" below.
 - **Phase 4 (hosted multi-user):** multi-tenancy and social login (through the IdP) are done. Billing is not planned.
 - **F6.R1 (trip GPS track overlay):** not built; it is #32.
 

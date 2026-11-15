@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { api, ApiError } from "@/api/client";
+import type { MediaItem } from "@/types";
 
 function response(status: number, body: unknown = {}) {
   return { status, ok: status >= 200 && status < 300, json: async () => body };
@@ -130,6 +131,81 @@ describe("api client", () => {
     expect(url).toBe("/api/media/known-hashes");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body)).toEqual({ hashes: ["h1", "h2"] });
+  });
+
+  describe("listMedia()", () => {
+    // A page of GET /api/media: its items, and the next page's cursor unless it is the last.
+    function page(ids: string[], next?: string) {
+      return { ...response(200, ids.map((id) => ({ id }))), headers: new Headers(next ? { "X-Next-Cursor": next } : {}) };
+    }
+    const ids = (items: MediaItem[]) => items.map((m) => m.id);
+
+    it("follows the cursor to the page that names none, in pages of the largest size", async () => {
+      fetchMock.mockResolvedValueOnce(page(["m1", "m2"], "c1")).mockResolvedValueOnce(page(["m3"], "c2")).mockResolvedValueOnce(page(["m4"]));
+      const onPage = vi.fn();
+
+      const items = await api.listMedia({ album_id: "a1", media_type: ["photo", "video"], owner: "" }, { onPage });
+
+      expect(ids(items)).toEqual(["m1", "m2", "m3", "m4"]);
+      expect(onPage.mock.calls.map(([p]) => ids(p))).toEqual([["m1", "m2"], ["m3"], ["m4"]]);
+      // The filters stay the same on every page; only the cursor moves.
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+        "/api/media?album_id=a1&media_type=photo&media_type=video&limit=5000",
+        "/api/media?album_id=a1&media_type=photo&media_type=video&limit=5000&cursor=c1",
+        "/api/media?album_id=a1&media_type=photo&media_type=video&limit=5000&cursor=c2",
+      ]);
+    });
+
+    it("takes a page without a cursor as the last, however full", async () => {
+      fetchMock.mockResolvedValueOnce(page(Array.from({ length: 5000 }, (_, i) => `m${i}`)));
+      await expect(api.listMedia({})).resolves.toHaveLength(5000);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends the cursor as it came", async () => {
+      fetchMock.mockResolvedValueOnce(page(["m1"], "MjAyNC0wNS0wMlQxMjowMDowMlog_-")).mockResolvedValueOnce(page(["m2"]));
+      await api.listMedia({});
+      expect(fetchMock.mock.calls[1][0]).toBe("/api/media?limit=5000&cursor=MjAyNC0wNS0wMlQxMjowMDowMlog_-");
+    });
+
+    it("rejects with the status of a page that failed", async () => {
+      fetchMock.mockResolvedValueOnce(page(["m1"], "c1")).mockResolvedValueOnce(response(500));
+      const onPage = vi.fn();
+      await expect(api.listMedia({}, { onPage })).rejects.toMatchObject({ status: 500, message: "GET /media failed: 500" });
+      expect(onPage).toHaveBeenCalledTimes(1);
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it("redirects to login on 401", async () => {
+      fetchMock.mockResolvedValue(response(401));
+      await expect(api.listMedia({})).rejects.toBeInstanceOf(ApiError);
+      expect(assign).toHaveBeenCalledWith("/api/auth/login?return_to=" + encodeURIComponent("/trips?x=1"));
+    });
+
+    it("passes the signal to each request and asks for no page after an abort", async () => {
+      const list = new AbortController();
+      fetchMock.mockResolvedValueOnce(page(["m1"], "c1")).mockResolvedValueOnce(page(["m2"]));
+      const onPage = vi.fn(() => list.abort());
+
+      await expect(api.listMedia({}, { onPage, signal: list.signal })).rejects.toMatchObject({ name: "AbortError" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][1]).toEqual({ signal: list.signal });
+    });
+
+    it("hands over no page that arrives after an abort", async () => {
+      const list = new AbortController();
+      let answer!: (res: unknown) => void;
+      fetchMock.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+      const onPage = vi.fn();
+
+      const listed = api.listMedia({}, { onPage, signal: list.signal });
+      list.abort();
+      answer(page(["m1"], "c1"));
+
+      await expect(listed).rejects.toMatchObject({ name: "AbortError" });
+      expect(onPage).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("albums", () => {

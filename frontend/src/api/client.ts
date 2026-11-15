@@ -11,6 +11,7 @@ import type {
   FileReread,
   GpsUploadResult,
   LibraryCamera,
+  MediaItem,
   OrientationKeyframe,
   ProvenanceResponse,
 } from "@/types";
@@ -53,23 +54,55 @@ function jsonInit(method: string, body: unknown): RequestInit {
   };
 }
 
-async function get<T>(path: string, params?: Record<string, string | string[]>): Promise<T> {
-  let url = path;
-  if (params) {
-    const qs = new URLSearchParams();
-    for (const [k, v] of Object.entries(params)) {
-      if (Array.isArray(v)) {
-        v.forEach((s) => qs.append(k, s));
-      } else if (v !== "") {
-        qs.set(k, v);
-      }
+type QueryParams = Record<string, string | string[]>;
+
+// An array repeats its key; an empty string leaves the key out.
+function withQuery(path: string, params?: QueryParams): string {
+  if (!params) return path;
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (Array.isArray(v)) {
+      v.forEach((s) => qs.append(k, s));
+    } else if (v !== "") {
+      qs.set(k, v);
     }
-    const s = qs.toString();
-    if (s) url += "?" + s;
   }
-  const res = await request(url);
+  const s = qs.toString();
+  return s ? `${path}?${s}` : path;
+}
+
+async function get<T>(path: string, params?: QueryParams): Promise<T> {
+  const res = await request(withQuery(path, params));
   if (!res.ok) throw new ApiError(`GET ${path} failed: ${res.status}`, res.status);
   return res.json();
+}
+
+// The largest page GET /api/media serves (the backend's maxListLimit).
+const MEDIA_PAGE_MAX = 5000;
+
+// Every item GET /api/media lists under these params (filters as filterParams builds them, a
+// trip or an album), in its order: newest first, undated last. A page names the next one's
+// cursor in X-Next-Cursor; the last page has none. onPage gets each page as it arrives. The
+// signal stops the list: the request in flight is aborted and no later page is asked for.
+async function listMedia(
+  params: QueryParams,
+  { onPage, signal }: { onPage?: (page: MediaItem[]) => void; signal?: AbortSignal } = {}
+): Promise<MediaItem[]> {
+  const aborted = () => new DOMException("The media list was aborted", "AbortError");
+  const all: MediaItem[] = [];
+  const query: QueryParams = { ...params, limit: String(MEDIA_PAGE_MAX) };
+  for (;;) {
+    const res = await request(withQuery("/media", query), { signal });
+    if (!res.ok) throw new ApiError(`GET /media failed: ${res.status}`, res.status);
+    const page: MediaItem[] = (await res.json()) ?? [];
+    if (signal?.aborted) throw aborted();
+    all.push(...page);
+    onPage?.(page);
+    const cursor = res.headers.get("X-Next-Cursor");
+    if (!cursor) return all;
+    if (signal?.aborted) throw aborted();
+    query.cursor = cursor;
+  }
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
@@ -307,6 +340,7 @@ export const api = {
   post,
   patch,
   delete: del,
+  listMedia,
   getMediaUrl,
   getKeyframes,
   updateViewSettings,
