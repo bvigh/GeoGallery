@@ -1,7 +1,7 @@
 import type { ComponentProps, ReactNode } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { api, ApiError } from "@/api/client";
 import { MediaGalleryOverlay } from "@/components/MediaGalleryOverlay";
 import { AuthContext } from "@/components/auth/AuthContext";
@@ -173,6 +173,22 @@ function swipe(el: Element, fromX: number, toX: number) {
   fireEvent.pointerUp(el, at(toX));
 }
 
+// The position label's "n / N": plain text in a gallery of one, else n is the value of the item
+// number field (which is empty while it has focus). Found under an open dialog too, which hides
+// the gallery from the accessibility tree.
+function getPosition(text: string): HTMLElement {
+  const [n, count] = text.split(" / ");
+  if (count === "1") return screen.getByText(text);
+  const field = screen.getByRole<HTMLInputElement>("textbox", { name: `Item number, 1 to ${count}`, hidden: true });
+  if (field.value !== n) throw new Error(`The position is ${field.value} / ${count}, not ${text}`);
+  return field;
+}
+const findPosition = (text: string) => waitFor(() => getPosition(text));
+const positionField = () => screen.getByRole<HTMLInputElement>("textbox", { name: /^Item number/ });
+
+// The box around the position label, which also holds the arrows while the map is large.
+const labelBox = (position = "1 / 2") => getPosition(position).closest<HTMLElement>(".items-center.gap-2")!;
+
 // A promise the test settles by hand.
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -247,7 +263,7 @@ describe("MediaGalleryOverlay", () => {
   it("fetches media with the given params and shows the title", async () => {
     renderOverlay({ subtitle: "by Bob" });
 
-    expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+    expect(await findPosition("1 / 2")).toBeInTheDocument();
     expect(mockApi.get).toHaveBeenCalledWith("/media", { album_id: "a1", offset: "0" });
     expect(screen.getByText("Iceland")).toBeInTheDocument();
     expect(screen.getByText("by Bob")).toBeInTheDocument();
@@ -258,7 +274,7 @@ describe("MediaGalleryOverlay", () => {
       .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
       .mockReturnValue({ timeZone: "Asia/Tokyo" } as Intl.ResolvedDateTimeFormatOptions);
     renderOverlay();
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
 
     const label = screen.getByText(formatInstant(own.taken_at!, "Asia/Tokyo", { seconds: false }));
     expect(label.textContent).toContain("Asia/Tokyo");
@@ -270,7 +286,7 @@ describe("MediaGalleryOverlay", () => {
 
   it("does not refetch when re-rendered with equal params", async () => {
     const { rerender, props } = renderOverlay();
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
 
     rerender(
       <AuthContext.Provider value={me}>
@@ -283,7 +299,7 @@ describe("MediaGalleryOverlay", () => {
   it("shows owner-only actions for the caller's own item and hides them for a shared one", async () => {
     renderOverlay();
     // Sorted by taken_at: the own item comes first.
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
     expect(screen.getByRole("button", { name: "Delete media" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Edit GPS location" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Albums" })).toBeInTheDocument();
@@ -306,7 +322,7 @@ describe("MediaGalleryOverlay", () => {
       canRemoveFromAlbum,
       onRemoveFromAlbum: withHandler ? vi.fn().mockResolvedValue(undefined) : undefined,
     });
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
 
     expect(!!screen.queryByRole("button", { name: "Remove from album" })).toBe(shown);
   });
@@ -316,23 +332,23 @@ describe("MediaGalleryOverlay", () => {
       canRemoveFromAlbum: (item) => item.owner_id === me.id,
       onRemoveFromAlbum: vi.fn().mockResolvedValue(undefined),
     });
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
     expect(screen.getByRole("button", { name: "Remove from album" })).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Next" }));
-    await screen.findByText("2 / 2");
+    await findPosition("2 / 2");
     expect(screen.queryByRole("button", { name: "Remove from album" })).not.toBeInTheDocument();
   });
 
   it("drops the item once it is removed from the album", async () => {
     const onRemoveFromAlbum = vi.fn().mockResolvedValue(undefined);
     renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum });
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
 
     await userEvent.click(screen.getByRole("button", { name: "Remove from album" }));
 
     expect(onRemoveFromAlbum).toHaveBeenCalledWith(own);
-    expect(await screen.findByText("1 / 1")).toBeInTheDocument();
+    expect(await findPosition("1 / 1")).toBeInTheDocument();
     expect(screen.getByText("Shared by Bob")).toBeInTheDocument();
   });
 
@@ -348,39 +364,39 @@ describe("MediaGalleryOverlay", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const onRemoveFromAlbum = vi.fn().mockRejectedValue(err);
     renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum });
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
 
     await userEvent.click(screen.getByRole("button", { name: "Remove from album" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(message);
     expect(onRemoveFromAlbum).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("1 / 2")).toBeInTheDocument();
+    expect(getPosition("1 / 2")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove from album" })).toBeEnabled();
   });
 
   it("clears the action error when moving to another item", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum: vi.fn().mockRejectedValue(new Error("boom")) });
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
     await userEvent.click(screen.getByRole("button", { name: "Remove from album" }));
     await screen.findByRole("alert");
 
     await userEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+    expect(await findPosition("2 / 2")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("disables remove and delete for the item while its removal is in flight", async () => {
     const removal = deferred<void>();
     renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum: vi.fn(() => removal.promise) });
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
 
     await userEvent.click(screen.getByRole("button", { name: "Remove from album" }));
     expect(screen.getByRole("button", { name: "Remove from album" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Delete media" })).toBeDisabled();
 
     await act(async () => removal.resolve());
-    expect(await screen.findByText("1 / 1")).toBeInTheDocument();
+    expect(await findPosition("1 / 1")).toBeInTheDocument();
   });
 
   it("keeps the item and says why when deleting it fails", async () => {
@@ -390,7 +406,7 @@ describe("MediaGalleryOverlay", () => {
     const request = deferred<void>();
     mockApi.delete.mockReturnValue(request.promise);
     renderOverlay({ onMediaDeleted });
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
 
     await userEvent.click(screen.getByRole("button", { name: "Delete media" }));
     expect(screen.getByRole("button", { name: "Delete media" })).toBeDisabled();
@@ -398,7 +414,7 @@ describe("MediaGalleryOverlay", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent('Could not delete "own.jpg"');
     expect(mockApi.delete).toHaveBeenCalledWith("/media/own");
-    expect(screen.getByText("1 / 2")).toBeInTheDocument();
+    expect(getPosition("1 / 2")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Delete media" })).toBeEnabled();
     expect(onMediaDeleted).not.toHaveBeenCalled();
   });
@@ -409,11 +425,11 @@ describe("MediaGalleryOverlay", () => {
     const onMediaDeleted = vi.fn();
     mockApi.delete.mockRejectedValue(new ApiError("DELETE /media/own failed: 404", 404));
     renderOverlay({ onMediaDeleted });
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
 
     await userEvent.click(screen.getByRole("button", { name: "Delete media" }));
 
-    expect(await screen.findByText("1 / 1")).toBeInTheDocument();
+    expect(await findPosition("1 / 1")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(onMediaDeleted).toHaveBeenCalledTimes(1);
   });
@@ -421,7 +437,7 @@ describe("MediaGalleryOverlay", () => {
   it("closes once the last item is removed", async () => {
     mockApi.get.mockResolvedValue([own]);
     const { props } = renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum: vi.fn().mockResolvedValue(undefined) });
-    await screen.findByText("1 / 1");
+    await findPosition("1 / 1");
 
     await userEvent.click(screen.getByRole("button", { name: "Remove from album" }));
 
@@ -435,7 +451,7 @@ describe("MediaGalleryOverlay", () => {
     ]);
     mockApi.getMediaUrl.mockImplementation((id: string) => Promise.resolve(`https://s3.example/${id}`));
     const { container } = renderOverlay();
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
     await waitFor(() => expect(container.querySelector("video")).toHaveAttribute("src", "https://s3.example/hevc"));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
@@ -473,24 +489,24 @@ describe("MediaGalleryOverlay", () => {
     const removals = [deferred<void>(), deferred<void>()];
     const onRemoveFromAlbum = vi.fn((item: MediaItem) => removals[item.id === "first" ? 0 : 1].promise);
     renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum });
-    await screen.findByText("1 / 3");
+    await findPosition("1 / 3");
 
     // Remove the first item, move on, and remove the second before either answers.
     await userEvent.click(screen.getByRole("button", { name: "Remove from album" }));
     await userEvent.click(screen.getByRole("button", { name: "Next" }));
-    await screen.findByText("2 / 3");
+    await findPosition("2 / 3");
     await userEvent.click(screen.getByRole("button", { name: "Remove from album" }));
     expect(onRemoveFromAlbum.mock.calls.map(([item]) => item.id)).toEqual(["first", "second"]);
 
     for (const i of order) await act(async () => removals[i].resolve());
 
-    expect(await screen.findByText("1 / 1")).toBeInTheDocument();
-    expect(screen.getByText("· third.jpg")).toBeInTheDocument();
+    expect(await findPosition("1 / 1")).toBeInTheDocument();
+    expect(screen.getByText("third.jpg")).toBeInTheDocument();
   });
 
   it("closes from the close button and from Escape", async () => {
     const { props } = renderOverlay();
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
 
     await userEvent.click(screen.getByRole("button", { name: "Close gallery" }));
     expect(props.onClose).toHaveBeenCalledTimes(1);
@@ -502,7 +518,7 @@ describe("MediaGalleryOverlay", () => {
   it("closes when the browser goes back", async () => {
     await settleHistory();
     const { props } = renderOverlay();
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
     await waitFor(() => expect((window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY]).toBeGreaterThan(0));
 
     await act(async () => {
@@ -522,21 +538,21 @@ describe("MediaGalleryOverlay", () => {
     // Right to left is the next photo.
     swipe(photo.parentElement!, 300, 100);
     expect(await screen.findByRole("img", { name: "shared.jpg" })).toBeInTheDocument();
-    expect(screen.getByText("2 / 2")).toBeInTheDocument();
+    expect(getPosition("2 / 2")).toBeInTheDocument();
 
     swipe(screen.getByRole("img", { name: "shared.jpg" }).parentElement!, 100, 300);
     expect(await screen.findByRole("img", { name: "own.jpg" })).toBeInTheDocument();
-    expect(screen.getByText("1 / 2")).toBeInTheDocument();
+    expect(getPosition("1 / 2")).toBeInTheDocument();
   });
 
   it("shows the item whose marker is clicked", async () => {
     mockApi.get.mockResolvedValue([own, { ...shared, lat: 48.2, lng: 16.4 }]);
     renderOverlay();
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
 
     await userEvent.click(screen.getByRole("button", { name: "Marker at 48.2,16.4" }));
 
-    expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+    expect(await findPosition("2 / 2")).toBeInTheDocument();
     expect(screen.getByText("Shared by Bob")).toBeInTheDocument();
   });
 
@@ -544,13 +560,13 @@ describe("MediaGalleryOverlay", () => {
   it("lifts the current item's marker above the others", async () => {
     mockApi.get.mockResolvedValue([own, { ...shared, lat: 48.2, lng: 16.4 }]);
     renderOverlay();
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
     const offset = (name: string) => screen.getByRole("button", { name }).getAttribute("data-z-index-offset");
     expect(offset("Marker at 64.1,-21.9")).toBe("1000");
     expect(offset("Marker at 48.2,16.4")).toBe("0");
 
     await userEvent.click(screen.getByRole("button", { name: "Marker at 48.2,16.4" }));
-    expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+    expect(await findPosition("2 / 2")).toBeInTheDocument();
     expect(offset("Marker at 64.1,-21.9")).toBe("0");
     expect(offset("Marker at 48.2,16.4")).toBe("1000");
   });
@@ -561,7 +577,7 @@ describe("MediaGalleryOverlay", () => {
       makeItem("b", { lat: null, lng: null, taken_at: "2025-06-02T10:00:00Z" }),
     ]);
     renderOverlay();
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
 
     expect(screen.queryByTestId("map")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Hide map" })).not.toBeInTheDocument();
@@ -570,7 +586,7 @@ describe("MediaGalleryOverlay", () => {
 
   it("moves the arrows beside the position label while the map is large", async () => {
     renderOverlay();
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
     // At the screen edges, the arrows are left out at either end of the list.
     expect(screen.queryByRole("button", { name: "Previous" })).not.toBeInTheDocument();
 
@@ -581,10 +597,10 @@ describe("MediaGalleryOverlay", () => {
     // In the bottom row they stay, disabled at the ends, so the label does not jump.
     expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+    expect(await findPosition("2 / 2")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "Previous" }));
-    expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+    expect(await findPosition("1 / 2")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Shrink map" }));
     expect(screen.queryByRole("button", { name: "Previous" })).not.toBeInTheDocument();
@@ -593,7 +609,7 @@ describe("MediaGalleryOverlay", () => {
 
   it("moves the arrows beside the label when a mouse keeps the hover-enlarged map large", async () => {
     const { container } = renderOverlay();
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
     const map = container.querySelector("[data-size]")!;
 
     // Hovering only enlarges the map for a moment: the arrows stay at the screen edges.
@@ -605,14 +621,14 @@ describe("MediaGalleryOverlay", () => {
     fireEvent.click(screen.getByRole("button", { name: "Keep map large" }));
     fireEvent.pointerLeave(map, { pointerType: "mouse" });
     expect(map).toHaveAttribute("data-size", "large");
-    const label = screen.getByText("1 / 2").closest(".items-center") as HTMLElement;
+    const label = labelBox();
     expect(within(label).getByRole("button", { name: "Previous" })).toBeDisabled();
     expect(within(label).getByRole("button", { name: "Next" })).toBeEnabled();
   });
 
   it("keeps the chosen map size when the list reloads", async () => {
     const { rerender, props, container } = renderOverlay();
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
     fireEvent.click(screen.getByRole("button", { name: "Hide map" }));
     expect(container.querySelector("[data-size]")).toHaveAttribute("data-size", "hidden");
 
@@ -622,7 +638,7 @@ describe("MediaGalleryOverlay", () => {
       </AuthContext.Provider>
     );
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
-    await screen.findByText("1 / 2");
+    await findPosition("1 / 2");
 
     expect(container.querySelector("[data-size]")).toHaveAttribute("data-size", "hidden");
     expect(screen.getByRole("button", { name: "Show map" })).toBeInTheDocument();
@@ -634,11 +650,11 @@ describe("MediaGalleryOverlay", () => {
     it("flies to each item while the map has a size", async () => {
       mockApi.get.mockResolvedValue([own, far]);
       renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       expect(leafletMap.flyTo).toHaveBeenLastCalledWith([64.1, -21.9], 13, expect.anything());
 
       await userEvent.keyboard("{ArrowRight}");
-      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
       expect(leafletMap.flyTo).toHaveBeenLastCalledWith([48.2, 16.4], 13, expect.anything());
     });
 
@@ -646,7 +662,7 @@ describe("MediaGalleryOverlay", () => {
     it("does not fly a map hidden through a window resize, and shows the latest item once it is back", async () => {
       mockApi.get.mockResolvedValue([own, far]);
       renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       fireEvent.click(screen.getByRole("button", { name: "Hide map" }));
       // Leaflet's own window-resize handler measures the display: none container as 0×0.
       leafletMap.measured = { x: 0, y: 0 };
@@ -656,7 +672,7 @@ describe("MediaGalleryOverlay", () => {
       leafletMap.flyTo.mockClear();
 
       await userEvent.keyboard("{ArrowRight}");
-      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
       expect(leafletMap.flyTo).not.toHaveBeenCalled();
       expect(leafletMap.setView).not.toHaveBeenCalled();
 
@@ -674,7 +690,7 @@ describe("MediaGalleryOverlay", () => {
       });
       expect(leafletMap.setView).toHaveBeenCalledTimes(1);
       await userEvent.keyboard("{ArrowLeft}");
-      expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+      expect(await findPosition("1 / 2")).toBeInTheDocument();
       expect(leafletMap.flyTo).toHaveBeenCalledWith([64.1, -21.9], 13, expect.anything());
     });
 
@@ -687,7 +703,7 @@ describe("MediaGalleryOverlay", () => {
         far,
       ]);
       renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       expect(leafletMap.fitBounds).not.toHaveBeenCalled();
 
       leafletMap.measured = { x: 288, y: 192 };
@@ -749,14 +765,14 @@ describe("MediaGalleryOverlay", () => {
     it("keeps the gallery's keys off the editor: the arrows do nothing, Escape closes only the editor", async () => {
       mockApi.get.mockResolvedValue([own, second]);
       const { props } = renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       await userEvent.click(screen.getByRole("button", { name: "Edit GPS location" }));
       expect(screen.getByText(editorTitle)).toHaveTextContent("own.jpg");
 
       // Focus is on the toolbar button behind the editor, not in a field.
       await userEvent.keyboard("{ArrowRight}");
       expect(screen.getByText(editorTitle)).toHaveTextContent("own.jpg");
-      expect(screen.getByText("1 / 2")).toBeInTheDocument();
+      expect(getPosition("1 / 2")).toBeInTheDocument();
 
       await userEvent.keyboard("{Escape}");
       expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
@@ -764,7 +780,7 @@ describe("MediaGalleryOverlay", () => {
 
       // Back in the gallery, its keys work again.
       await userEvent.keyboard("{ArrowRight}");
-      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
       await userEvent.keyboard("{Escape}");
       expect(props.onClose).toHaveBeenCalledTimes(1);
     });
@@ -773,31 +789,31 @@ describe("MediaGalleryOverlay", () => {
       mockApi.get.mockResolvedValue([own, second]);
       const removal = deferred<void>();
       renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum: vi.fn(() => removal.promise) });
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       await userEvent.click(screen.getByRole("button", { name: "Remove from album" }));
       await userEvent.click(screen.getByRole("button", { name: "Edit GPS location" }));
       expect(screen.getByText(editorTitle)).toHaveTextContent("own.jpg");
 
       // The removal lands while the editor is open, and the gallery moves on to the second item.
       await act(async () => removal.resolve());
-      expect(await screen.findByText("1 / 1")).toBeInTheDocument();
+      expect(await findPosition("1 / 1")).toBeInTheDocument();
       expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
     });
 
     it("does not reopen the editor when its item is shown again", async () => {
       mockApi.get.mockResolvedValue([own, second]);
       renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       await userEvent.click(screen.getByRole("button", { name: "Edit GPS location" }));
       expect(screen.getByText(editorTitle)).toBeInTheDocument();
 
       // On screen the editor covers the mini map; a marker click stands in for any change of item.
       fireEvent.click(screen.getByRole("button", { name: "Marker at 48.2,16.4" }));
-      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
       expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
 
       fireEvent.click(screen.getByRole("button", { name: "Marker at 64.1,-21.9" }));
-      expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+      expect(await findPosition("1 / 2")).toBeInTheDocument();
       expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
     });
   });
@@ -815,7 +831,7 @@ describe("MediaGalleryOverlay", () => {
     async function openEvidence(items: MediaItem[], props: Partial<Props> = {}) {
       mockApi.get.mockResolvedValue(items);
       const view = renderOverlay(props);
-      await screen.findByText(`1 / ${items.length}`);
+      await findPosition(`1 / ${items.length}`);
       await userEvent.click(entry());
       expect(screen.getByTestId("evidence-view")).toBeInTheDocument();
       return view;
@@ -828,21 +844,28 @@ describe("MediaGalleryOverlay", () => {
     it("makes the position label of an own item the entry point", async () => {
       mockApi.get.mockResolvedValue([own]);
       renderOverlay();
-      await screen.findByText("1 / 1");
+      await findPosition("1 / 1");
 
       const button = entry();
       expect(button).toHaveAccessibleName(expect.stringContaining("Why here?"));
-      // The label sits in a pointer-events-none column.
-      expect(button).toHaveClass("pointer-events-auto", "touch:min-h-11");
-      expect(within(button).getByText("1 / 1")).toBeInTheDocument();
+      expect(button).toHaveClass("touch:min-h-11");
+      expect(within(button).getByText("own.jpg")).toBeInTheDocument();
+      expect(
+        within(button).getByText(formatInstant(own.taken_at!, Intl.DateTimeFormat().resolvedOptions().timeZone, { seconds: false }))
+      ).toBeInTheDocument();
       expect(button.querySelector("svg")).not.toBeNull();
+      // The position stays beside it: in a gallery of two or more it is a field, which a button
+      // cannot hold. The label sits in a pointer-events-none column.
+      expect(within(button).queryByText("1 / 1")).not.toBeInTheDocument();
+      expect(button.parentElement).toHaveClass("pointer-events-auto");
+      expect(within(button.parentElement!).getByText("1 / 1")).toBeInTheDocument();
     });
 
     it("keeps the label's text and adds no entry on a shared item", async () => {
       mockApi.get.mockResolvedValue([shared]);
       renderOverlay();
-      await screen.findByText("1 / 1");
-      expect(screen.getByText("1 / 1").closest("button")).toBeNull();
+      await findPosition("1 / 1");
+      expect(getPosition("1 / 1").closest("button")).toBeNull();
       expect(screen.queryByRole("button", { name: /Why here\?/ })).not.toBeInTheDocument();
       expect(screen.getByText(formatInstant(shared.taken_at!, Intl.DateTimeFormat().resolvedOptions().timeZone, { seconds: false }))).toBeInTheDocument();
     });
@@ -851,7 +874,7 @@ describe("MediaGalleryOverlay", () => {
       const removable = { canRemoveFromAlbum: () => true, onRemoveFromAlbum: vi.fn() };
       mockApi.get.mockResolvedValue([{ ...pano }]);
       renderOverlay(removable);
-      await screen.findByText("1 / 1");
+      await findPosition("1 / 1");
       expect(toolbarButtons().map((b) => b.getAttribute("aria-label"))).toEqual([
         "Albums",
         "Edit GPS location",
@@ -883,7 +906,7 @@ describe("MediaGalleryOverlay", () => {
     it("keeps its keys off while the view is open", async () => {
       const { props } = await openEvidence([first, third]);
       await userEvent.keyboard("{ArrowRight}");
-      expect(screen.getByText("1 / 2")).toBeInTheDocument();
+      expect(getPosition("1 / 2")).toBeInTheDocument();
       expect(evidence.props!.mediaId).toBe("first");
 
       await userEvent.keyboard("{Escape}");
@@ -891,7 +914,7 @@ describe("MediaGalleryOverlay", () => {
 
       act(() => evidence.props!.onClose());
       await userEvent.keyboard("{ArrowRight}");
-      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
       await userEvent.keyboard("{Escape}");
       expect(props.onClose).toHaveBeenCalledTimes(1);
     });
@@ -900,7 +923,7 @@ describe("MediaGalleryOverlay", () => {
       const { play } = stubMediaPlayback();
       mockApi.get.mockResolvedValue([makeItem("v", { media_type: "video" })]);
       renderOverlay();
-      await screen.findByText("1 / 1");
+      await findPosition("1 / 1");
       await userEvent.click(entry());
       expect(document.querySelector("video")).toBeNull();
 
@@ -926,7 +949,7 @@ describe("MediaGalleryOverlay", () => {
       await openEvidence([first, bob, third]);
       act(() => evidence.props!.onNext!());
       act(() => evidence.props!.onClose());
-      expect(await screen.findByText("3 / 3")).toBeInTheDocument();
+      expect(await findPosition("3 / 3")).toBeInTheDocument();
     });
 
     it("counts only own items in the position", async () => {
@@ -972,7 +995,7 @@ describe("MediaGalleryOverlay", () => {
       act(() => evidence.props!.onRematched());
       await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
       act(() => evidence.props!.onClose());
-      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
       expect(await screen.findByRole("button", { name: "Marker at 1,2" })).toBeInTheDocument();
     });
   });
@@ -999,7 +1022,7 @@ describe("MediaGalleryOverlay", () => {
     ])("offers the editor for %s: %s", async (_name, item, shown) => {
       mockApi.get.mockResolvedValue([item]);
       renderOverlay();
-      await screen.findByText("1 / 1");
+      await findPosition("1 / 1");
 
       expect(!!screen.queryByRole("button", { name: "Edit default view" })).toBe(shown);
     });
@@ -1032,7 +1055,7 @@ describe("MediaGalleryOverlay", () => {
       const keyframes = deferred<(typeof storedKeyframe)[]>();
       mockApi.getKeyframes.mockReturnValue(keyframes.promise);
       renderOverlay();
-      await screen.findByText("1 / 1");
+      await findPosition("1 / 1");
       // Opened from an empty list, saving would delete the stored keyframes.
       expect(screen.getByRole("button", { name: "Edit default view" })).toBeDisabled();
 
@@ -1058,7 +1081,7 @@ describe("MediaGalleryOverlay", () => {
       mockApi.updateViewSettings.mockRejectedValue(new ApiError("boom", 500));
       vi.spyOn(console, "error").mockImplementation(() => {});
       renderOverlay();
-      await screen.findByText("1 / 1");
+      await findPosition("1 / 1");
       await waitFor(() => expect(screen.getByRole("button", { name: "Edit default view" })).toBeEnabled());
       await userEvent.click(screen.getByRole("button", { name: "Edit default view" }));
 
@@ -1071,14 +1094,14 @@ describe("MediaGalleryOverlay", () => {
     it("keeps the gallery's keys off the editor: the arrows do nothing, Escape closes only the editor", async () => {
       mockApi.get.mockResolvedValue([pano, second]);
       const { props } = renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       await waitFor(() => expect(screen.getByRole("button", { name: "Edit default view" })).toBeEnabled());
       await userEvent.click(screen.getByRole("button", { name: "Edit default view" }));
 
       // Focus is on the toolbar button behind the editor, not in a field.
       await userEvent.keyboard("{ArrowRight}");
       expect(screen.getByText(editorTitle)).toHaveTextContent("pano.jpg");
-      expect(screen.getByText("1 / 2")).toBeInTheDocument();
+      expect(getPosition("1 / 2")).toBeInTheDocument();
 
       await userEvent.keyboard("{Escape}");
       expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
@@ -1086,14 +1109,14 @@ describe("MediaGalleryOverlay", () => {
       expect(screen.getByTestId("panorama")).toHaveAttribute("data-editor", "false");
 
       await userEvent.keyboard("{ArrowRight}");
-      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
     });
 
     it("closes on the back gesture without closing the gallery", async () => {
       await settleHistory();
       mockApi.get.mockResolvedValue([pano]);
       const { props } = renderOverlay();
-      await screen.findByText("1 / 1");
+      await findPosition("1 / 1");
       await waitFor(() => expect(screen.getByRole("button", { name: "Edit default view" })).toBeEnabled());
       const depth = () => (window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY] as number;
       const galleryDepth = depth();
@@ -1115,25 +1138,243 @@ describe("MediaGalleryOverlay", () => {
       mockApi.get.mockResolvedValue([pano, second]);
       const removal = deferred<void>();
       renderOverlay({ canRemoveFromAlbum: () => true, onRemoveFromAlbum: vi.fn(() => removal.promise) });
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       await waitFor(() => expect(screen.getByRole("button", { name: "Edit default view" })).toBeEnabled());
       await userEvent.click(screen.getByRole("button", { name: "Remove from album" }));
       await userEvent.click(screen.getByRole("button", { name: "Edit default view" }));
       expect(screen.getByText(editorTitle)).toBeInTheDocument();
 
       await act(async () => removal.resolve());
-      expect(await screen.findByText("1 / 1")).toBeInTheDocument();
+      expect(await findPosition("1 / 1")).toBeInTheDocument();
       expect(screen.queryByText(editorTitle)).not.toBeInTheDocument();
+    });
+  });
+
+  describe("jump", () => {
+    // In the gallery's order (by taken_at, undated last). d4 is Bob's, shared through the album.
+    const jumpItems = [
+      makeItem("d1", { taken_at: "2025-06-01T10:00:00Z" }),
+      makeItem("d2", { taken_at: "2025-06-01T15:30:00Z" }),
+      makeItem("d3", { taken_at: "2025-06-03T08:00:00Z" }),
+      makeItem("d4", { taken_at: "2025-06-03T09:00:00Z", owner_id: "u-bob", owner_name: "Bob" }),
+      makeItem("undated"),
+    ];
+    let zone: ReturnType<typeof vi.spyOn>;
+    const useZone = (timeZone: string) =>
+      zone.mockReturnValue({ timeZone } as Intl.ResolvedDateTimeFormatOptions);
+
+    async function renderJump(items: MediaItem[] = jumpItems) {
+      mockApi.get.mockResolvedValue(items);
+      const view = renderOverlay();
+      await findPosition(`1 / ${items.length}`);
+      return view;
+    }
+
+    async function openGoToDate() {
+      await userEvent.click(screen.getByRole("button", { name: "Go to date" }));
+      const dialog = await screen.findByRole("dialog", { name: "Go to date" });
+      return { dialog, day: within(dialog).getByLabelText<HTMLInputElement>("Day") };
+    }
+
+    beforeEach(() => {
+      // The times and days follow the browser's zone; a fixed one keeps the tests off the machine's.
+      zone = vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions");
+      useZone("UTC");
+    });
+    afterEach(() => zone.mockRestore());
+
+    it("jumps to the item number typed, clamped to 1..N", async () => {
+      await renderJump();
+      const field = positionField();
+
+      await userEvent.click(field);
+      // Typing replaces the number: the field empties, showing it as a placeholder.
+      expect(field).toHaveValue("");
+      expect(field).toHaveAttribute("placeholder", "1");
+      await userEvent.keyboard("3{Enter}");
+      expect(await findPosition("3 / 5")).toBe(field);
+      expect(await screen.findByRole("img", { name: "d3.jpg" })).toBeInTheDocument();
+      // Enter leaves the field, so the gallery's keys work at once.
+      expect(field).not.toHaveFocus();
+
+      await userEvent.click(field);
+      await userEvent.keyboard("0{Enter}");
+      expect(await findPosition("1 / 5")).toBe(field);
+
+      // The field holds as many digits as N has: "99" is 9, the last item.
+      await userEvent.click(field);
+      await userEvent.keyboard("99{Enter}");
+      expect(await findPosition("5 / 5")).toBe(field);
+    });
+
+    it("jumps when the field is left, and not after Escape or with nothing typed", async () => {
+      const { props } = await renderJump();
+      const field = positionField();
+
+      // The iPhone's number pad has no Enter: its Done button leaves the field.
+      await userEvent.click(field);
+      await userEvent.keyboard("4");
+      act(() => field.blur());
+      expect(await findPosition("4 / 5")).toBe(field);
+
+      await userEvent.click(field);
+      await userEvent.keyboard("2{Escape}");
+      expect(field).not.toHaveFocus();
+      expect(getPosition("4 / 5")).toBe(field);
+      expect(props.onClose).not.toHaveBeenCalled();
+
+      await userEvent.click(field);
+      act(() => field.blur());
+      expect(getPosition("4 / 5")).toBe(field);
+      await userEvent.click(field);
+      await userEvent.keyboard("{Enter}");
+      expect(getPosition("4 / 5")).toBe(field);
+    });
+
+    it("takes digits only", async () => {
+      await renderJump();
+      const field = positionField();
+      await userEvent.click(field);
+      await userEvent.keyboard("a-2");
+      expect(field).toHaveValue("2");
+      await userEvent.keyboard("{Enter}");
+      expect(await findPosition("2 / 5")).toBe(field);
+    });
+
+    it("keeps the gallery's keys off the field", async () => {
+      const { props } = await renderJump();
+      const field = positionField();
+      await userEvent.click(field);
+
+      await userEvent.keyboard("{ArrowRight}{ArrowRight}{ArrowLeft}");
+      expect(field).toHaveFocus();
+      // Escape leaves the field, not the gallery.
+      await userEvent.keyboard("{Escape}");
+      expect(getPosition("1 / 5")).toBe(field);
+      expect(props.onClose).not.toHaveBeenCalled();
+
+      // Out of the field, the keys step again.
+      await userEvent.keyboard("{ArrowRight}");
+      expect(await findPosition("2 / 5")).toBe(field);
+      await userEvent.keyboard("{Escape}");
+      expect(props.onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the video keys off the field", async () => {
+      const { play, pause } = stubMediaPlayback();
+      const flat = makeItem("flat", { media_type: "video", taken_at: "2025-06-01T10:00:00Z" });
+      const { container } = await renderJump([flat, ...jumpItems.slice(1)]);
+      await waitFor(() => expect(container.querySelector("video")).toHaveAttribute("src"));
+      await userEvent.click(positionField());
+
+      await userEvent.keyboard(" m");
+      expect(play).not.toHaveBeenCalled();
+      expect(pause).not.toHaveBeenCalled();
+      expect(container.querySelector("video")!.muted).toBe(false);
+      play.mockRestore();
+      pause.mockRestore();
+    });
+
+    it("gives the field and the calendar 44px targets on touch", async () => {
+      await renderJump();
+      expect(positionField()).toHaveClass("touch:min-h-11", "touch:min-w-11");
+      expect(positionField()).toHaveAttribute("inputmode", "numeric");
+      expect(screen.getByRole("button", { name: "Go to date" })).toHaveClass("touch:h-11", "touch:w-11");
+    });
+
+    it("shows a plain position and no jump in a gallery of one", async () => {
+      await renderJump([jumpItems[0]]);
+      expect(screen.getByText("1 / 1")).toBeInTheDocument();
+      expect(screen.queryByRole("textbox", { name: /^Item number/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Go to date" })).not.toBeInTheDocument();
+    });
+
+    it("goes to the first item taken on or after a day", async () => {
+      await renderJump();
+      const { dialog, day } = await openGoToDate();
+      // On the current item's day, offering the days the gallery spans.
+      expect(day).toHaveValue("2025-06-01");
+      expect(day).toHaveAttribute("min", "2025-06-01");
+      expect(day).toHaveAttribute("max", "2025-06-03");
+      expect(dialog).toHaveTextContent("in UTC like the times in the gallery");
+
+      // Nothing on 2 June: the first item of the 3rd.
+      fireEvent.change(day, { target: { value: "2025-06-02" } });
+      await userEvent.click(within(dialog).getByRole("button", { name: "Go" }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(await findPosition("3 / 5")).toBeInTheDocument();
+
+      // Enter in the field goes too; an item later on the day goes back to the day's first.
+      await userEvent.keyboard("{ArrowRight}");
+      await findPosition("4 / 5");
+      const again = await openGoToDate();
+      expect(again.day).toHaveValue("2025-06-03");
+      await userEvent.type(again.day, "{Enter}");
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(await findPosition("3 / 5")).toBeInTheDocument();
+    });
+
+    it("opens on the last dated day from an undated item, which no day reaches", async () => {
+      await renderJump();
+      await userEvent.click(positionField());
+      await userEvent.keyboard("5{Enter}");
+      await findPosition("5 / 5");
+
+      const { dialog, day } = await openGoToDate();
+      expect(day).toHaveValue("2025-06-03");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Go" }));
+      expect(await findPosition("3 / 5")).toBeInTheDocument();
+    });
+
+    it("takes the day in the browser's zone", async () => {
+      // 15:30 UTC on 1 June is 00:30 on 2 June in Tokyo.
+      useZone("Asia/Tokyo");
+      await renderJump();
+      const { dialog, day } = await openGoToDate();
+      expect(dialog).toHaveTextContent("in Asia/Tokyo");
+      fireEvent.change(day, { target: { value: "2025-06-02" } });
+      await userEvent.click(within(dialog).getByRole("button", { name: "Go" }));
+      expect(await findPosition("2 / 5")).toBeInTheDocument();
+    });
+
+    // The field's max refuses such a day in a browser; this is the fallback without it.
+    it("says so when no item was taken on or after the day", async () => {
+      await renderJump();
+      const { dialog, day } = await openGoToDate();
+      fireEvent.change(day, { target: { value: "2025-06-04" } });
+      fireEvent.submit(day.form!);
+
+      expect(within(dialog).getByRole("alert")).toHaveTextContent("No item was taken on or after that day.");
+      expect(getPosition("1 / 5")).toBeInTheDocument();
+      fireEvent.change(day, { target: { value: "2025-06-03" } });
+      expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("keeps the gallery's keys off the date dialog", async () => {
+      const { props } = await renderJump();
+      await openGoToDate();
+
+      await userEvent.keyboard("{ArrowRight}");
+      expect(getPosition("1 / 5")).toBeInTheDocument();
+      await userEvent.keyboard("{Escape}");
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(props.onClose).not.toHaveBeenCalled();
+      expect(getPosition("1 / 5")).toBeInTheDocument();
+    });
+
+    it("offers no date jump when no item is dated", async () => {
+      await renderJump([makeItem("a"), makeItem("b")]);
+      expect(positionField()).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Go to date" })).not.toBeInTheDocument();
     });
   });
 
   // jsdom has no layout: these pin the classes that place the controls per screen.
   describe("layout", () => {
-    const labelBox = () => screen.getByText("1 / 2").closest(".items-center")!;
 
     it("keeps the position label in place while the mouse enlarges the map", async () => {
       const { container } = renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       const map = container.querySelector("[data-size]")!;
       // From sm the map is out of the flow, and the label keeps clear of its chosen width (on
       // both sides on a wide screen, so it is centred there).
@@ -1151,7 +1392,7 @@ describe("MediaGalleryOverlay", () => {
 
     it("keeps the label and its arrows beside a large map on a short screen", async () => {
       const { container } = renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       fireEvent.click(screen.getByRole("button", { name: "Enlarge map" }));
 
       // Under the map while it spans the width (below lg); beside it from lg and on any short
@@ -1167,7 +1408,7 @@ describe("MediaGalleryOverlay", () => {
     // min-h-0 the row gives up height and the map's max-h-full caps it.
     it("lets the bottom row shrink, in the row and the stacked layout", async () => {
       renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       expect(labelBox().parentElement).toHaveClass("min-h-0", "flex-row");
       expect(labelBox().parentElement).not.toHaveClass("shrink-0");
 
@@ -1178,7 +1419,7 @@ describe("MediaGalleryOverlay", () => {
 
     it("puts the side arrows on a dark disc with a 44px target", async () => {
       renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
 
       expect(screen.getByRole("button", { name: "Next" })).toHaveClass("rounded-full", "bg-black/40", "h-11", "w-11");
     });
@@ -1196,20 +1437,20 @@ describe("MediaGalleryOverlay", () => {
 
     it("drops an item unticked from the album the gallery shows", async () => {
       renderOverlay({ params: { album_id: "a1" } });
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
 
       await userEvent.click(screen.getByRole("button", { name: "Albums" }));
       const dialog = await screen.findByRole("dialog");
       await userEvent.click(await within(dialog).findByRole("checkbox", { name: "Iceland" }));
 
       expect(mockApi.removeFromAlbum).toHaveBeenCalledWith("a1", { mediaIds: ["own"] });
-      expect(await screen.findByText("1 / 1")).toBeInTheDocument();
+      expect(await findPosition("1 / 1")).toBeInTheDocument();
       expect(screen.getByText("Shared by Bob")).toBeInTheDocument();
     });
 
     it("keeps an item unticked from another album", async () => {
       renderOverlay({ params: { album_id: "a1" } });
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
 
       await userEvent.click(screen.getByRole("button", { name: "Albums" }));
       const dialog = await screen.findByRole("dialog");
@@ -1218,7 +1459,7 @@ describe("MediaGalleryOverlay", () => {
 
       await waitFor(() => expect(box).toBeEnabled());
       expect(mockApi.removeFromAlbum).toHaveBeenCalledWith("a2", { mediaIds: ["own"] });
-      expect(screen.getByText("1 / 2")).toBeInTheDocument();
+      expect(getPosition("1 / 2")).toBeInTheDocument();
     });
 
     // Focus falls back to <body> in a browser when the ticked checkbox is disabled while its
@@ -1228,7 +1469,7 @@ describe("MediaGalleryOverlay", () => {
       ["fallen back to <body>", true],
     ])("keeps the gallery's keys off the album dialog with focus %s", async (_where, onBody) => {
       const { props } = renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       await userEvent.click(screen.getByRole("button", { name: "Albums" }));
       const dialog = await screen.findByRole("dialog");
       await within(dialog).findByRole("checkbox", { name: "Iceland" });
@@ -1236,7 +1477,7 @@ describe("MediaGalleryOverlay", () => {
       expect(dialog.contains(document.activeElement)).toBe(!onBody);
 
       await userEvent.keyboard("{ArrowRight}");
-      expect(screen.getByText("1 / 2")).toBeInTheDocument();
+      expect(getPosition("1 / 2")).toBeInTheDocument();
       expect(screen.getByRole("dialog")).toBeInTheDocument();
 
       await userEvent.keyboard("{Escape}");
@@ -1245,7 +1486,7 @@ describe("MediaGalleryOverlay", () => {
 
       // Back in the gallery, its keys work again.
       await userEvent.keyboard("{ArrowRight}");
-      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
       await userEvent.keyboard("{Escape}");
       expect(props.onClose).toHaveBeenCalledTimes(1);
     });
@@ -1257,8 +1498,8 @@ describe("MediaGalleryOverlay", () => {
 
     it("opens on the item the URL names", async () => {
       renderOverlay({ route, initialItemId: "shared" });
-      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
-      expect(screen.getByText("· shared.jpg")).toBeInTheDocument();
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
+      expect(screen.getByText("shared.jpg")).toBeInTheDocument();
       expect(screen.queryByText(/That item is not in this/)).not.toBeInTheDocument();
     });
 
@@ -1267,11 +1508,11 @@ describe("MediaGalleryOverlay", () => {
       ["trip", "trips" as const],
     ])("opens on the first item and says so when the item is not in the %s", async (noun, tab) => {
       renderOverlay({ route: { tab, collectionId: "c1" }, initialItemId: "gone" });
-      expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+      expect(await findPosition("1 / 2")).toBeInTheDocument();
       expect(screen.getByRole("status")).toHaveTextContent(`That item is not in this ${noun}.`);
 
       await userEvent.keyboard("{ArrowRight}");
-      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
       expect(screen.queryByText(`That item is not in this ${noun}.`)).not.toBeInTheDocument();
     });
 
@@ -1286,9 +1527,9 @@ describe("MediaGalleryOverlay", () => {
       expect(depth()).toBe(1);
 
       await act(async () => list.resolve([shared, own]));
-      expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
       await userEvent.keyboard("{ArrowLeft}");
-      expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+      expect(await findPosition("1 / 2")).toBeInTheDocument();
       await waitFor(() => expect(location()).toBe("/albums/a1?item=own"));
       expect(depth()).toBe(1);
 
@@ -1313,7 +1554,7 @@ describe("MediaGalleryOverlay", () => {
       await settleHistory();
       window.history.replaceState(null, "", "/albums");
       const { unmount } = renderOverlay();
-      expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+      expect(await findPosition("1 / 2")).toBeInTheDocument();
       await settleHistory();
       expect(location()).toBe("/albums");
       unmount();
@@ -1329,7 +1570,7 @@ describe("MediaGalleryOverlay", () => {
       vi.spyOn(console, "error").mockImplementation(() => {});
       mockApi.getMediaUrl.mockRejectedValue(err);
       renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
 
       expect(await screen.findByText(message)).toBeInTheDocument();
       expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
@@ -1354,7 +1595,7 @@ describe("MediaGalleryOverlay", () => {
         id === "own" ? slow.promise : Promise.resolve("https://s3.example/shared")
       );
       renderOverlay();
-      await screen.findByText("1 / 2");
+      await findPosition("1 / 2");
       expect(screen.getByText("Loading…")).toBeInTheDocument();
 
       // The shared item was prefetched, so its URL is ready straight away.
@@ -1390,7 +1631,7 @@ describe("MediaGalleryOverlay", () => {
         expect(await screen.findByTestId("panorama")).toHaveAttribute("data-url", "https://s3.example/p1");
 
         step("Next");
-        expect(screen.getByText("2 / 2")).toBeInTheDocument();
+        expect(getPosition("2 / 2")).toBeInTheDocument();
         expect(screen.getByText("Loading…")).toBeInTheDocument();
         expect(screen.queryByTestId("panorama")).not.toBeInTheDocument();
         expect(screen.queryByTestId("video360")).not.toBeInTheDocument();
