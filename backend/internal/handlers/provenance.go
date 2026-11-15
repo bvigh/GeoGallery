@@ -135,15 +135,18 @@ type provenanceTrip struct {
 }
 
 type provenanceTime struct {
-	Recorded         string           `json:"recorded"` // "ingest", "backfill", "retime" or "not_recorded"
-	Evidence         json.RawMessage  `json:"evidence"` // null when not_recorded
+	Recorded string          `json:"recorded"` // "ingest", "backfill", "retime" or "not_recorded"
+	Evidence json.RawMessage `json:"evidence"` // null when not_recorded
+	// ServerCameraZone is the zone the owner's uploads are read in today: their setting, else the
+	// server's. The name predates per-user zones.
 	ServerCameraZone serverCameraZone `json:"server_camera_zone"`
 }
 
-// serverCameraZone is the zone this server applies today.
+// serverCameraZone is the camera zone that applies to the owner's uploads today.
 type serverCameraZone struct {
 	Name         string `json:"name"`
 	Set          bool   `json:"set"`
+	From         string `json:"from"` // "user" (the owner's setting) or "server"
 	UTCFallback  bool   `json:"utc_fallback"`
 	OffsetNowMin int    `json:"offset_now_min"`
 }
@@ -275,7 +278,7 @@ func (h *ProvenanceHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	item, evidence, err := h.loadItem(r.Context(), id, ownerID)
+	item, evidence, zoneSetting, err := h.loadItem(r.Context(), id, ownerID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -283,6 +286,12 @@ func (h *ProvenanceHandler) Get(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("provenance: load item failed", "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	ownerZone, err := withZoneSetting(h.cameraZone, zoneSetting)
+	if err != nil {
+		slog.Error("provenance: camera zone setting failed", "err", err)
+		http.Error(w, "camera zone setting error", http.StatusInternalServerError)
 		return
 	}
 	placement, err := h.placement(r.Context(), ownerID, item)
@@ -298,7 +307,7 @@ func (h *ProvenanceHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := json.Marshal(ProvenanceResponse{Item: item, Time: h.timeFacts(evidence), Placement: placement, Context: track})
+	body, err := json.Marshal(ProvenanceResponse{Item: item, Time: timeFacts(evidence, ownerZone), Placement: placement, Context: track})
 	if err != nil {
 		slog.Error("provenance: encode response failed", "err", err)
 		http.Error(w, "encode error", http.StatusInternalServerError)
@@ -310,29 +319,31 @@ func (h *ProvenanceHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// loadItem reads one own item, its trip and its capture evidence. The literal owner_id is what
-// makes a foreign or shared item pgx.ErrNoRows, and the trip is the owner's too: the composite
-// trip FK keeps media in their owner's trips, and the join says so again.
-func (h *ProvenanceHandler) loadItem(ctx context.Context, id, ownerID string) (provenanceItem, []byte, error) {
+// loadItem reads one own item, its trip and its capture evidence, with the owner's camera zone
+// setting (nil when unset). The literal owner_id is what makes a foreign or shared item
+// pgx.ErrNoRows, and the trip is the owner's too: the composite trip FK keeps media in their owner's
+// trips, and the join says so again.
+func (h *ProvenanceHandler) loadItem(ctx context.Context, id, ownerID string) (provenanceItem, []byte, *string, error) {
 	var item provenanceItem
 	var evidence []byte
-	var tripID, tripName *string
+	var tripID, tripName, zoneSetting *string
 	err := h.db.QueryRow(ctx, `
 		SELECT m.id::text, m.filename, m.media_type, m.taken_at, m.created_at,
 		       ST_Y(m.location::geometry), ST_X(m.location::geometry),
 		       m.gps_source, m.gps_confidence, m.camera_model, m.width_px, m.height_px, m.duration_sec,
-		       m.capture_evidence, t.id::text, t.name
+		       m.capture_evidence, t.id::text, t.name, u.camera_timezone
 		FROM media m
+		JOIN users u ON u.id = m.owner_id
 		LEFT JOIN trips t ON t.id = m.trip_id AND t.owner_id = m.owner_id
 		WHERE m.id = $1 AND m.owner_id = $2
 	`, id, ownerID).Scan(
 		&item.ID, &item.Filename, &item.MediaType, &item.TakenAt, &item.CreatedAt,
 		&item.Lat, &item.Lng,
 		&item.GPSSource, &item.GPSConfidence, &item.CameraModel, &item.WidthPx, &item.HeightPx, &item.DurationSec,
-		&evidence, &tripID, &tripName,
+		&evidence, &tripID, &tripName, &zoneSetting,
 	)
 	if err != nil {
-		return provenanceItem{}, nil, err
+		return provenanceItem{}, nil, nil, err
 	}
 	if tripID != nil && tripName != nil {
 		item.Trip = &provenanceTrip{ID: *tripID, Name: *tripName}
@@ -342,7 +353,7 @@ func (h *ProvenanceHandler) loadItem(ctx context.Context, id, ownerID string) (p
 	if item.TakenAt != nil && !h.matchWindowFits(*item.TakenAt) {
 		item.TakenAt = nil
 	}
-	return item, evidence, nil
+	return item, evidence, zoneSetting, nil
 }
 
 // matchWindowFits reports whether both ends of the match window around t can be sent as JSON. Every
@@ -352,9 +363,9 @@ func (h *ProvenanceHandler) matchWindowFits(t time.Time) bool {
 	return utcTime(&from) != nil && utcTime(&to) != nil
 }
 
-// timeFacts reports how taken_at was recorded and the zone this server applies today.
-func (h *ProvenanceHandler) timeFacts(evidence []byte) provenanceTime {
-	loc := h.cameraZone.Loc
+// timeFacts reports how taken_at was recorded and zone, the camera zone the owner's uploads get today.
+func timeFacts(evidence []byte, zone ingest.CameraZone) provenanceTime {
+	loc := zone.Loc
 	if loc == nil {
 		loc = time.UTC // a zero CameraZone reads wall clocks as UTC
 	}
@@ -362,25 +373,32 @@ func (h *ProvenanceHandler) timeFacts(evidence []byte) provenanceTime {
 	facts := provenanceTime{
 		Recorded: "not_recorded",
 		ServerCameraZone: serverCameraZone{
-			Name:         h.cameraZone.Name(),
-			Set:          h.cameraZone.Set,
-			UTCFallback:  h.cameraZone.UTCFallback,
+			Name:         zone.Name(),
+			Set:          zone.Set,
+			From:         zone.Source(),
+			UTCFallback:  zone.UTCFallback,
 			OffsetNowMin: offsetSeconds / 60,
 		},
 	}
+	facts.Recorded, facts.Evidence = recordedEvidence(evidence)
+	return facts
+}
+
+// recordedEvidence returns who recorded a capture_evidence value and the value, or "not_recorded"
+// and nil when it is missing or not written by a known writer.
+func recordedEvidence(evidence []byte) (string, json.RawMessage) {
 	var header struct {
 		By string `json:"by"`
 	}
 	if len(evidence) == 0 || json.Unmarshal(evidence, &header) != nil {
-		return facts
+		return "not_recorded", nil
 	}
 	// server retime writes "retime" when it moves taken_at, with the old time in retimed_from.
 	switch header.By {
 	case "ingest", "backfill", "retime":
-		facts.Recorded = header.By
-		facts.Evidence = evidence
+		return header.By, evidence
 	}
-	return facts
+	return "not_recorded", nil
 }
 
 // placementFacts are the inputs of placementState. DeltaM and NowConfidence describe the recompute

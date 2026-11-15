@@ -184,16 +184,16 @@ func TestProvenanceTimeFacts(t *testing.T) {
 		{"no by key", zone, `{"v":1}`, "not_recorded", false, "Test/Zone", true, false, 330},
 		{"a zero zone reads as UTC", ingest.CameraZone{}, "", "not_recorded", false, "server zone (unset)", false, false, 0},
 		{"unset on a UTC server", ingest.CameraZone{Loc: time.UTC, UTCFallback: true}, "", "not_recorded", false, "server zone (unset)", false, true, 0},
+		{"the owner's setting over a UTC server", ingest.CameraZone{Loc: time.UTC, UTCFallback: true}.In(time.FixedZone("Owner/Zone", 540*60), ingest.CameraZoneFromUser),
+			"", "not_recorded", false, "Owner/Zone", true, false, 540},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := &ProvenanceHandler{cameraZone: tt.zone}
-
 			var evidence []byte
 			if tt.evidence != "" {
 				evidence = []byte(tt.evidence)
 			}
-			got := h.timeFacts(evidence)
+			got := timeFacts(evidence, tt.zone)
 
 			assert.Equal(t, tt.wantRecorded, got.Recorded)
 			if tt.wantEvidence {
@@ -207,6 +207,7 @@ func TestProvenanceTimeFacts(t *testing.T) {
 			assert.Equal(t, tt.wantSet, got.ServerCameraZone.Set)
 			assert.Equal(t, tt.wantFallback, got.ServerCameraZone.UTCFallback)
 			assert.Equal(t, tt.wantOffset, got.ServerCameraZone.OffsetNowMin)
+			assert.Equal(t, tt.zone.Source(), got.ServerCameraZone.From)
 		})
 	}
 }

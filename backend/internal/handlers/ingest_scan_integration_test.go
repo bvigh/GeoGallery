@@ -54,7 +54,7 @@ func TestRunIngestScan_Integration_OwnershipAndDedup(t *testing.T) {
 	deps := recordingIngestDeps(pool, store, &matcherOwners, &tripOwners)
 	ctx := context.Background()
 
-	res, err := RunIngestScan(ctx, deps, dir, userA)
+	res, err := RunIngestScan(ctx, deps, dir, userA, nil)
 	require.NoError(t, err)
 	assert.Equal(t, ScanResult{Ingested: 2}, scanCounts(res))
 	assert.Equal(t, 2, countMedia(t, pool, userA), "both rows are owned by A")
@@ -65,7 +65,7 @@ func TestRunIngestScan_Integration_OwnershipAndDedup(t *testing.T) {
 		assert.Regexp(t, `^media/`+userA+`/[0-9a-f]{32}\.jpg$`, key)
 	}
 
-	res, err = RunIngestScan(ctx, deps, dir, userA)
+	res, err = RunIngestScan(ctx, deps, dir, userA, nil)
 	require.NoError(t, err)
 	assert.Equal(t, ScanResult{Skipped: 2}, scanCounts(res), "a second run for A deduplicates")
 	assert.Equal(t, 2, countMedia(t, pool, userA))
@@ -73,7 +73,7 @@ func TestRunIngestScan_Integration_OwnershipAndDedup(t *testing.T) {
 	assert.Empty(t, store.deleted)
 	assertNoOrphans(t, pool, store)
 
-	res, err = RunIngestScan(ctx, deps, dir, userB)
+	res, err = RunIngestScan(ctx, deps, dir, userB, nil)
 	require.NoError(t, err)
 	assert.Equal(t, ScanResult{Ingested: 2}, scanCounts(res), "dedup is per owner, so B ingests the same files again")
 	assert.Equal(t, 2, countMedia(t, pool, userB))
@@ -128,7 +128,7 @@ func TestRunIngestScan_Integration_TimeReportCountsTheStoredEvidence(t *testing.
 		return counts
 	}
 
-	res, err := RunIngestScan(ctx, deps, dir, owner)
+	res, err := RunIngestScan(ctx, deps, dir, owner, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, map[string]int{"exif_original": 4, "exif_ifd0": 1, "mtime": 1, "none": 1}, stored("src"))
@@ -138,7 +138,7 @@ func TestRunIngestScan_Integration_TimeReportCountsTheStoredEvidence(t *testing.
 	assert.Equal(t, []string{"copied.jpg"}, res.TimeReport.FileDateNames)
 
 	writeFile(t, dir, "later.jpg", "no exif: later")
-	res, err = RunIngestScan(ctx, deps, dir, owner)
+	res, err = RunIngestScan(ctx, deps, dir, owner, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, ScanResult{Ingested: 1, Skipped: 7}, scanCounts(res))
@@ -158,7 +158,7 @@ func TestRunIngestScan_Integration_ZeroByteVideoCountsAsFailed(t *testing.T) {
 	var matcherOwners, tripOwners []string
 	deps := recordingIngestDeps(pool, &fakeObjectStore{}, &matcherOwners, &tripOwners)
 
-	res, err := RunIngestScan(context.Background(), deps, dir, userA)
+	res, err := RunIngestScan(context.Background(), deps, dir, userA, nil)
 
 	require.NoError(t, err, "per-file failures do not abort the scan")
 	assert.Equal(t, ScanResult{Ingested: 1, Failed: 1}, scanCounts(res))

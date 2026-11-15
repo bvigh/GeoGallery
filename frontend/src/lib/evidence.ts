@@ -5,9 +5,11 @@
 
 import { cameraName, formatUtcOffset } from "@/lib/clockRules";
 import { formatDuration, formatOffset } from "@/lib/time";
+import { SERVER_ZONE_UNSET } from "@/lib/timeZones";
 import type {
   Bracket,
   BracketShape,
+  CameraZoneFrom,
   CaptureEvidence,
   CaptureSource,
   Estimate,
@@ -25,7 +27,6 @@ import type {
 } from "@/types";
 
 export const NOT_RECORDED = "not recorded";
-const SERVER_ZONE_UNSET = "server zone (unset)";
 
 export const STANDING_LINE = "A wrong clock looks equally consistent here.";
 export const REMATCH_FAILED = "Re-match did not finish; some items may have changed.";
@@ -299,6 +300,7 @@ interface ZoneFacts {
   offsetIgnored: boolean;
   clockRule: EvidenceClockRule | null;
   cameraZone: string;
+  cameraZoneFrom: CameraZoneFrom; // who named cameraZone; the server where nothing says
   cameraZoneUtcFallback: boolean;
 }
 
@@ -318,10 +320,15 @@ function zoneFacts(
       // Rows recorded before clock rules existed lack the key.
       clockRule: evidence.clock_rule ?? null,
       cameraZone: evidence.camera_zone,
+      // Rows recorded before per-user zones lack the key: they were read in the server's.
+      cameraZoneFrom: evidence.camera_zone_from ?? "server",
       cameraZoneUtcFallback: evidence.camera_zone_utc_fallback,
     };
   }
   if (!reread?.rule_today) return null;
+  // The zone the re-read used: the one chosen for the item's upload, or the owner's today, or the
+  // server's. Only the server's can be the UTC fallback.
+  const from = reread.rule_today.zone_from ?? serverZone.from ?? "server";
   return {
     recorded: false,
     rule: reread.rule_today.zone_rule,
@@ -331,7 +338,8 @@ function zoneFacts(
     offsetIgnored: reread.file.offset_ignored,
     clockRule: reread.rule_today.clock_rule ?? null,
     cameraZone: reread.rule_today.zone_name ?? serverZone.name,
-    cameraZoneUtcFallback: serverZone.utc_fallback,
+    cameraZoneFrom: from,
+    cameraZoneUtcFallback: from === "server" && serverZone.utc_fallback,
   };
 }
 
@@ -350,7 +358,7 @@ function zoneChipText(facts: ZoneFacts & { rule: ZoneRule }): string {
         facts.cameraZone === SERVER_ZONE_UNSET
           ? "the server's own zone, because CAMERA_TIMEZONE is unset"
           : facts.cameraZone;
-      return `${zone}; nothing in the file confirms this`;
+      return `${zone}${CAMERA_ZONE_NAMED_BY[facts.cameraZoneFrom]}; nothing in the file confirms this`;
     }
   }
 }
@@ -360,12 +368,22 @@ function clockRuleName(rule: EvidenceClockRule): string {
   return `Your rule for ${cameraName(rule.make, rule.model)}: clock showed ${formatUtcOffset(rule.offset_min)}`;
 }
 
+// What follows a camera zone's name in its chip: who named it. The server's zone needs no words.
+const CAMERA_ZONE_NAMED_BY: Record<CameraZoneFrom, string> = {
+  batch: ", chosen for its upload",
+  user: ", your camera zone",
+  server: "",
+};
+
 export const CLOCK_RULE_KEEPS_TIME = "Changing this rule in Settings does not move this time.";
+export const CAMERA_ZONE_KEEPS_TIME = "Changing your camera zone in Settings does not move this time.";
 
 function zoneNotes(facts: ZoneFacts): string[] {
   const notes = facts.offsetIgnored ? [offsetIgnoredSentence(facts.offsetTag)] : [];
   // The recorded rule is a copy: the rule itself may have been changed or deleted since.
   if (facts.rule === "clock_rule" && facts.recorded) notes.push(CLOCK_RULE_KEEPS_TIME);
+  // Likewise the owner's zone setting: a new one dates new uploads only.
+  if (facts.rule === "camera" && facts.recorded && facts.cameraZoneFrom === "user") notes.push(CAMERA_ZONE_KEEPS_TIME);
   return notes;
 }
 

@@ -243,8 +243,19 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	// ContentLength is -1 for chunked bodies; nginx/Caddy limits apply before this point.
 	slog.Info("upload: request received", "owner", ownerID, "content_length", r.ContentLength, "limit", maxUploadBodyBytes)
 
+	batchZone, ok := uploadZone(w, r)
+	if !ok {
+		return
+	}
 	albumID, ok := h.uploadAlbum(w, r, ownerID)
 	if !ok {
+		return
+	}
+	// The zone is chosen before the body is read: a failure then costs no upload.
+	registrar, err := h.registrar.forOwner(r.Context(), ownerID, batchZone)
+	if err != nil {
+		slog.Error("upload: camera zone lookup failed", "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
 
@@ -283,7 +294,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	var uploaded, skipped, failed []string
 	var mediaIDs []string // uploaded and duplicate files alike, for the album
-	timeReport := newTimeReport(h.registrar.cameraZone)
+	timeReport := newTimeReport(registrar.cameraZone)
 	for i, fh := range files {
 		fileStart := time.Now()
 		f, err := fh.Open()
@@ -301,7 +312,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		registered, err := h.registrar.registerMedia(r.Context(), ownerID, f, fh.Size, fh.Filename, fallbackMtime)
+		registered, err := registrar.registerMedia(r.Context(), ownerID, f, fh.Size, fh.Filename, fallbackMtime)
 		f.Close()
 		if err != nil {
 			slog.Error("upload: register media failed", "file", fh.Filename, "size", fh.Size, "err", err)
@@ -412,6 +423,22 @@ func (h *MediaHandler) KnownHashes(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"known": known})
+}
+
+// uploadZone returns the upload's ?camera_timezone: the zone its files' camera clocks show, which
+// outranks the owner's setting and CAMERA_TIMEZONE, nil when the param is absent. It is a query param,
+// like album_id, so a name this server cannot load is 400 with the body unread.
+func uploadZone(w http.ResponseWriter, r *http.Request) (*time.Location, bool) {
+	q := r.URL.Query()
+	if !q.Has("camera_timezone") {
+		return nil, true
+	}
+	loc, err := ingest.LoadZone(q.Get("camera_timezone"))
+	if err != nil {
+		http.Error(w, "camera_timezone: "+err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+	return loc, true
 }
 
 // uploadAlbum returns the canonical ?album_id, or "" when the param is absent. It is a query

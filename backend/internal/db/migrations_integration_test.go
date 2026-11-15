@@ -646,3 +646,49 @@ func TestMigration000011_Constraints(t *testing.T) {
 		}
 	})
 }
+
+// Migration 13 adds the first per-user setting, users.camera_timezone: NULL (the server's zone) for
+// every existing user, a name of 1 to 64 characters otherwise.
+func TestMigration000013_UserCameraTimezone(t *testing.T) {
+	dsn := testdb.NewEmpty(t)
+	m := newMigrator(t, dsn)
+	migrateTo(t, m, 12)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.False(t, columnExists(ctx, t, conn, "users", "camera_timezone"))
+	})
+
+	migrateTo(t, m, 13)
+	assertUserCameraTimezone := func() {
+		withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+			assert.True(t, columnExists(ctx, t, conn, "users", "camera_timezone"))
+			var zone *string
+			require.NoError(t, conn.QueryRow(ctx, `SELECT camera_timezone FROM users WHERE id = $1`, legacyOwnerID).Scan(&zone))
+			assert.Nil(t, zone, "an existing user keeps the server's zone")
+
+			_, err := conn.Exec(ctx, `UPDATE users SET camera_timezone = 'Asia/Tokyo' WHERE id = $1`, legacyOwnerID)
+			require.NoError(t, err)
+			for _, bad := range []string{"", strings.Repeat("A", 65)} {
+				_, err := conn.Exec(ctx, `UPDATE users SET camera_timezone = $2 WHERE id = $1`, legacyOwnerID, bad)
+				var pgErr *pgconn.PgError
+				require.True(t, errors.As(err, &pgErr), "%q: %v", bad, err)
+				assert.Equal(t, "users_camera_timezone_length", pgErr.ConstraintName)
+			}
+		})
+	}
+	assertUserCameraTimezone()
+
+	migrateTo(t, m, 12)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.False(t, columnExists(ctx, t, conn, "users", "camera_timezone"))
+		var n int
+		require.NoError(t, conn.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE id = $1`, legacyOwnerID).Scan(&n))
+		assert.Equal(t, 1, n, "the down migration keeps the users")
+	})
+
+	migrateTo(t, m, 13)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		_, err := conn.Exec(ctx, `UPDATE users SET camera_timezone = NULL`)
+		require.NoError(t, err)
+	})
+	assertUserCameraTimezone()
+}

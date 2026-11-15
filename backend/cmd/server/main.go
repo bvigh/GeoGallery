@@ -133,10 +133,18 @@ func runSubcommand(name string, args []string, stdout io.Writer) int {
 	case "scan":
 		userID := fs.String("user", "", "id of the user whose library receives the files (see `server users`)")
 		dir := fs.String("dir", "", "directory to scan (default INGEST_WATCH_DIR)")
+		tz := fs.String("tz", "", "IANA zone the files' camera clocks show, e.g. Asia/Tokyo (default: the user's camera zone setting, else CAMERA_TIMEZONE)")
+		var zone *time.Location
 		needS3 = true
 		check = func() error {
 			if *userID == "" {
 				return errors.New("--user is required (find the id with `server users`)")
+			}
+			if *tz != "" {
+				var err error
+				if zone, err = ingest.LoadZone(*tz); err != nil {
+					return fmt.Errorf("--tz: %w", err)
+				}
 			}
 			return nil
 		}
@@ -153,7 +161,7 @@ func runSubcommand(name string, args []string, stdout io.Writer) int {
 			deps := handlers.NewIngestDeps(env.pool, env.s3,
 				time.Duration(env.cfg.GPSMatchWindowHours)*time.Hour, env.cfg.TripGapHours, cameraZone(env.cfg))
 			scan := func(ctx context.Context, dir, ownerID string) (handlers.ScanResult, error) {
-				return handlers.RunIngestScan(ctx, deps, dir, ownerID)
+				return handlers.RunIngestScan(ctx, deps, dir, ownerID, zone)
 			}
 			return runScan(ctx, stdout, scan, users, *userID, scanDir)
 		}
@@ -262,19 +270,24 @@ func runScan(ctx context.Context, stdout io.Writer, scan scanFunc, users []auth.
 }
 
 // writeTimeReport prints how the ingested files were dated: by source, then EXIF times by the rule
-// that gave their offset, with the camera zone. It warns when EXIF times were read in a camera zone
-// that is UTC all year, which few camera clocks show, and says how to repair them.
+// that gave their offset, with the camera zone and who named it. It warns when EXIF times were read in
+// a camera zone that is UTC all year and that the scan did not name (--tz), which few camera clocks
+// show, and says how to repair them.
 func writeTimeReport(w io.Writer, r handlers.TimeReport, userID string) {
 	src, zone := r.BySource, r.ByZone
 	fmt.Fprintf(w, "by_source: exif_original=%d exif_ifd0=%d container=%d mtime=%d none=%d\n",
 		src.ExifOriginal, src.ExifIFD0, src.Container, src.Mtime, src.None)
-	fmt.Fprintf(w, "by_zone: gps=%d clock_rule=%d offset=%d camera=%d camera_zone=%q\n",
-		zone.GPS, zone.ClockRule, zone.Offset, zone.Camera, r.CameraZone)
+	fmt.Fprintf(w, "by_zone: gps=%d clock_rule=%d offset=%d camera=%d camera_zone=%q camera_zone_from=%s\n",
+		zone.GPS, zone.ClockRule, zone.Offset, zone.Camera, r.CameraZone, r.CameraZoneFrom)
 	if r.AssumedZoneIsUTC {
+		set := "set CAMERA_TIMEZONE to it (e.g. Europe/Warsaw) or the user's camera zone in Settings"
+		if r.CameraZoneFrom == ingest.CameraZoneFromUser {
+			set = "change the user's camera zone in Settings"
+		}
 		fmt.Fprintf(w, "warning: the EXIF times of %d file(s) were read in camera zone %q, which is UTC all year. "+
-			"If your camera clocks show another zone, set CAMERA_TIMEZONE to it (e.g. Europe/Warsaw), "+
+			"If your camera clocks show another zone, %s, "+
 			"then run `server retime --user %s` to list the times that would move, and again with --apply to move them.\n",
-			zone.Camera, r.CameraZone, userID)
+			zone.Camera, r.CameraZone, set, userID)
 	}
 }
 
@@ -354,11 +367,13 @@ func formatUTCOffset(minutes int) string {
 	return fmt.Sprintf("UTC%s%02d:%02d", sign, minutes/60, minutes%60)
 }
 
-// cameraZone is the camera zone as ingest reads and records it, with the camera rules.
+// cameraZone is the server's camera zone as ingest reads and records it, with the camera rules. A
+// user's setting or an upload's zone replaces its zone (ingest.CameraZone.In).
 func cameraZone(cfg *config.Config) ingest.CameraZone {
 	return ingest.CameraZone{
 		Loc:         cfg.CameraTimezone,
 		Set:         cfg.CameraTimezoneSet,
+		From:        ingest.CameraZoneFromServer,
 		UTCFallback: cfg.CameraTimezoneFallsBackToUTC(),
 		Rules:       cfg.CameraRules,
 	}
@@ -412,6 +427,7 @@ type routeHandlers struct {
 	provenance *handlers.ProvenanceHandler
 	checks     *handlers.ChecksHandler
 	clockRules *handlers.CameraClockRuleHandler
+	settings   *handlers.SettingsHandler
 }
 
 func serve() {
@@ -459,6 +475,7 @@ func serve() {
 		provenance: handlers.NewProvenanceHandler(pool, s3Client, matchWindow, cameraZone(cfg)),
 		checks:     handlers.NewChecksHandler(pool, matchWindow),
 		clockRules: handlers.NewCameraClockRuleHandler(pool),
+		settings:   handlers.NewSettingsHandler(pool, cameraZone(cfg)),
 	}
 
 	addr := fmt.Sprintf(":%s", cfg.ServerPort)
@@ -523,6 +540,11 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 			r.Put("/camera-clock-rules/{id}", h.clockRules.Update)
 			r.Delete("/camera-clock-rules/{id}", h.clockRules.Delete)
 			r.Get("/cameras", h.clockRules.Cameras)
+
+			// The caller's own settings. The camera zone only changes how their future uploads are
+			// dated, and is not location history, so tokens may use these.
+			r.Get("/me/settings", h.settings.Get)
+			r.Patch("/me/settings", h.settings.Update)
 
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireSession)

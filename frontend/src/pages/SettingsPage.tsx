@@ -3,6 +3,7 @@ import { api, ApiError } from "@/api/client";
 import type { ApiToken, CreatedApiToken } from "@/types";
 import { CopyField } from "@/components/CopyField";
 import { CameraClockRules } from "@/components/settings/CameraClockRules";
+import { CameraTimeZone } from "@/components/settings/CameraTimeZone";
 import {
   Dialog,
   DialogContent,
@@ -262,6 +263,9 @@ export function SettingsPage() {
           </div>
         )}
       </section>
+      <div className="mt-8">
+        <CameraTimeZone />
+      </div>
       <div className="mt-8">
         <CameraClockRules />
       </div>

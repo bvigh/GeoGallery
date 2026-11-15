@@ -15,6 +15,8 @@ vi.mock("@/api/client", async (importOriginal) => {
       revokeToken: vi.fn(),
       listCameraClockRules: vi.fn(),
       listCameras: vi.fn(),
+      getSettings: vi.fn(),
+      updateSettings: vi.fn(),
     },
   };
 });
@@ -25,6 +27,8 @@ const mockApi = api as unknown as {
   revokeToken: ReturnType<typeof vi.fn>;
   listCameraClockRules: ReturnType<typeof vi.fn>;
   listCameras: ReturnType<typeof vi.fn>;
+  getSettings: ReturnType<typeof vi.fn>;
+  updateSettings: ReturnType<typeof vi.fn>;
 };
 
 const future = new Date(Date.now() + 30 * 86400_000).toISOString();
@@ -58,6 +62,7 @@ describe("SettingsPage", () => {
     mockApi.revokeToken.mockResolvedValue(undefined);
     mockApi.listCameraClockRules.mockResolvedValue([]);
     mockApi.listCameras.mockResolvedValue([]);
+    mockApi.getSettings.mockResolvedValue({ camera_timezone: null, defaults: { camera_timezone: "Europe/Warsaw" } });
   });
 
   afterEach(() => {
@@ -77,7 +82,7 @@ describe("SettingsPage", () => {
     expect(within(oldRow).queryByRole("button", { name: /Revoke/ })).not.toBeInTheDocument();
   });
 
-  it("has the API tokens and the camera clocks sections", async () => {
+  it("has the API tokens, camera time zone and camera clocks sections", async () => {
     mockApi.listCameraClockRules.mockResolvedValue([
       {
         id: "r1",
@@ -92,8 +97,13 @@ describe("SettingsPage", () => {
       },
     ]);
     render(<SettingsPage />);
-    expect(screen.getByRole("heading", { name: "API tokens" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Camera clocks" })).toBeInTheDocument();
+    // In this order: tokens, then the zone a capture time falls back to, then the clock rules that outrank it.
+    expect(screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
+      "API tokens",
+      "Camera time zone",
+      "Camera clocks",
+    ]);
+    expect(await screen.findByRole("option", { name: "Server default (Europe/Warsaw)" })).toBeInTheDocument();
     expect(await screen.findByText("cron")).toBeInTheDocument();
     expect(await screen.findByText("Clock showed UTC+02:00 · always")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add rule" })).toBeInTheDocument();

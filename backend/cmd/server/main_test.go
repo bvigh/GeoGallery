@@ -100,6 +100,7 @@ func newTestRouter(t *testing.T) http.Handler {
 		provenance: handlers.NewProvenanceHandler(nil, nil, time.Hour, ingest.CameraZone{}),
 		checks:     handlers.NewChecksHandler(refusingPool(t), time.Hour),
 		clockRules: handlers.NewCameraClockRuleHandler(nil),
+		settings:   handlers.NewSettingsHandler(refusingPool(t), ingest.CameraZone{}),
 	}
 	return newRouter(cop, auth.New(store, nil, cfg), h)
 }
@@ -186,6 +187,14 @@ func TestRouter_AuthWiring(t *testing.T) {
 		{"anonymous cameras", http.MethodGet, "/api/cameras", false, "", nil, http.StatusUnauthorized},
 		{"anonymous user directory", http.MethodGet, "/api/users", false, "", nil, http.StatusUnauthorized},
 
+		// Settings are open to tokens. The settings handler's pool refuses every connection, so a 500
+		// shows a request reached it, and a 400 that the body is checked before the database.
+		{"token reads settings", http.MethodGet, "/api/me/settings", true, "", nil, http.StatusInternalServerError},
+		{"session reads settings", http.MethodGet, "/api/me/settings", false, userSession, nil, http.StatusInternalServerError},
+		{"token changes settings, no body", http.MethodPatch, "/api/me/settings", true, "", nil, http.StatusBadRequest},
+		{"anonymous settings", http.MethodGet, "/api/me/settings", false, "", nil, http.StatusUnauthorized},
+		{"anonymous settings change", http.MethodPatch, "/api/me/settings", false, "", nil, http.StatusUnauthorized},
+
 		{"session lists tokens", http.MethodGet, "/api/tokens", false, userSession, nil, http.StatusOK},
 		{"non-admin session admin route", http.MethodGet, "/api/admin/users", false, userSession, nil, http.StatusForbidden},
 		{"admin session admin route", http.MethodGet, "/api/admin/users", false, adminSession, nil, http.StatusOK},
@@ -222,17 +231,18 @@ func TestCameraZone(t *testing.T) {
 	warsaw, err := time.LoadLocation("Europe/Warsaw")
 	require.NoError(t, err)
 	rules := ingest.CameraRules{{Make: "Acme", IgnoreOffsetTag: true, Why: "test"}}
+	const server = ingest.CameraZoneFromServer
 	tests := []struct {
 		name string
 		cfg  config.Config
 		want ingest.CameraZone
 	}{
-		{"set", config.Config{CameraTimezone: warsaw, CameraTimezoneSet: true}, ingest.CameraZone{Loc: warsaw, Set: true}},
-		{"set to UTC is not a fallback", config.Config{CameraTimezone: time.UTC, CameraTimezoneSet: true}, ingest.CameraZone{Loc: time.UTC, Set: true}},
-		{"unset on a server with a zone", config.Config{CameraTimezone: warsaw}, ingest.CameraZone{Loc: warsaw}},
-		{"unset on a UTC server", config.Config{CameraTimezone: time.UTC}, ingest.CameraZone{Loc: time.UTC, UTCFallback: true}},
+		{"set", config.Config{CameraTimezone: warsaw, CameraTimezoneSet: true}, ingest.CameraZone{Loc: warsaw, Set: true, From: server}},
+		{"set to UTC is not a fallback", config.Config{CameraTimezone: time.UTC, CameraTimezoneSet: true}, ingest.CameraZone{Loc: time.UTC, Set: true, From: server}},
+		{"unset on a server with a zone", config.Config{CameraTimezone: warsaw}, ingest.CameraZone{Loc: warsaw, From: server}},
+		{"unset on a UTC server", config.Config{CameraTimezone: time.UTC}, ingest.CameraZone{Loc: time.UTC, From: server, UTCFallback: true}},
 		{"the camera rules come along", config.Config{CameraTimezone: warsaw, CameraTimezoneSet: true, CameraRules: rules},
-			ingest.CameraZone{Loc: warsaw, Set: true, Rules: rules}},
+			ingest.CameraZone{Loc: warsaw, Set: true, From: server, Rules: rules}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -270,6 +280,8 @@ func TestRunSubcommand_UsageErrors(t *testing.T) {
 		{"rebind same issuer", "rebind-issuer", []string{"--from", "a", "--to", "a"}},
 		{"scan without --user", "scan", nil},
 		{"scan stray argument", "scan", []string{"--user", "u", "extra"}},
+		{"scan unknown --tz", "scan", []string{"--user", "u", "--tz", "Europe/Nowhere"}},
+		{"scan --tz Local", "scan", []string{"--user", "u", "--tz", "Local"}},
 		{"retime without --user", "retime", nil},
 		{"retime --apply without --user", "retime", []string{"--apply"}},
 		{"retime stray argument", "retime", []string{"--user", "u", "extra"}},
@@ -474,19 +486,29 @@ func TestRunScan(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	// The scan's time report is printed as it comes, after the counts, whatever the outcome.
-	report := handlers.TimeReport{CameraZone: "Europe/Warsaw", FileDateNames: []string{}}
+	report := handlers.TimeReport{CameraZone: "Europe/Warsaw", CameraZoneFrom: "server", FileDateNames: []string{}}
 	const reportOut = "by_source: exif_original=0 exif_ifd0=0 container=0 mtime=0 none=0\n" +
-		"by_zone: gps=0 clock_rule=0 offset=0 camera=0 camera_zone=\"Europe/Warsaw\"\n"
+		"by_zone: gps=0 clock_rule=0 offset=0 camera=0 camera_zone=\"Europe/Warsaw\" camera_zone_from=server\n"
 	everySource := handlers.TimeReport{
-		BySource:      handlers.TimeSourceCounts{ExifOriginal: 6, ExifIFD0: 4, Container: 3, Mtime: 2, None: 1},
-		ByZone:        handlers.TimeZoneCounts{GPS: 1, ClockRule: 2, Offset: 3, Camera: 4},
-		CameraZone:    "Europe/Warsaw",
-		FileDateNames: []string{"a.jpg", "b.jpg"},
+		BySource:       handlers.TimeSourceCounts{ExifOriginal: 6, ExifIFD0: 4, Container: 3, Mtime: 2, None: 1},
+		ByZone:         handlers.TimeZoneCounts{GPS: 1, ClockRule: 2, Offset: 3, Camera: 4},
+		CameraZone:     "Asia/Tokyo",
+		CameraZoneFrom: "batch",
+		FileDateNames:  []string{"a.jpg", "b.jpg"},
 	}
 	assumedUTC := handlers.TimeReport{
 		BySource:         handlers.TimeSourceCounts{ExifOriginal: 1},
 		ByZone:           handlers.TimeZoneCounts{Camera: 1},
 		CameraZone:       "server zone (unset)",
+		CameraZoneFrom:   "server",
+		AssumedZoneIsUTC: true,
+		FileDateNames:    []string{},
+	}
+	userUTC := handlers.TimeReport{
+		BySource:         handlers.TimeSourceCounts{ExifOriginal: 1},
+		ByZone:           handlers.TimeZoneCounts{Camera: 1},
+		CameraZone:       "UTC",
+		CameraZoneFrom:   "user",
 		AssumedZoneIsUTC: true,
 		FileDateNames:    []string{},
 	}
@@ -516,13 +538,20 @@ func TestRunScan(t *testing.T) {
 		{"every source and zone rule counted", context.Background(), "active-user", handlers.ScanResult{Ingested: 16, TimeReport: everySource}, nil,
 			true, "ingested=16 skipped=0 failed=0\n" +
 				"by_source: exif_original=6 exif_ifd0=4 container=3 mtime=2 none=1\n" +
-				"by_zone: gps=1 clock_rule=2 offset=3 camera=4 camera_zone=\"Europe/Warsaw\"\n", ""},
+				"by_zone: gps=1 clock_rule=2 offset=3 camera=4 camera_zone=\"Asia/Tokyo\" camera_zone_from=batch\n", ""},
 		{"a camera zone at UTC all year warns", context.Background(), "ACTIVE-USER", handlers.ScanResult{Ingested: 1, TimeReport: assumedUTC}, nil,
 			true, "ingested=1 skipped=0 failed=0\n" +
 				"by_source: exif_original=1 exif_ifd0=0 container=0 mtime=0 none=0\n" +
-				"by_zone: gps=0 clock_rule=0 offset=0 camera=1 camera_zone=\"server zone (unset)\"\n" +
+				"by_zone: gps=0 clock_rule=0 offset=0 camera=1 camera_zone=\"server zone (unset)\" camera_zone_from=server\n" +
 				"warning: the EXIF times of 1 file(s) were read in camera zone \"server zone (unset)\", which is UTC all year. " +
-				"If your camera clocks show another zone, set CAMERA_TIMEZONE to it (e.g. Europe/Warsaw), " +
+				"If your camera clocks show another zone, set CAMERA_TIMEZONE to it (e.g. Europe/Warsaw) or the user's camera zone in Settings, " +
+				"then run `server retime --user active-user` to list the times that would move, and again with --apply to move them.\n", ""},
+		{"the user's camera zone at UTC warns, naming Settings", context.Background(), "active-user", handlers.ScanResult{Ingested: 1, TimeReport: userUTC}, nil,
+			true, "ingested=1 skipped=0 failed=0\n" +
+				"by_source: exif_original=1 exif_ifd0=0 container=0 mtime=0 none=0\n" +
+				"by_zone: gps=0 clock_rule=0 offset=0 camera=1 camera_zone=\"UTC\" camera_zone_from=user\n" +
+				"warning: the EXIF times of 1 file(s) were read in camera zone \"UTC\", which is UTC all year. " +
+				"If your camera clocks show another zone, change the user's camera zone in Settings, " +
 				"then run `server retime --user active-user` to list the times that would move, and again with --apply to move them.\n", ""},
 	}
 	for _, tt := range tests {

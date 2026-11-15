@@ -17,6 +17,8 @@ import type {
   OrientationKeyframe,
   ProvenanceResponse,
   UploadResponse,
+  UserSettings,
+  UserSettingsPatch,
 } from "@/types";
 
 // What to add to or remove from an album: explicit media, or a trip's current media.
@@ -176,8 +178,10 @@ async function logout(): Promise<void> {
 
 // album_id is a query param, not a form field, so the backend checks membership
 // before it reads the (up to 4 GiB) body.
-async function upload(form: FormData, albumId?: string): Promise<UploadResponse> {
-  const path = albumId ? `/media/upload?album_id=${encodeURIComponent(albumId)}` : "/media/upload";
+// cameraTimezone names the zone the files' camera clocks show, for this upload only; left out, the
+// caller's setting or the server's applies.
+async function upload(form: FormData, albumId?: string, cameraTimezone?: string): Promise<UploadResponse> {
+  const path = withQuery("/media/upload", { album_id: albumId ?? "", camera_timezone: cameraTimezone ?? "" });
   const res = await request(path, { method: "POST", body: form });
   if (!res.ok) throw new ApiError(`POST /media/upload failed: ${res.status}`, res.status);
   return res.json();
@@ -327,6 +331,27 @@ function listCameras(): Promise<LibraryCamera[]> {
   return getList<LibraryCamera>("/cameras");
 }
 
+function getSettings(): Promise<UserSettings> {
+  return get<UserSettings>("/me/settings");
+}
+
+// A refused setting says why in a short plain-text body (an unknown zone), kept in ApiError.reason.
+async function updateSettings(change: UserSettingsPatch): Promise<UserSettings> {
+  const res = await request("/me/settings", jsonInit("PATCH", change));
+  if (!res.ok) {
+    let reason: string | null = null;
+    if (res.status === 400) {
+      try {
+        reason = (await res.text()).trim() || null;
+      } catch {
+        reason = null;
+      }
+    }
+    throw new ApiError(`PATCH /me/settings failed: ${res.status}`, res.status, reason);
+  }
+  return res.json();
+}
+
 // Re-matches the caller's whole library.
 async function runMatcher(): Promise<void> {
   const res = await request("/gps-matcher/run", { method: "POST" });
@@ -396,4 +421,6 @@ export const api = {
   updateCameraClockRule,
   deleteCameraClockRule,
   listCameras,
+  getSettings,
+  updateSettings,
 };

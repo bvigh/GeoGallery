@@ -61,6 +61,9 @@ type mockRegistrarDB struct {
 	clockRules    ingest.ClockRules
 	clockRulesErr error
 	ruleLoads     [][]any // the arguments of each clock rule query
+	zoneSetting   *string // the owner's users.camera_timezone
+	zoneErr       error   // returned by the camera zone setting query
+	zoneLoads     [][]any // the arguments of each camera zone setting query
 	sqls          []string
 	args          [][]any
 }
@@ -83,6 +86,16 @@ func (m *mockRegistrarDB) Exec(_ context.Context, sql string, args ...any) (pgco
 }
 
 func (m *mockRegistrarDB) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, "SELECT camera_timezone FROM users") {
+		m.zoneLoads = append(m.zoneLoads, args)
+		return &mockRow{scanFn: func(dest ...any) error {
+			if m.zoneErr != nil {
+				return m.zoneErr
+			}
+			*dest[0].(**string) = m.zoneSetting
+			return nil
+		}}
+	}
 	m.sqls = append(m.sqls, sql)
 	m.args = append(m.args, args)
 	switch {
@@ -158,10 +171,10 @@ func uploadFiles(filenames ...string) *http.Request {
 const (
 	timeReportNothingNew = `{"by_source":{"exif_original":0,"exif_ifd0":0,"container":0,"mtime":0,"none":0},` +
 		`"by_zone":{"gps":0,"clock_rule":0,"offset":0,"camera":0},` +
-		`"camera_zone":"server zone (unset)","assumed_zone_is_utc":false,"file_date_names":[]}`
+		`"camera_zone":"server zone (unset)","camera_zone_from":"server","assumed_zone_is_utc":false,"file_date_names":[]}`
 	timeReportOneUndated = `{"by_source":{"exif_original":0,"exif_ifd0":0,"container":0,"mtime":0,"none":1},` +
 		`"by_zone":{"gps":0,"clock_rule":0,"offset":0,"camera":0},` +
-		`"camera_zone":"server zone (unset)","assumed_zone_is_utc":false,"file_date_names":[]}`
+		`"camera_zone":"server zone (unset)","camera_zone_from":"server","assumed_zone_is_utc":false,"file_date_names":[]}`
 )
 
 func noopMatcher(context.Context, matcherDB, string, time.Duration, bool) error { return nil }
@@ -741,7 +754,7 @@ func TestRunIngestScan_CallsMatcherWithReprocess(t *testing.T) {
 	}
 
 	// Empty dir → walk finishes immediately, matcher still called.
-	res, err := RunIngestScan(context.Background(), deps, t.TempDir(), testOwnerID)
+	res, err := RunIngestScan(context.Background(), deps, t.TempDir(), testOwnerID, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, ScanResult{TimeReport: newTimeReport(ingest.CameraZone{})}, res, "an empty folder still has its report")
@@ -767,7 +780,7 @@ func TestRunIngestScan_CallsTripDetect(t *testing.T) {
 		},
 	}
 
-	_, err := RunIngestScan(context.Background(), deps, t.TempDir(), testOwnerID)
+	_, err := RunIngestScan(context.Background(), deps, t.TempDir(), testOwnerID, nil)
 
 	require.NoError(t, err)
 	assert.True(t, tripDetectCalled)
@@ -784,7 +797,7 @@ func TestRunIngestScan_TripDetectError_ReturnsError(t *testing.T) {
 		},
 	}
 
-	_, err := RunIngestScan(context.Background(), deps, t.TempDir(), testOwnerID)
+	_, err := RunIngestScan(context.Background(), deps, t.TempDir(), testOwnerID, nil)
 
 	assert.ErrorContains(t, err, "trip detect")
 }
@@ -813,7 +826,7 @@ func TestRunIngestScan_CountsIngestedSkippedFailed(t *testing.T) {
 				runTripDetect: noopTripDetect,
 			}
 
-			res, err := RunIngestScan(context.Background(), deps, dir, testOwnerID)
+			res, err := RunIngestScan(context.Background(), deps, dir, testOwnerID, nil)
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, scanCounts(res))
@@ -844,7 +857,7 @@ func TestRunIngestScan_PreCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	res, err := RunIngestScan(ctx, deps, dir, testOwnerID)
+	res, err := RunIngestScan(ctx, deps, dir, testOwnerID, nil)
 
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, ScanResult{}, scanCounts(res))
@@ -864,7 +877,7 @@ func TestRunIngestScan_MissingDir_ReturnsWalkError(t *testing.T) {
 		runTripDetect: noopTripDetect,
 	}
 
-	_, err := RunIngestScan(context.Background(), deps, filepath.Join(t.TempDir(), "missing"), testOwnerID)
+	_, err := RunIngestScan(context.Background(), deps, filepath.Join(t.TempDir(), "missing"), testOwnerID, nil)
 
 	assert.ErrorContains(t, err, "walk")
 	assert.False(t, matcherCalled)

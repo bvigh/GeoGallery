@@ -253,7 +253,7 @@ func TestRegisterMedia_ClockRuleLoadFailureFailsTheFile(t *testing.T) {
 			runTripDetect: noopTripDetect,
 		}
 
-		res, err := RunIngestScan(context.Background(), deps, dir, testOwnerID)
+		res, err := RunIngestScan(context.Background(), deps, dir, testOwnerID, nil)
 
 		require.NoError(t, err)
 		assert.Equal(t, ScanResult{Failed: 1}, scanCounts(res))
@@ -301,7 +301,7 @@ func TestIngest_ClockRulesFollowTheOwner(t *testing.T) {
 			runTripDetect: noopTripDetect,
 		}
 
-		res, err := RunIngestScan(context.Background(), deps, dir, testOwnerID)
+		res, err := RunIngestScan(context.Background(), deps, dir, testOwnerID, nil)
 
 		require.NoError(t, err)
 		assert.Equal(t, ScanResult{Ingested: 1}, scanCounts(res))
@@ -379,7 +379,7 @@ func TestProvenanceFile_ClockRules(t *testing.T) {
 		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 		assert.Equal(t, map[string]any{
-			"source": "exif_original", "zone_rule": "clock_rule", "offset_min": 120.0, "zone_name": nil,
+			"source": "exif_original", "zone_rule": "clock_rule", "offset_min": 120.0, "zone_name": nil, "zone_from": nil,
 			"clock_rule": map[string]any{"id": rule.ID, "make": "Panasonic", "model": "DC-TZ200", "offset_min": 120.0,
 				"starts_on": "2001-01-01", "ends_on": "2001-12-31"},
 			"taken_at": "2001-02-03T10:00:00Z",

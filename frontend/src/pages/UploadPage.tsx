@@ -1,4 +1,4 @@
-import { memo, useMemo, useState, useRef } from "react";
+import { memo, useEffect, useMemo, useState, useRef } from "react";
 import { flushSync } from "react-dom";
 import { AlertTriangle, Upload, X } from "lucide-react";
 import { api, ApiError } from "@/api/client";
@@ -6,8 +6,10 @@ import { MAX_FILE_BYTES, planUploadBatches } from "@/lib/uploadBatches";
 import { canHashFiles, mediaHash } from "@/lib/mediaHash";
 import { formatCount } from "@/lib/numbers";
 import { browserTimeZone, formatInstant, formatSpan, YEAR_OUT_OF_RANGE } from "@/lib/time";
-import type { Album, TimeReport, TrackFileReport } from "@/types";
+import { SERVER_ZONE_UNSET, serverZoneLabel } from "@/lib/timeZones";
+import type { Album, CameraZoneFrom, TimeReport, TrackFileReport, UserSettings } from "@/types";
 import { AlbumPickerDialog } from "@/components/albums/AlbumPickerDialog";
+import { CameraZoneSelect } from "@/components/CameraZoneSelect";
 import { Fact } from "@/components/evidence/PointCard";
 
 const GiB = 1024 ** 3;
@@ -134,32 +136,49 @@ function addCounts<K extends string>(a: Record<K, number>, b: Record<K, number>)
   return sum;
 }
 
-// One report for all batches of an upload. They reach the same server, so they share its camera zone.
+// One report for all batches of an upload. They reach the same server with the same zone choice, so
+// they share the first batch's camera zone.
 function mergeTimeReports(a: TimeReport | null, b: TimeReport): TimeReport {
   if (!a) return b;
   return {
     by_source: addCounts(a.by_source, b.by_source),
     by_zone: addCounts(a.by_zone, b.by_zone),
     camera_zone: a.camera_zone,
+    camera_zone_from: a.camera_zone_from,
     assumed_zone_is_utc: a.assumed_zone_is_utc || b.assumed_zone_is_utc,
     file_date_names: [...a.file_date_names, ...b.file_date_names],
   };
 }
 
-// The backend's camera zone when CAMERA_TIMEZONE is unset: the server's own zone, which has no name.
-const SERVER_ZONE_UNSET = "server zone (unset)";
+// The camera zone part of the capture time line, by who named the zone. An older backend's report has
+// no source, which was always the server's.
+function cameraZonePart(cameraZone: string, from: CameraZoneFrom | undefined): string {
+  switch (from) {
+    case "batch":
+      return `this upload's zone ${cameraZone}`;
+    case "user":
+      return `assumed your camera zone ${cameraZone}`;
+    default:
+      return cameraZone === SERVER_ZONE_UNSET ? "assumed server zone" : `assumed camera zone ${cameraZone}`;
+  }
+}
 
 // "38 from EXIF (10 GPS clock, 20 photo offset, 8 assumed camera zone Europe/Warsaw), 2 from file
 // date": what dated the new files, sources and zone rules in the order ingest tries them. Empty when
 // no file was new.
-function captureTimesLine({ by_source: source, by_zone: zone, camera_zone: cameraZone }: TimeReport): string {
+function captureTimesLine({
+  by_source: source,
+  by_zone: zone,
+  camera_zone: cameraZone,
+  camera_zone_from: from,
+}: TimeReport): string {
   const counted = (parts: [count: number, text: string][]) =>
     parts.filter(([count]) => count > 0).map(([count, text]) => `${formatCount(count)} ${text}`);
   const rules = counted([
     [zone.gps, "GPS clock"],
     [zone.clock_rule, "camera clock rule"],
     [zone.offset, "photo offset"],
-    [zone.camera, cameraZone === SERVER_ZONE_UNSET ? "assumed server zone" : `assumed camera zone ${cameraZone}`],
+    [zone.camera, cameraZonePart(cameraZone, from)],
   ]);
   return counted([
     [source.exif_original + source.exif_ifd0, rules.length > 0 ? `from EXIF (${rules.join(", ")})` : "from EXIF"],
@@ -169,20 +188,24 @@ function captureTimesLine({ by_source: source, by_zone: zone, camera_zone: camer
   ]).join(", ");
 }
 
-// The warning when files were dated in a camera zone that is UTC all year. It speaks of those files
-// only, and allows that the zone may be right (Iceland keeps UTC all year). A new zone dates new
-// uploads only, and these files would be skipped as duplicates if sent again: only server retime
-// moves them.
-function assumedUtcWarning(cameraZone: string): string {
-  const read =
-    cameraZone === SERVER_ZONE_UNSET
+// The warning when files were dated in a camera zone that is UTC all year and that the upload did not
+// choose (the backend never warns about a zone chosen for the upload). It speaks of those files only,
+// and allows that the zone may be right (Iceland keeps UTC all year). A new zone dates new uploads
+// only, and these files would be skipped as duplicates if sent again: only server retime moves them.
+function assumedUtcWarning(cameraZone: string, from: CameraZoneFrom | undefined): string {
+  const mine = from === "user";
+  const read = mine
+    ? "Your camera zone is UTC all year"
+    : cameraZone === SERVER_ZONE_UNSET
       ? "CAMERA_TIMEZONE is unset and the server's zone is UTC"
       : "The assumed camera zone is UTC all year";
+  const set = mine
+    ? "Change your camera zone in Settings, or choose a zone for an upload."
+    : "Set your own camera zone in Settings, or choose a zone for an upload.";
   return (
     `${read}, so the files dated in it were read as UTC. If the camera's clock did not show UTC, those times ` +
-    "are off by its offset from UTC. An administrator sets the camera zone with CAMERA_TIMEZONE. A new zone " +
-    "dates new uploads only: these files keep their times until an administrator runs server retime, and " +
-    "uploading them again skips them as duplicates."
+    `are off by its offset from UTC. ${set} A new zone dates new uploads only: these files keep their times ` +
+    "until an administrator runs server retime, and uploading them again skips them as duplicates."
   );
 }
 
@@ -230,7 +253,7 @@ function CaptureTimes({ report }: { report: TimeReport }) {
       {report.assumed_zone_is_utc && (
         <p className="flex gap-2">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden="true" />
-          <span>{assumedUtcWarning(report.camera_zone)}</span>
+          <span>{assumedUtcWarning(report.camera_zone, report.camera_zone_from)}</span>
         </p>
       )}
     </div>
@@ -354,6 +377,13 @@ const TrackFiles = memo(function TrackFiles({ files, now }: { files: TrackFileRe
   );
 });
 
+// The zone choice's first option: what an upload without a zone of its own is read in.
+function defaultZoneLabel(settings: UserSettings | null): string {
+  if (!settings) return "Default";
+  if (settings.camera_timezone) return `Default: your camera zone, ${settings.camera_timezone}`;
+  return `Default: ${serverZoneLabel(settings.defaults.camera_timezone)}`;
+}
+
 export function UploadPage() {
   const [files, setFiles] = useState<FileList | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -369,6 +399,23 @@ export function UploadPage() {
   // null uploads into no album.
   const [album, setAlbum] = useState<Album | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // The zone this upload's camera clocks show; "" leaves it to the caller's setting or the server's.
+  const [zone, setZone] = useState("");
+  // Only names the default in the zone choice; null until loaded, or when it cannot be.
+  const [settings, setSettings] = useState<UserSettings | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .getSettings()
+      .then((s) => {
+        if (live) setSettings(s);
+      })
+      .catch((e) => console.warn("Could not load the camera zone setting:", e));
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const handleGpsImport = async (selected: File[]) => {
     if (selected.length === 0) return;
@@ -483,7 +530,7 @@ export function UploadPage() {
       }
       try {
         // Every batch is its own request, so each one names the album.
-        const data = await api.upload(form, album?.id);
+        const data = await api.upload(form, album?.id, zone || undefined);
         albumAdded += data.album_added ?? 0;
         uploaded.push(...(data.uploaded ?? []));
         skipped.push(...(data.skipped ?? unreported(batch, data.uploaded, data.failed)));
@@ -579,6 +626,24 @@ export function UploadPage() {
             </button>
           )}
         </div>
+        <div className="mt-2 flex items-center gap-2 text-sm">
+          <label htmlFor="upload-camera-zone" className="shrink-0 font-medium">
+            Camera time zone
+          </label>
+          <CameraZoneSelect
+            id="upload-camera-zone"
+            value={zone}
+            onChange={setZone}
+            defaultLabel={defaultZoneLabel(settings)}
+            disabled={uploading}
+            className="min-w-0 flex-1 rounded-md border bg-background px-2 py-1 disabled:opacity-50 touch:min-h-11 touch:text-base"
+          />
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {zone
+            ? `The files of this upload whose own clocks give no offset are read in ${zone}, and keep that zone.`
+            : "The zone camera clocks were set to, for files whose own clocks give no offset."}
+        </p>
         <AlbumPickerDialog
           open={pickerOpen}
           onOpenChange={setPickerOpen}

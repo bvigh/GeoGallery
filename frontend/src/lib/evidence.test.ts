@@ -4,6 +4,7 @@ import {
   bracketPoints,
   cameraClock,
   checkSentence,
+  CAMERA_ZONE_KEEPS_TIME,
   CLOCK_RULE_KEEPS_TIME,
   confidenceNote,
   contextPointKind,
@@ -686,6 +687,33 @@ describe("zoneChip", () => {
   });
 
   it.each([
+    ["the zone chosen for its upload", "batch", "America/New_York", "America/New_York, chosen for its upload; nothing in the file confirms this"],
+    ["the owner's zone today", "user", "Asia/Tokyo", "Asia/Tokyo, your camera zone; nothing in the file confirms this"],
+    ["the server's zone", "server", "Etc/GMT-1", "Etc/GMT-1; nothing in the file confirms this"],
+  ] as const)("says who named the re-read's zone: %s", (_name, from, zoneName, want) => {
+    const chip = zoneChip(null, reread(rule({ zone_name: zoneName, zone_from: from })), serverZone);
+    expect(chip).toEqual({ text: want, notes: [], warning: null });
+  });
+
+  it("gives no UTC warning for a re-read in a zone that was named, on a server that falls back to UTC", () => {
+    const utcServer = { name: "server zone (unset)", set: false, utc_fallback: true, offset_now_min: 0 };
+    for (const from of ["batch", "user"] as const) {
+      const chip = zoneChip(null, reread(rule({ zone_name: "UTC", zone_from: from })), utcServer);
+      expect(chip?.warning).toBeNull();
+    }
+    expect(zoneChip(null, reread(rule({ zone_name: "server zone (unset)", zone_from: "server" })), utcServer)?.warning).toContain(
+      "read as UTC"
+    );
+  });
+
+  it("reads a re-read without zone_from in today's zone, as the owner's when it is theirs", () => {
+    const owners = { name: "Asia/Tokyo", set: true, from: "user" as const, utc_fallback: false, offset_now_min: 540 };
+    expect(zoneChip(null, reread(rule({ zone_name: null })), owners)?.text).toBe(
+      "Asia/Tokyo, your camera zone; nothing in the file confirms this"
+    );
+  });
+
+  it.each([
     ["no re-read yet", null],
     ["a re-read with no time", reread(null)],
     ["a container time", reread(rule({ source: "container", zone_rule: null, offset_min: null, zone_name: null }))],
@@ -735,6 +763,41 @@ describe("zoneChip for a clock rule", () => {
 
   it("reads evidence recorded before clock rules existed as before", () => {
     expect(zoneChip(olderEvidence(), null, serverZone)?.text).toBe("Etc/GMT-1; nothing in the file confirms this");
+  });
+});
+
+describe("zoneChip for a zone a user named", () => {
+  it("says the owner's zone was theirs, and that changing it does not move the time", () => {
+    const chip = zoneChip(evidence({ zone: "camera", camera_zone: "Asia/Tokyo", camera_zone_from: "user" }), null, serverZone);
+    expect(chip).toEqual({
+      text: "Asia/Tokyo, your camera zone; nothing in the file confirms this",
+      notes: [CAMERA_ZONE_KEEPS_TIME],
+      warning: null,
+    });
+  });
+
+  it("says an upload's zone was chosen for it", () => {
+    const chip = zoneChip(
+      evidence({ zone: "camera", camera_zone: "America/New_York", camera_zone_from: "batch" }),
+      null,
+      serverZone
+    );
+    expect(chip).toEqual({
+      text: "America/New_York, chosen for its upload; nothing in the file confirms this",
+      notes: [],
+      warning: null,
+    });
+  });
+
+  it("adds nothing for the server's zone, recorded or older", () => {
+    expect(zoneChip(evidence({ zone: "camera", camera_zone_from: "server" }), null, serverZone)?.text).toBe(
+      "Etc/GMT-1; nothing in the file confirms this"
+    );
+  });
+
+  it("has no setting note when another rule gave the offset", () => {
+    const chip = zoneChip(evidence({ zone: "gps", camera_zone: "Asia/Tokyo", camera_zone_from: "user" }), null, serverZone);
+    expect(chip?.notes).toEqual([]);
   });
 });
 
