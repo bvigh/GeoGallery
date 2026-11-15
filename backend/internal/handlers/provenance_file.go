@@ -102,6 +102,9 @@ type rereadRule struct {
 	ZoneRule  *string `json:"zone_rule"`
 	OffsetMin *int    `json:"offset_min"` // nil for a container time
 	ZoneName  *string `json:"zone_name"`  // set only when ZoneRule is "camera"
+	// ZoneFrom says who named ZoneName, set only when ZoneRule is "camera": "batch" (the item's upload
+	// or scan), "user" (the owner's setting) or "server".
+	ZoneFrom *string `json:"zone_from"`
 	// ClockRule is the owner's clock rule as it is today, set only when ZoneRule is "clock_rule".
 	ClockRule *evidenceClockRule `json:"clock_rule"`
 	TakenAt   time.Time          `json:"taken_at"`
@@ -114,13 +117,33 @@ type rereadCheck struct {
 }
 
 // rereadItem is the stored row. evidence is nil unless the row's capture evidence counts as
-// recorded, which is exactly when the provenance response shows it.
+// recorded, which is exactly when the provenance response shows it. zoneSetting is the owner's
+// camera zone setting, nil when unset.
 type rereadItem struct {
-	mediaType  string
-	storageKey string
-	takenAt    *time.Time
-	uploadedAt time.Time
-	evidence   json.RawMessage
+	mediaType   string
+	storageKey  string
+	takenAt     *time.Time
+	uploadedAt  time.Time
+	evidence    json.RawMessage
+	zoneSetting *string
+}
+
+// zone is the camera zone the item is read in again: the zone its upload or scan named, as its
+// recorded evidence says, else the one the owner's uploads get today (storedItemCameraZone).
+func (item rereadItem) zone(server ingest.CameraZone) (ingest.CameraZone, error) {
+	owner, err := withZoneSetting(server, item.zoneSetting)
+	if err != nil {
+		return ingest.CameraZone{}, err
+	}
+	var recorded struct {
+		From string `json:"camera_zone_from"`
+		Name string `json:"camera_zone"`
+	}
+	if len(item.evidence) > 0 {
+		// A key of another type is left empty, and the owner's zone applies.
+		_ = json.Unmarshal(item.evidence, &recorded)
+	}
+	return storedItemCameraZone(owner, recorded.From, recorded.Name)
 }
 
 // fileRead is what the stored file says today.
@@ -131,8 +154,9 @@ type fileRead struct {
 }
 
 // File serves GET /api/media/{id}/provenance/file: the stored file read again with today's rules,
-// which are the server's camera zone and camera rules and the owner's clock rules as they are now.
-// It only reports, and never moves taken_at. A foreign or shared item is 404.
+// which are the camera zone (the one the item's upload named, else the owner's setting, else the
+// server's), the camera rules and the owner's clock rules as they are now. It only reports, and
+// never moves taken_at. A foreign or shared item is 404.
 func (h *ProvenanceHandler) File(w http.ResponseWriter, r *http.Request) {
 	ownerID := auth.MustUser(r.Context()).ID
 	id, ok := auth.CanonicalUUID(chi.URLParam(r, "id"))
@@ -168,7 +192,13 @@ func (h *ProvenanceHandler) File(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	zone := h.cameraZone
+	// A zone setting this server can no longer load fails the request, as ingest fails the file.
+	zone, err := item.zone(h.cameraZone)
+	if err != nil {
+		slog.Error("provenance file: camera zone failed", "err", err)
+		http.Error(w, "camera zone setting error", http.StatusInternalServerError)
+		return
+	}
 	zone.Clock = rules
 
 	read, err := h.readFile(ctx, item, zone)
@@ -209,22 +239,23 @@ func rereadStopped(ctx context.Context, w http.ResponseWriter, step string) bool
 	return true
 }
 
-// loadRereadItem reads one own item. The literal owner_id is what makes a foreign or shared item
-// pgx.ErrNoRows.
+// loadRereadItem reads one own item, with its owner's camera zone setting. The literal owner_id is
+// what makes a foreign or shared item pgx.ErrNoRows.
 func (h *ProvenanceHandler) loadRereadItem(ctx context.Context, id, ownerID string) (rereadItem, error) {
 	var item rereadItem
 	var evidence []byte
 	err := h.db.QueryRow(ctx, `
-		SELECT m.media_type, m.storage_key, m.taken_at, m.created_at, m.capture_evidence
+		SELECT m.media_type, m.storage_key, m.taken_at, m.created_at, m.capture_evidence, u.camera_timezone
 		FROM media m
+		JOIN users u ON u.id = m.owner_id
 		WHERE m.id = $1 AND m.owner_id = $2
-	`, id, ownerID).Scan(&item.mediaType, &item.storageKey, &item.takenAt, &item.uploadedAt, &evidence)
+	`, id, ownerID).Scan(&item.mediaType, &item.storageKey, &item.takenAt, &item.uploadedAt, &evidence, &item.zoneSetting)
 	if err != nil {
 		return rereadItem{}, err
 	}
 	item.uploadedAt = item.uploadedAt.UTC()
 	item.takenAt = utcTime(item.takenAt)
-	item.evidence = h.timeFacts(evidence).Evidence
+	_, item.evidence = recordedEvidence(evidence)
 	return item, nil
 }
 
@@ -307,8 +338,8 @@ func exifFileRead(e ingest.ExifData, zone ingest.CameraZone) (rereadFile, *rerea
 	}
 	switch e.TakenAtZone {
 	case ingest.ZoneCamera:
-		name := zone.Name()
-		rule.ZoneName = &name
+		name, from := zone.Name(), zone.Source()
+		rule.ZoneName, rule.ZoneFrom = &name, &from
 	case ingest.ZoneClockRule:
 		rule.ClockRule = newEvidenceClockRule(e.ClockRule)
 	}

@@ -513,6 +513,71 @@ func TestCameraZone_Name(t *testing.T) {
 	}
 }
 
+func TestCameraZone_In(t *testing.T) {
+	warsaw, tokyo := mustZone(t, "Europe/Warsaw"), mustZone(t, "Asia/Tokyo")
+	rules := CameraRules{{Make: "Panasonic", IgnoreOffsetTag: true, Why: "test"}}
+	clock := ClockRules{{ID: "r1", Make: "Panasonic", Model: "DC-TZ200", OffsetMin: 120}}
+	server := CameraZone{Loc: time.UTC, UTCFallback: true, Rules: rules, Clock: clock}
+
+	got := server.In(tokyo, CameraZoneFromBatch)
+	assert.Equal(t, CameraZone{Loc: tokyo, Set: true, From: CameraZoneFromBatch, Rules: rules, Clock: clock}, got,
+		"named, no longer a UTC fallback, the rules kept")
+	assert.Equal(t, "Asia/Tokyo", got.Name())
+	assert.Equal(t, CameraZoneFromBatch, got.Source())
+
+	assert.Equal(t, server, server.In(nil, CameraZoneFromUser), "no zone changes nothing")
+	assert.Equal(t, CameraZoneFromUser, CameraZone{Loc: warsaw, Set: true}.In(warsaw, CameraZoneFromUser).Source())
+}
+
+func TestCameraZone_Source(t *testing.T) {
+	assert.Equal(t, CameraZoneFromServer, CameraZone{}.Source(), "a zone nobody marked is the server's")
+	assert.Equal(t, CameraZoneFromServer, CameraZone{From: CameraZoneFromServer}.Source())
+	assert.Equal(t, CameraZoneFromUser, CameraZone{From: CameraZoneFromUser}.Source())
+}
+
+func TestLoadZone(t *testing.T) {
+	for _, name := range []string{"Europe/Warsaw", "UTC", "Asia/Kolkata", "America/Argentina/Buenos_Aires", "Asia/Calcutta"} {
+		t.Run(name, func(t *testing.T) {
+			loc, err := LoadZone(name)
+			require.NoError(t, err)
+			assert.Equal(t, name, loc.String())
+		})
+	}
+	for _, name := range []string{"", "Local", "Europe/Nowhere", "europe/warsaw", " Europe/Warsaw", "../etc/passwd", "/etc/localtime", strings.Repeat("A", 65)} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			_, err := LoadZone(name)
+			assert.Error(t, err)
+		})
+	}
+}
+
+// A zone from In is only the last fallback: the GPS clock, a clock rule and an offset tag still win.
+func TestExtractExif_ReadsInTheZoneGivenByIn(t *testing.T) {
+	server := CameraZone{Loc: mustZone(t, "Europe/Warsaw"), Set: true, From: CameraZoneFromServer}
+	zone := server.In(mustZone(t, "Asia/Tokyo"), CameraZoneFromUser)
+	tests := []struct {
+		name     string
+		photo    exiftest.Photo
+		want     string
+		wantZone string
+	}{
+		{"no offset of its own: the zone given", exiftest.Photo{DateTimeOriginal: "2024:07:01 12:00:00"},
+			"2024-07-01T03:00:00Z", ZoneCamera},
+		{"the offset tag wins", exiftest.Photo{DateTimeOriginal: "2024:07:01 12:00:00", OffsetTimeOriginal: "+02:00"},
+			"2024-07-01T10:00:00Z", ZoneOffset},
+		{"the GPS clock wins", exiftest.Photo{DateTimeOriginal: "2024:07:01 12:00:00", GPS: &exiftest.GPS{Lat: 47.5, Lng: 19.04, Time: time.Date(2024, 7, 1, 11, 0, 0, 0, time.UTC)}},
+			"2024-07-01T11:00:00Z", ZoneGPS},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractExif(bytes.NewReader(exiftest.JPEG(tt.photo)), zone)
+			require.NotNil(t, got.TakenAt)
+			assert.Equal(t, tt.want, got.TakenAt.UTC().Format(time.RFC3339))
+			assert.Equal(t, tt.wantZone, got.TakenAtZone)
+		})
+	}
+}
+
 func TestUTCAllYear(t *testing.T) {
 	tests := []struct {
 		name string

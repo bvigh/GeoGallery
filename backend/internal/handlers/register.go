@@ -40,9 +40,25 @@ type MediaRegistrar struct {
 	db      registrarDB
 	storage registrarStorage
 	// cameraZone is the zone EXIF capture times are read in when the photo's own clocks do not say
-	// otherwise (ingest.ExtractExif). A zero value reads them as UTC. Its Clock is never used:
-	// registerMedia reads every file with the clock rules of the owner it ingests for.
+	// otherwise (ingest.ExtractExif). A zero value reads them as UTC. The registrar a handler holds
+	// has the server's zone (CAMERA_TIMEZONE); an upload or a scan registers through a copy from
+	// forOwner, which has the zone it named or its owner's where either is set. Its Clock is never
+	// used: registerMedia reads every file with the clock rules of the owner it ingests for.
 	cameraZone ingest.CameraZone
+}
+
+// forOwner returns a copy of r for one upload or scan of ownerID's files, reading them in batch, the
+// zone it named, when given, else in the owner's camera zone setting, else in r's zone. The zone is
+// chosen once, so every file of the request or scan is read, and counted in its TimeReport, in the
+// same one.
+func (r *MediaRegistrar) forOwner(ctx context.Context, ownerID string, batch *time.Location) (*MediaRegistrar, error) {
+	zone, err := ingestCameraZone(ctx, r.db, r.cameraZone, ownerID, batch)
+	if err != nil {
+		return nil, err
+	}
+	c := *r
+	c.cameraZone = zone
+	return &c, nil
 }
 
 // exifDecodeSlots is how many files this process can have their EXIF decoded at once, so what
@@ -335,18 +351,22 @@ type captureEvidence struct {
 	OffsetUsedMin *int     `json:"offset_used_min"`
 	// ClockRule is the owner's clock rule that gave the offset, set exactly when Zone is
 	// ingest.ZoneClockRule.
-	ClockRule             *evidenceClockRule `json:"clock_rule"`
-	CameraZone            string             `json:"camera_zone"`
-	CameraZoneUTCFallback bool               `json:"camera_zone_utc_fallback"`
-	Make                  *string            `json:"make"`
-	Model                 *string            `json:"model"`
-	ExifPartial           bool               `json:"exif_partial"`
-	CreationTime          *string            `json:"creation_time"`
-	FileMtime             *string            `json:"file_mtime"`
-	DurationS             *float64           `json:"duration_s"`
-	Encoder               *string            `json:"encoder"`
-	Codec                 *string            `json:"codec"`
-	Transcoded            bool               `json:"transcoded"`
+	ClockRule  *evidenceClockRule `json:"clock_rule"`
+	CameraZone string             `json:"camera_zone"`
+	// CameraZoneFrom says who named CameraZone: "batch" (the upload or scan), "user" (the owner's
+	// setting) or "server" (CAMERA_TIMEZONE, or the server's own zone). Rows recorded before
+	// per-user zones lack the key, and were read in the server's.
+	CameraZoneFrom        string   `json:"camera_zone_from"`
+	CameraZoneUTCFallback bool     `json:"camera_zone_utc_fallback"`
+	Make                  *string  `json:"make"`
+	Model                 *string  `json:"model"`
+	ExifPartial           bool     `json:"exif_partial"`
+	CreationTime          *string  `json:"creation_time"`
+	FileMtime             *string  `json:"file_mtime"`
+	DurationS             *float64 `json:"duration_s"`
+	Encoder               *string  `json:"encoder"`
+	Codec                 *string  `json:"codec"`
+	Transcoded            bool     `json:"transcoded"`
 }
 
 // newCaptureEvidence records how registerMedia derived taken_at. mtime is the caller's fallback
@@ -363,6 +383,7 @@ func newCaptureEvidence(e ingest.ExifData, probe ingest.VideoProbeResult, mtime 
 		OffsetTag:             nilIfEmpty(e.Raw.OffsetTag),
 		OffsetIgnored:         e.Raw.OffsetIgnored,
 		CameraZone:            zone.Name(),
+		CameraZoneFrom:        zone.Source(),
 		CameraZoneUTCFallback: zone.UTCFallback,
 		Make:                  nilIfEmpty(e.Raw.Make),
 		Model:                 nilIfEmpty(e.CameraModel),

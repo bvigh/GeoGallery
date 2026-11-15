@@ -69,7 +69,12 @@ const maxUTCOffset = 14 * time.Hour
 // camera rules and the owner's own clock rules (camera_clock_rules, loaded once). That repairs rows
 // stored before a rule existed: a camera whose clock showed a fixed wrong offset for a period
 // (a Panasonic left on summer time all year), a Panasonic video dated from its container time, and
-// the rows stored before CAMERA_TIMEZONE or before ingest read OffsetTimeOriginal.
+// the rows stored before CAMERA_TIMEZONE, before the owner's camera zone setting or before ingest
+// read OffsetTimeOriginal.
+//
+// The camera zone is the one the owner's uploads get today (their setting, loaded once, else the
+// server's), except for an item whose upload or scan named a zone of its own: that zone stays with
+// its files (storedItemCameraZone).
 //
 // Only rows dated from EXIF change. A photo is read from the same mediaHeadSize bytes ingest read; a
 // video only when a camera rule dates some videos from their EXIF (otherwise nothing is read for it),
@@ -105,9 +110,13 @@ func RunRetime(ctx context.Context, deps RetimeDeps, ownerID string, apply bool,
 	if err != nil {
 		return res, err
 	}
-	zone := deps.cameraZone
-	zone.Clock = rules
-	slog.Info("retime: clock rules", "owner_id", ownerID, "rules", len(rules))
+	ownerZone, err := ownerCameraZone(ctx, deps.pool, deps.cameraZone, ownerID)
+	if err != nil {
+		return res, err
+	}
+	ownerZone.Clock = rules
+	slog.Info("retime: clock rules and camera zone", "owner_id", ownerID, "rules", len(rules),
+		"zone", ownerZone.Name(), "from", ownerZone.Source())
 
 	items, err := retimeCandidates(ctx, deps.pool, ownerID)
 	if err != nil {
@@ -119,6 +128,12 @@ func RunRetime(ctx context.Context, deps RetimeDeps, ownerID string, apply bool,
 			break
 		}
 		res.Checked++
+		zone, err := storedItemCameraZone(ownerZone, m.zoneFrom, m.zoneName)
+		if err != nil {
+			slog.Error("retime: camera zone failed", "id", m.id, "filename", m.filename, "err", err)
+			res.Failed++
+			continue
+		}
 		exifData, found, err := rereadExifTime(ctx, deps.storage, m, zone)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -185,13 +200,16 @@ func RunRetime(ctx context.Context, deps RetimeDeps, ownerID string, apply bool,
 type retimeCandidate struct {
 	id, filename, storageKey, mediaType, gpsSource string
 	takenAt                                        time.Time
+	// zoneFrom and zoneName are capture_evidence's camera_zone_from and camera_zone, "" when absent.
+	zoneFrom, zoneName string
 }
 
 // retimeCandidates lists ownerID's media with a taken_at (a row without one has no EXIF time), read
 // up front so no connection is held while objects are fetched.
 func retimeCandidates(ctx context.Context, pool *pgxpool.Pool, ownerID string) ([]retimeCandidate, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT id::text, filename, storage_key, media_type, taken_at, coalesce(gps_source, '')
+		SELECT id::text, filename, storage_key, media_type, taken_at, coalesce(gps_source, ''),
+		       coalesce(capture_evidence->>'camera_zone_from', ''), coalesce(capture_evidence->>'camera_zone', '')
 		FROM media
 		WHERE owner_id = $1 AND taken_at IS NOT NULL
 		ORDER BY taken_at, id`, ownerID)
@@ -200,7 +218,7 @@ func retimeCandidates(ctx context.Context, pool *pgxpool.Pool, ownerID string) (
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (retimeCandidate, error) {
 		var c retimeCandidate
-		err := row.Scan(&c.id, &c.filename, &c.storageKey, &c.mediaType, &c.takenAt, &c.gpsSource)
+		err := row.Scan(&c.id, &c.filename, &c.storageKey, &c.mediaType, &c.takenAt, &c.gpsSource, &c.zoneFrom, &c.zoneName)
 		return c, err
 	})
 }
@@ -343,7 +361,7 @@ var retimeReplacedKeys = map[string]bool{
 	"by": true, "retimed_from": true,
 	"src": true, "zone": true, "wall": true, "gps_utc": true, "wall_minus_gps_s": true,
 	"offset_tag": true, "offset_ignored": true, "offset_used_min": true,
-	"camera_zone": true, "camera_zone_utc_fallback": true,
+	"camera_zone": true, "camera_zone_from": true, "camera_zone_utc_fallback": true,
 	"make": true, "model": true, "exif_partial": true, "clock_rule": true,
 }
 

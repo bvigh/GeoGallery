@@ -23,7 +23,7 @@ const (
 	ZoneGPS       = "gps"        // the camera clock measured against the photo's GPS timestamp
 	ZoneClockRule = "clock_rule" // the owner's clock rule for the camera (CameraZone.Clock)
 	ZoneOffset    = "offset"     // the photo's OffsetTimeOriginal tag
-	ZoneCamera    = "camera"     // the camera timezone (CAMERA_TIMEZONE)
+	ZoneCamera    = "camera"     // the camera zone (CameraZone.Loc: the batch's, the owner's or CAMERA_TIMEZONE)
 )
 
 // The tags a wall clock can come from (RawExif.WallTag), under EXIF's names. imagemeta calls IFD0's
@@ -61,16 +61,25 @@ type RawExif struct {
 	Partial       bool // the decoder stopped at an error, and the tags read before it were kept
 }
 
+// Where CameraZone.Loc came from (CameraZone.From), in the order ingest picks it.
+const (
+	CameraZoneFromBatch  = "batch"  // given for one upload (?camera_timezone) or scan (--tz)
+	CameraZoneFromUser   = "user"   // the owner's setting (users.camera_timezone)
+	CameraZoneFromServer = "server" // CAMERA_TIMEZONE, or the server's own zone when that is unset
+)
+
 // CameraZone is how ingest reads camera clocks: the zone they are assumed to show, with what ingest
 // records about where it came from, the camera rules that say which of a file's own clocks not to
 // trust, and the owner's clock rules for their own cameras. time.Local's name is "Local", which
 // would hide a container running in UTC. A zero CameraZone reads wall clocks as UTC and applies no
 // rules of either kind.
 type CameraZone struct {
-	Loc         *time.Location // CAMERA_TIMEZONE, or time.Local when unset
-	Set         bool           // CAMERA_TIMEZONE was set
-	UTCFallback bool           // unset, and the server's zone is UTC all year
-	Rules       CameraRules    // CAMERA_RULES_FILE: what a make writes, for every user
+	Loc *time.Location // the batch's zone, the owner's, CAMERA_TIMEZONE, or time.Local when none is set
+	Set bool           // Loc was named: by the batch, the owner or CAMERA_TIMEZONE
+	// From is CameraZoneFromBatch, CameraZoneFromUser or CameraZoneFromServer; "" counts as the server.
+	From        string
+	UTCFallback bool        // none was named, and the server's zone is UTC all year
+	Rules       CameraRules // CAMERA_RULES_FILE: what a make writes, for every user
 	// Clock holds the clock rules of the owner whose files are read (camera_clock_rules). Unlike
 	// Rules, they describe that user's own cameras, so a CameraZone carrying them serves one owner.
 	Clock ClockRules
@@ -82,6 +91,44 @@ func (z CameraZone) Name() string {
 		return z.Loc.String()
 	}
 	return "server zone (unset)"
+}
+
+// Source returns From, with "" read as CameraZoneFromServer.
+func (z CameraZone) Source() string {
+	if z.From == "" {
+		return CameraZoneFromServer
+	}
+	return z.From
+}
+
+// In returns z reading wall clocks in loc, a zone named for them by from (CameraZoneFromBatch or
+// CameraZoneFromUser). The camera rules and the clock rules stay. A nil loc returns z unchanged.
+func (z CameraZone) In(loc *time.Location, from string) CameraZone {
+	if loc == nil {
+		return z
+	}
+	z.Loc, z.Set, z.From, z.UTCFallback = loc, true, from, false
+	return z
+}
+
+// maxZoneNameBytes bounds a zone name before it is looked up. IANA names are under 40 bytes.
+const maxZoneNameBytes = 64
+
+// LoadZone loads an IANA zone name a user gave for camera clocks: a setting, an upload's zone or
+// server scan --tz. It refuses "" and "Local", which time.LoadLocation reads as UTC and as the
+// server's own zone rather than as a zone of that name, and a name too long to be one.
+func LoadZone(name string) (*time.Location, error) {
+	switch {
+	case name == "", name == "Local":
+		return nil, fmt.Errorf("unknown time zone %q", name)
+	case len(name) > maxZoneNameBytes:
+		return nil, fmt.Errorf("time zone name longer than %d bytes", maxZoneNameBytes)
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("unknown time zone %q", name)
+	}
+	return loc, nil
 }
 
 // UTCAllYear reports whether loc is at UTC all year: offset 0 on 1 January and on 1 July of the
@@ -150,8 +197,8 @@ var exifTagsRead = map[string]string{
 
 // ExtractExif reads the EXIF block of the image at the start of r, which may be only the head of
 // the file. Anything that is not a supported image gives an empty result. zone holds the timezone
-// camera clocks are assumed to show (CAMERA_TIMEZONE; nil Loc means UTC), the camera rules and the
-// owner's clock rules. takenAt explains how the capture time is read, and Raw keeps what it read it
+// camera clocks are assumed to show (the batch's, the owner's or CAMERA_TIMEZONE; nil Loc means
+// UTC), the camera rules and the owner's clock rules. takenAt explains how the capture time is read, and Raw keeps what it read it
 // from.
 func ExtractExif(r io.ReadSeeker, zone CameraZone) ExifData {
 	tags, err := readExifTags(r)
@@ -311,7 +358,8 @@ const exifTimeLayout = "2006:01:02 15:04:05"
 //  3. the photo's OffsetTimeOriginal, unless the camera rules say to ignore it for the make. A
 //     phone writes the offset its clock really shows, abroad too, and many phones write no GPS
 //     timestamp;
-//  4. otherwise the camera zone, with its daylight saving rules on that date (nil Loc reads UTC).
+//  4. otherwise the camera zone (the batch's, the owner's or the server's), with its daylight saving
+//     rules on that date (nil Loc reads UTC).
 func (t exifTags) takenAt(zone CameraZone) (*time.Time, string, *ClockRule) {
 	clock := t.wallClock()
 	if !clock.parsed {

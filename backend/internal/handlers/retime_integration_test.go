@@ -979,3 +979,78 @@ func TestRunRetime_Integration_NeighboursOfAMovedPointAreMatchedAgain(t *testing
 	require.NotNil(t, m.lat, "outside the match window of the old time: left as it was")
 	assert.InDelta(t, 10, *m.lat, 1e-9)
 }
+
+// The owner's camera zone setting is today's camera zone for their items: retime moves the rows read
+// in the server's zone into it. A zone named for an upload or a scan stays with its files, and another
+// owner's setting never applies.
+func TestRunRetime_Integration_CameraZoneSetting(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	alice := createUser(t, pool, "alice")
+	bob := createUser(t, pool, "bob")
+	store := newRetimeHeads()
+	deps := retimeDeps(t, pool, store)
+	tokyo := deps.cameraZone.In(mustLoadLocation(t, "Asia/Tokyo"), ingest.CameraZoneFromBatch)
+
+	photo := func(dto string) []byte { return exiftest.JPEG(exiftest.Photo{DateTimeOriginal: dto}) }
+	// What ingest recorded: the zone in effect, and who named it.
+	ingested := func(object []byte, zone ingest.CameraZone) []byte {
+		return newCaptureEvidence(ingest.ExtractExif(bytes.NewReader(object), zone), ingest.VideoProbeResult{}, nil, zone).encode()
+	}
+	inServerZone := photo("2024:01:10 12:00:00")
+	serverRow := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "a.jpg", object: inServerZone,
+		takenAt: "2024-01-10T11:00:00Z", evidence: ingested(inServerZone, deps.cameraZone)})
+	// Ingested before migration 10: no evidence, so read in today's zone too.
+	oldRow := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "b.jpg", object: photo("2023:07:01 12:00:00"),
+		takenAt: "2023-07-01T10:00:00Z"})
+	inBatchZone := photo("2024:01:11 12:00:00")
+	batchRow := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "c.jpg", object: inBatchZone,
+		takenAt: "2024-01-11T03:00:00Z", evidence: ingested(inBatchZone, tokyo)})
+	bobRow := insertRetimeRow(t, pool, store, retimeRow{owner: bob, name: "a.jpg", object: inServerZone,
+		takenAt: "2024-01-10T11:00:00Z", evidence: ingested(inServerZone, deps.cameraZone)})
+
+	_, err := pool.Exec(ctx, `UPDATE users SET camera_timezone = 'America/New_York' WHERE id = $1`, alice)
+	require.NoError(t, err)
+
+	var changes []RetimeChange
+	res, err := RunRetime(ctx, deps, alice, true, collectRetime(&changes))
+	require.NoError(t, err)
+	assert.Equal(t, RetimeResult{Checked: 3, Retimed: 2, Unchanged: 1}, res)
+	require.Len(t, changes, 2)
+	assert.Equal(t, oldRow, changes[0].MediaID)
+	assert.Equal(t, serverRow, changes[1].MediaID)
+
+	assert.True(t, retimeUTC(t, "2024-01-10T17:00:00Z").Equal(readRetimedMedia(t, pool, serverRow).takenAt), "read in New York")
+	assert.True(t, retimeUTC(t, "2023-07-01T16:00:00Z").Equal(readRetimedMedia(t, pool, oldRow).takenAt), "New York's summer time")
+	ev := retimedEvidenceOf(t, pool, serverRow)
+	assert.Equal(t, "retime", ev["by"])
+	assert.Equal(t, "America/New_York", ev["camera_zone"])
+	assert.Equal(t, "user", ev["camera_zone_from"])
+	assert.Equal(t, -300.0, ev["offset_used_min"])
+
+	assert.True(t, retimeUTC(t, "2024-01-11T03:00:00Z").Equal(readRetimedMedia(t, pool, batchRow).takenAt), "its upload's zone stays")
+	assert.Equal(t, "ingest", retimedEvidenceOf(t, pool, batchRow)["by"])
+
+	assert.NotContains(t, store.readKeys(), retimeKey(bob, "a.jpg"))
+	res, err = RunRetime(ctx, deps, bob, true, func(RetimeChange) {})
+	require.NoError(t, err)
+	assert.Equal(t, RetimeResult{Checked: 1, Unchanged: 1}, res, "alice's zone never applies to bob's files")
+	assert.True(t, retimeUTC(t, "2024-01-10T11:00:00Z").Equal(readRetimedMedia(t, pool, bobRow).takenAt))
+
+	t.Run("a second apply changes nothing, the retimed row now being in the owner's zone", func(t *testing.T) {
+		before := retimeSnapshot(t, pool)
+		res, err := RunRetime(ctx, deps, alice, true, func(RetimeChange) {})
+		require.NoError(t, err)
+		assert.Equal(t, RetimeResult{Checked: 3, Unchanged: 3}, res)
+		assert.Equal(t, before, retimeSnapshot(t, pool))
+	})
+
+	t.Run("a stored zone this server cannot load stops the run before any read", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `UPDATE users SET camera_timezone = 'Gone/Zone' WHERE id = $1`, alice)
+		require.NoError(t, err)
+		reads := len(store.readKeys())
+		_, err = RunRetime(ctx, deps, alice, true, func(RetimeChange) {})
+		assert.ErrorContains(t, err, `unknown time zone "Gone/Zone"`)
+		assert.Len(t, store.readKeys(), reads)
+	})
+}

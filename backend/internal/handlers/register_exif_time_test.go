@@ -84,7 +84,7 @@ func evidenceWith(overrides map[string]any) map[string]any {
 	want := map[string]any{
 		"v": 1.0, "by": "ingest", "retimed_from": nil, "src": "none", "zone": nil, "wall": nil, "gps_utc": nil,
 		"wall_minus_gps_s": nil, "offset_tag": nil, "offset_ignored": false, "offset_used_min": nil, "clock_rule": nil,
-		"camera_zone": "Europe/Warsaw", "camera_zone_utc_fallback": false, "make": nil, "model": nil,
+		"camera_zone": "Europe/Warsaw", "camera_zone_from": "server", "camera_zone_utc_fallback": false, "make": nil, "model": nil,
 		"exif_partial": false, "creation_time": nil, "file_mtime": nil, "duration_s": nil, "encoder": nil, "codec": nil,
 		"transcoded": false,
 	}

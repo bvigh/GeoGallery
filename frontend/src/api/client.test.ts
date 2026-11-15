@@ -119,6 +119,15 @@ describe("api client", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/media/upload?album_id=a1", { method: "POST", body: form });
   });
 
+  it("upload() sends the upload's camera zone as a query param when given", async () => {
+    fetchMock.mockResolvedValue(response(200, { uploaded: ["a.jpg"] }));
+    const form = new FormData();
+    await api.upload(form, undefined, "America/New_York");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/media/upload?camera_timezone=America%2FNew_York", { method: "POST", body: form });
+    await api.upload(form, "a1", "Asia/Tokyo");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/media/upload?album_id=a1&camera_timezone=Asia%2FTokyo", { method: "POST", body: form });
+  });
+
   it("upload() rejects with the status when the album is not found", async () => {
     fetchMock.mockResolvedValue(response(404));
     await expect(api.upload(new FormData(), "a1")).rejects.toMatchObject({ status: 404 });
@@ -646,5 +655,40 @@ describe("api client", () => {
 
     fetchMock.mockResolvedValueOnce(response(404));
     await expect(api.revokeToken("t2")).rejects.toMatchObject({ status: 404 });
+  });
+
+  describe("settings", () => {
+    const settings = { camera_timezone: "Asia/Tokyo", defaults: { camera_timezone: "Europe/Warsaw" } };
+
+    it("getSettings() reads the caller's settings", async () => {
+      fetchMock.mockResolvedValue(response(200, settings));
+      await expect(api.getSettings()).resolves.toEqual(settings);
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/me/settings");
+    });
+
+    it("updateSettings() sends a PATCH with the changes only", async () => {
+      fetchMock.mockResolvedValue(response(200, { ...settings, camera_timezone: null }));
+      await expect(api.updateSettings({ camera_timezone: null })).resolves.toMatchObject({ camera_timezone: null });
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe("/api/me/settings");
+      expect(init).toMatchObject({ method: "PATCH", headers: { "Content-Type": "application/json" } });
+      expect(JSON.parse(init.body)).toEqual({ camera_timezone: null });
+    });
+
+    it("updateSettings() carries the reason of a 400", async () => {
+      fetchMock.mockResolvedValue({ ...response(400), text: async () => 'camera_timezone: unknown time zone "Mars/Olympus"\n' });
+      await expect(api.updateSettings({ camera_timezone: "Mars/Olympus" })).rejects.toMatchObject({
+        status: 400,
+        message: "PATCH /me/settings failed: 400",
+        reason: 'camera_timezone: unknown time zone "Mars/Olympus"',
+      });
+    });
+
+    it("updateSettings() has no reason for other failures", async () => {
+      const text = vi.fn(async () => "db error");
+      fetchMock.mockResolvedValue({ ...response(500), text });
+      await expect(api.updateSettings({ camera_timezone: null })).rejects.toMatchObject({ status: 500, reason: null });
+      expect(text).not.toHaveBeenCalled();
+    });
   });
 });

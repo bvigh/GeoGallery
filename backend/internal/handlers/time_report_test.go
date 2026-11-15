@@ -103,6 +103,7 @@ func TestUpload_TimeReport(t *testing.T) {
 			"by_source": {"exif_original": 4, "exif_ifd0": 1, "container": 0, "mtime": 2, "none": 2},
 			"by_zone": {"gps": 1, "clock_rule": 1, "offset": 1, "camera": 2},
 			"camera_zone": "Europe/Warsaw",
+			"camera_zone_from": "server",
 			"assumed_zone_is_utc": false,
 			"file_date_names": ["z-copied.jpg", "a-copied.jpg"]
 		}`, got)
@@ -116,6 +117,7 @@ func TestUpload_TimeReport(t *testing.T) {
 			"by_source": {"exif_original": 0, "exif_ifd0": 0, "container": 1, "mtime": 0, "none": 0},
 			"by_zone": {"gps": 0, "clock_rule": 0, "offset": 0, "camera": 0},
 			"camera_zone": "Europe/Warsaw",
+			"camera_zone_from": "server",
 			"assumed_zone_is_utc": false,
 			"file_date_names": []
 		}`, got)
@@ -132,6 +134,7 @@ func TestUpload_TimeReport(t *testing.T) {
 			"by_source": {"exif_original": 0, "exif_ifd0": 0, "container": 0, "mtime": 0, "none": 0},
 			"by_zone": {"gps": 0, "clock_rule": 0, "offset": 0, "camera": 0},
 			"camera_zone": "server zone (unset)",
+			"camera_zone_from": "server",
 			"assumed_zone_is_utc": false,
 			"file_date_names": []
 		}`, got, "a zero zone is UTC, but no file was read in it")
@@ -189,7 +192,7 @@ func TestRunIngestScan_TimeReport(t *testing.T) {
 		runTripDetect: noopTripDetect,
 	}
 
-	res, err := RunIngestScan(context.Background(), deps, dir, testOwnerID)
+	res, err := RunIngestScan(context.Background(), deps, dir, testOwnerID, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, ScanResult{Ingested: 3, Skipped: 1, Failed: 1}, scanCounts(res))

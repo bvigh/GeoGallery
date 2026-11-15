@@ -170,15 +170,33 @@ export interface UploadResponse {
   time_report?: TimeReport; // older backends omit it
 }
 
+// Who named the camera zone a wall clock was read in: the upload or scan itself ("batch"), the
+// owner's setting ("user"), or CAMERA_TIMEZONE or the server's own zone ("server").
+export type CameraZoneFrom = "batch" | "user" | "server";
+
 // How the capture times of one upload request's new files were read, counted by the values their
 // capture_evidence records. Duplicates and failed files are not counted.
 export interface TimeReport {
   by_source: Record<CaptureSource, number>;
   by_zone: Record<ZoneRule, number>;
   camera_zone: string; // the IANA name, or the literal "server zone (unset)"
-  assumed_zone_is_utc: boolean; // a file was read in the camera zone, and that zone is UTC all year
+  camera_zone_from?: CameraZoneFrom; // older backends omit it: the server's
+  // A file was read in the camera zone, that zone is UTC all year, and the upload did not name it.
+  assumed_zone_is_utc: boolean;
   file_date_names: string[]; // the files dated by their modified date (src "mtime")
 }
+
+// GET and PATCH /api/me/settings: the caller's own settings, null where the server's default
+// applies, and those defaults.
+export interface UserSettings {
+  camera_timezone: string | null; // the IANA zone the caller's camera clocks show
+  defaults: {
+    camera_timezone: string; // the server's: the IANA name, or the literal "server zone (unset)"
+  };
+}
+
+// A PATCH body: the settings to change, null returning one to its default.
+export type UserSettingsPatch = Partial<Pick<UserSettings, "camera_timezone">>;
 
 export interface GuessResult {
   actual_lat: number;
@@ -235,6 +253,7 @@ export interface CaptureEvidence {
   offset_used_min: number | null;
   clock_rule?: EvidenceClockRule | null; // set when zone is "clock_rule"
   camera_zone: string; // the IANA name, or the literal "server zone (unset)"
+  camera_zone_from?: CameraZoneFrom; // rows recorded before per-user zones lack it: the server's
   camera_zone_utc_fallback: boolean;
   make: string | null;
   model: string | null;
@@ -247,10 +266,12 @@ export interface CaptureEvidence {
   transcoded: boolean;
 }
 
-// The zone this server applies today.
+// The camera zone the owner's uploads get today: their setting, else the server's. (The name
+// predates per-user zones.)
 export interface ServerCameraZone {
-  name: string; // "server zone (unset)" when CAMERA_TIMEZONE is unset
+  name: string; // "server zone (unset)" when CAMERA_TIMEZONE is unset and the owner has none
   set: boolean;
+  from?: "user" | "server"; // older backends omit it: the server's
   utc_fallback: boolean;
   offset_now_min: number;
 }
@@ -432,6 +453,7 @@ export interface FileReread {
     zone_rule: ZoneRule | null;
     offset_min: number | null; // null for a container time
     zone_name: string | null; // set only when zone_rule is "camera"
+    zone_from?: CameraZoneFrom | null; // who named zone_name; set only when zone_rule is "camera"
     clock_rule: EvidenceClockRule | null; // set only when zone_rule is "clock_rule"
     taken_at: string;
   } | null; // null when no capture time could be read

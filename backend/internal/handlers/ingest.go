@@ -49,14 +49,21 @@ var supportedExts = map[string]bool{
 }
 
 // RunIngestScan walks dir and ingests every supported file into ownerID's library, then runs
-// the GPS matcher and trip detection for that owner. Per-file failures are logged, counted in
-// Failed and skipped. On cancellation the walk stops after the current file, the matcher and
-// trip detection are skipped, and ctx.Err() is returned.
-func RunIngestScan(ctx context.Context, deps IngestDeps, dir, ownerID string) (ScanResult, error) {
+// the GPS matcher and trip detection for that owner. The files are read in zone (server scan --tz)
+// when it is given, else in the owner's camera zone setting, else in the server's. Per-file failures
+// are logged, counted in Failed and skipped. On cancellation the walk stops after the current file,
+// the matcher and trip detection are skipped, and ctx.Err() is returned.
+func RunIngestScan(ctx context.Context, deps IngestDeps, dir, ownerID string, zone *time.Location) (ScanResult, error) {
 	slog.Info("ingest: scan started", "dir", dir, "owner_id", ownerID)
-	res := ScanResult{TimeReport: newTimeReport(deps.registrar.cameraZone)}
+	registrar, err := deps.registrar.forOwner(ctx, ownerID, zone)
+	if err != nil {
+		slog.Error("ingest: camera zone lookup failed", "err", err)
+		return ScanResult{}, err
+	}
+	slog.Info("ingest: camera zone", "zone", registrar.cameraZone.Name(), "from", registrar.cameraZone.Source())
+	res := ScanResult{TimeReport: newTimeReport(registrar.cameraZone)}
 
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
@@ -81,7 +88,7 @@ func RunIngestScan(ctx context.Context, deps IngestDeps, dir, ownerID string) (S
 			return nil
 		}
 		mtime := info.ModTime()
-		registered, err := deps.registrar.registerMedia(ctx, ownerID, f, info.Size(), d.Name(), &mtime)
+		registered, err := registrar.registerMedia(ctx, ownerID, f, info.Size(), d.Name(), &mtime)
 		f.Close()
 		if err != nil {
 			slog.Error("ingest: register media failed", "path", path, "err", err)

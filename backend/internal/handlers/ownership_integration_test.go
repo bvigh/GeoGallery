@@ -97,6 +97,7 @@ func newOwnershipRouter(pool *pgxpool.Pool, store *fakeObjectStore) http.Handler
 		photoSlots: make(chan struct{}, maxConcurrentPhotoReads),
 	}
 	clockRules := NewCameraClockRuleHandler(pool)
+	settings := NewSettingsHandler(pool, ingest.CameraZone{})
 
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
@@ -130,6 +131,8 @@ func newOwnershipRouter(pool *pgxpool.Pool, store *fakeObjectStore) http.Handler
 		r.Put("/camera-clock-rules/{id}", clockRules.Update)
 		r.Delete("/camera-clock-rules/{id}", clockRules.Delete)
 		r.Get("/cameras", clockRules.Cameras)
+		r.Get("/me/settings", settings.Get)
+		r.Patch("/me/settings", settings.Update)
 	})
 	return r
 }

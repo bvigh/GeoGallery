@@ -52,10 +52,11 @@ func noonPlus(delta time.Duration) *time.Time {
 
 // rereadRow answers the item query, in the order the handler scans.
 type rereadRow struct {
-	mediaType string
-	takenAt   *time.Time
-	uploaded  time.Time
-	evidence  string
+	mediaType   string
+	takenAt     *time.Time
+	uploaded    time.Time
+	evidence    string
+	zoneSetting *string // the owner's camera_timezone
 }
 
 func (r rereadRow) Scan(dest ...any) error {
@@ -66,6 +67,7 @@ func (r rereadRow) Scan(dest ...any) error {
 	if r.evidence != "" {
 		*dest[4].(*[]byte) = []byte(r.evidence)
 	}
+	*dest[5].(**string) = r.zoneSetting
 	return nil
 }
 
@@ -323,6 +325,54 @@ func TestProvenanceFile_RuleToday(t *testing.T) {
 	}
 }
 
+// The re-read reads an item in the zone its upload named, else in the zone the owner's uploads get
+// today: their setting, else the server's.
+func TestProvenanceFile_CameraZoneChoice(t *testing.T) {
+	wall := exiftest.Photo{DateTimeOriginal: rereadWallNoon}
+	server := ingest.CameraZone{Loc: time.UTC, Set: true, From: ingest.CameraZoneFromServer}
+	batchEvidence := `{"v":1,"by":"ingest","src":"exif_original","zone":"camera","camera_zone":"Asia/Kolkata","camera_zone_from":"batch"}`
+	userEvidence := `{"v":1,"by":"ingest","src":"exif_original","zone":"camera","camera_zone":"Asia/Kolkata","camera_zone_from":"user"}`
+	tests := []struct {
+		name     string
+		row      rereadRow
+		wantName string
+		wantFrom string
+		wantUTC  time.Time
+	}{
+		{"the server's zone", photoRow(noonPlus(0)), "UTC", "server", rereadNoon},
+		{"the owner's zone today", rereadRow{mediaType: "photo", takenAt: noonPlus(0), uploaded: rereadUploaded, zoneSetting: ptr("Asia/Tokyo")},
+			"Asia/Tokyo", "user", rereadNoon.Add(-9 * time.Hour)},
+		{"the zone its upload named, over the owner's", rereadRow{mediaType: "photo", takenAt: noonPlus(0), uploaded: rereadUploaded,
+			evidence: batchEvidence, zoneSetting: ptr("Asia/Tokyo")}, "Asia/Kolkata", "batch", rereadNoon.Add(-330 * time.Minute)},
+		{"a zone the owner's setting gave then is not kept", rereadRow{mediaType: "photo", takenAt: noonPlus(0), uploaded: rereadUploaded,
+			evidence: userEvidence, zoneSetting: ptr("Asia/Tokyo")}, "Asia/Tokyo", "user", rereadNoon.Add(-9 * time.Hour)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := photoReread(t, wall, tt.row, server)
+
+			require.NotNil(t, got.RuleToday)
+			assert.Equal(t, ptr(tt.wantName), got.RuleToday.ZoneName)
+			assert.Equal(t, ptr(tt.wantFrom), got.RuleToday.ZoneFrom)
+			assert.True(t, tt.wantUTC.Equal(got.RuleToday.TakenAt), "got %s", got.RuleToday.TakenAt)
+		})
+	}
+
+	for name, row := range map[string]rereadRow{
+		"the owner's stored zone no longer loads": {mediaType: "photo", takenAt: noonPlus(0), uploaded: rereadUploaded, zoneSetting: ptr("Gone/Zone")},
+		"its upload's zone no longer loads": {mediaType: "photo", takenAt: noonPlus(0), uploaded: rereadUploaded,
+			evidence: `{"v":1,"by":"ingest","camera_zone":"Gone/Zone","camera_zone_from":"batch"}`},
+	} {
+		t.Run(name+": 500, and the file is not read", func(t *testing.T) {
+			store := &stubRereadStorage{head: exiftest.JPEG(wall)}
+			rec := httptest.NewRecorder()
+			newRereadHandler(row, store, server, probeMustNotRun(t)).File(rec, provenanceRequest(rereadID))
+			assert.Equal(t, http.StatusInternalServerError, rec.Code)
+			assert.Empty(t, store.headKeys)
+		})
+	}
+}
+
 func TestProvenanceFile_Checks(t *testing.T) {
 	wall := exiftest.Photo{DateTimeOriginal: rereadWallNoon}
 	staleGPS := &exiftest.GPS{Lat: 10, Lng: 20, Time: rereadNoon.Add(-10 * time.Minute)}
@@ -547,7 +597,7 @@ func TestProvenanceFile_Wire(t *testing.T) {
 				"model": "TestModel",
 				"video": null
 			},
-			"rule_today": {"source": "exif_original", "zone_rule": "gps", "offset_min": 60, "zone_name": null, "clock_rule": null, "taken_at": "2001-02-03T12:00:00Z"},
+			"rule_today": {"source": "exif_original", "zone_rule": "gps", "offset_min": 60, "zone_name": null, "zone_from": null, "clock_rule": null, "taken_at": "2001-02-03T12:00:00Z"},
 			"delta_s": 0,
 			"class": "same",
 			"checks": [],
@@ -575,7 +625,7 @@ func TestProvenanceFile_Wire(t *testing.T) {
 				"gps_stamp": null, "wall_minus_gps_s": null, "make": null, "model": null,
 				"video": {"creation_time": "2001-02-03T12:00:00Z", "duration_s": 12.5, "encoder": "Lavf60.16.100", "codec": "hevc"}
 			},
-			"rule_today": {"source": "container", "zone_rule": null, "offset_min": null, "zone_name": null, "clock_rule": null, "taken_at": "2001-02-03T12:00:00Z"},
+			"rule_today": {"source": "container", "zone_rule": null, "offset_min": null, "zone_name": null, "zone_from": null, "clock_rule": null, "taken_at": "2001-02-03T12:00:00Z"},
 			"delta_s": 0,
 			"class": "same",
 			"checks": [{"id": "video_time_may_be_end", "level": "info", "delta_s": null}],

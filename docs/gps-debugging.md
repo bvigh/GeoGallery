@@ -121,7 +121,7 @@ ALTER TABLE media DROP COLUMN capture_evidence;
 
 The column is nullable with no default. Existing rows stay `NULL`. The four other columns already exist in `000001_init`.
 
-`capture_evidence` has this shape. All keys are always present, except `retimed_from` and `clock_rule`, which came with the camera clock rules (#24) and are missing from rows recorded before them.
+`capture_evidence` has this shape. All keys are always present, except `retimed_from` and `clock_rule`, which came with the camera clock rules (#24), and `camera_zone_from`, which came with per-user camera zones (#25): rows recorded before them lack those keys.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -137,8 +137,9 @@ The column is nullable with no default. Existing rows stay `NULL`. The four othe
 | `offset_ignored` | boolean | The tag exists and the make's camera rule sets `ignore_offset_tag` (`backend/camera-rules.json`). |
 | `offset_used_min` | number or null | The UTC offset actually applied, in minutes, under whichever of the four rules applied. Null exactly when `zone` is null. |
 | `clock_rule` | object or null | A copy of the owner's camera clock rule that gave the offset: `{id, make, model, offset_min, starts_on, ends_on}`, the days `YYYY-MM-DD` or null. Set exactly when `zone` is `clock_rule`. A copy, because the rule can later be changed or deleted. |
-| `camera_zone` | string | The zone in effect at ingest: the IANA name when `CAMERA_TIMEZONE` is set, otherwise the literal `server zone (unset)`. Written for every file. |
-| `camera_zone_utc_fallback` | boolean | `CAMERA_TIMEZONE` was unset and the server's zone is UTC all year. |
+| `camera_zone` | string | The zone in effect at ingest: the IANA name of the zone the upload or scan named, else the owner's setting, else `CAMERA_TIMEZONE`; the literal `server zone (unset)` when none was named. Written for every file. |
+| `camera_zone_from` | string | Who named `camera_zone`: `batch` (the upload's `?camera_timezone` or `server scan --tz`), `user` (the owner's `users.camera_timezone`) or `server`. Missing from rows recorded before #25, which were read in the server's. `server retime` and the file re-read read a `batch` row in its recorded zone again, and any other row in the zone the owner's uploads get today. |
+| `camera_zone_utc_fallback` | boolean | No zone was named (not the batch, the owner nor `CAMERA_TIMEZONE`) and the server's zone is UTC all year. |
 | `make`, `model` | string or null | EXIF `Make` and `Model`, after `CleanTag`. |
 | `exif_partial` | boolean | The EXIF decoder stopped at an error after reading some of the tags `ExtractExif` uses, and those were kept. |
 | `creation_time` | RFC 3339 UTC or null | The container's `creation_time`, even when EXIF won. |
@@ -324,9 +325,11 @@ interface ProvenanceResponse {
   time: {
     recorded: "ingest" | "backfill" | "retime" | "not_recorded";
     evidence: CaptureEvidence | null;       // null when not_recorded
-    server_camera_zone: {                   // the zone this server applies today
-      name: string;                         // "server zone (unset)" when CAMERA_TIMEZONE is unset
+    server_camera_zone: {                   // the zone the owner's uploads get today (#25): their
+                                            // setting, else the server's; the name predates #25
+      name: string;                         // "server zone (unset)" when neither is set
       set: boolean;
+      from: "user" | "server";
       utc_fallback: boolean;
       offset_now_min: number;
     };
@@ -529,6 +532,8 @@ interface FileReread {
     zone_rule: "gps" | "clock_rule" | "offset" | "camera" | null;
     offset_min: number | null;    // null for a container time
     zone_name: string | null;     // set only when zone_rule is "camera"
+    zone_from: "batch" | "user" | "server" | null; // who named zone_name, set with it: the zone
+                                  // its upload named stays with it, else the owner's today
     clock_rule: EvidenceClockRule | null; // the owner's rule as it is today, shaped like
                                   // capture_evidence.clock_rule; set only when zone_rule is "clock_rule"
     taken_at: string;
@@ -657,7 +662,7 @@ Downsampling keeps one row per format, so a per-source line in a downsampled con
 4. **Others:** one row per format, "Each format on its own": the gap to its nearest point before and after, and how far its points alone would place the item (Alone), the used rows marked and each row in its format's map colour. On the map, each format's own points are dots joined by a thin dashed line, with a diamond at its own estimate. Below the rows comes one independence line (table below), when one applies.
 5. **Actions:** Re-match my library, Place by hand.
 
-**Zone chip wording.** `gps`: the GPS clock, with its residual. `clock_rule`: "Your rule for {camera}: clock showed UTC+02:00", and for recorded evidence the note "Changing this rule in Settings does not move this time." `offset`: `OffsetTimeOriginal`. `camera`: the zone name and "nothing in the file confirms this". With `offset_ignored`: "The file declares {tag}, which is ignored for this make." With `camera_zone` unset: "the server's own zone, because `CAMERA_TIMEZONE` is unset", and with `camera_zone_utc_fallback`: a warning that this time was read as UTC.
+**Zone chip wording.** `gps`: the GPS clock, with its residual. `clock_rule`: "Your rule for {camera}: clock showed UTC+02:00", and for recorded evidence the note "Changing this rule in Settings does not move this time." `offset`: `OffsetTimeOriginal`. `camera`: the zone name and "nothing in the file confirms this", the name followed by ", your camera zone" for the owner's setting (with the note "Changing your camera zone in Settings does not move this time." on recorded evidence) or ", chosen for its upload" for an upload's or a scan's own zone. With `offset_ignored`: "The file declares {tag}, which is ignored for this make." With `camera_zone` unset: "the server's own zone, because `CAMERA_TIMEZONE` is unset", and with `camera_zone_utc_fallback`: a warning that this time was read as UTC.
 
 **Time origin chip.** `exif_original`: "EXIF capture time". `exif_ifd0`: "EXIF general date, may be an edit time". `container`: "Video container time". `mtime`: "File modified time, may be wrong", with the note "A modified time is often a copy or download time." `none`: "No capture time". With no evidence, the chip follows the re-read's `rule_today.source`, and until that loads it reads "not recorded".
 
@@ -928,7 +933,9 @@ interface TimeReport {
   by_source: Record<string, number>;   // exif_original, exif_ifd0, container, mtime, none
   by_zone: Record<string, number>;     // gps, offset, camera
   camera_zone: string;                 // the zone name, or "server zone (unset)"
-  assumed_zone_is_utc: boolean;        // any file used rule "camera" in a zone that is UTC all year
+  camera_zone_from: "batch" | "user" | "server"; // who named it (#25)
+  assumed_zone_is_utc: boolean;        // any file used rule "camera" in a zone that is UTC all year,
+                                       // and the upload or scan did not name that zone
   file_date_names: string[];
 }
 ```
@@ -989,9 +996,9 @@ Where the code differs from the specification above, or settles something it lef
 **Upload receipts.**
 
 - `registerMedia` returns a `registerResult`: the media ID, whether the row is new, and for a new row the `src` and `zone` its `capture_evidence` records. A duplicate, including one that loses the `ON CONFLICT` race, has neither. `time_report` counts only the rows a request stored as new, by those values, so a time `jsonCanCarry` dropped counts as `none`. Every key of both counts is always present.
-- "UTC all year" is `ingest.UTCAllYear`: offset 0 on 1 January and on 1 July of the current year, a nil zone counting as UTC. `config.CameraTimezoneFallsBackToUTC` uses it too. `assumed_zone_is_utc` is set for an unset `CAMERA_TIMEZONE` on a UTC server, and also for one set to `UTC` or to any zone at UTC all year, such as `Africa/Abidjan`. A deployment whose cameras really show UTC gets the warning as well; its wording allows for that: "The assumed camera zone is UTC all year, so the files dated in it were read as UTC. If the camera's clock did not show UTC, those times are off by its offset from UTC. An administrator sets the camera zone with CAMERA_TIMEZONE. A new zone dates new uploads only: these files keep their times until an administrator runs server retime, and uploading them again skips them as duplicates." With `CAMERA_TIMEZONE` unset it opens "CAMERA_TIMEZONE is unset and the server's zone is UTC, so the files dated in it were read as UTC."
-- With `CAMERA_TIMEZONE` unset, `camera_zone` is `server zone (unset)`, and the Upload page reads that part "assumed server zone" rather than "assumed camera zone server zone (unset)".
-- `server scan` prints `by_source: …` and `by_zone: … camera_zone="…"` after its first line and, when `assumed_zone_is_utc`, a warning naming `CAMERA_TIMEZONE` and `server retime --user <id>`. Its `file_date_names`, base names in walk order, are not printed.
+- "UTC all year" is `ingest.UTCAllYear`: offset 0 on 1 January and on 1 July of the current year, a nil zone counting as UTC. `config.CameraTimezoneFallsBackToUTC` uses it too. `assumed_zone_is_utc` is set for an unset `CAMERA_TIMEZONE` on a UTC server, and also for `CAMERA_TIMEZONE` or the owner's camera zone setting set to `UTC` or to any zone at UTC all year, such as `Africa/Abidjan`. A zone the upload or scan named itself (`camera_zone_from` `batch`) never sets it: it was chosen for those very files. A deployment whose cameras really show UTC gets the warning as well; its wording allows for that: "The assumed camera zone is UTC all year, so the files dated in it were read as UTC. If the camera's clock did not show UTC, those times are off by its offset from UTC. Set your own camera zone in Settings, or choose a zone for an upload. A new zone dates new uploads only: these files keep their times until an administrator runs server retime, and uploading them again skips them as duplicates." With `CAMERA_TIMEZONE` unset it opens "CAMERA_TIMEZONE is unset and the server's zone is UTC, so the files dated in it were read as UTC.", and for the owner's setting "Your camera zone is UTC all year, …" with "Change your camera zone in Settings, or choose a zone for an upload."
+- With `CAMERA_TIMEZONE` unset, `camera_zone` is `server zone (unset)`, and the Upload page reads that part "assumed server zone" rather than "assumed camera zone server zone (unset)". The owner's zone reads "assumed your camera zone Asia/Tokyo", and the upload's own "this upload's zone America/New_York".
+- `server scan` prints `by_source: …` and `by_zone: … camera_zone="…" camera_zone_from=…` after its first line and, when `assumed_zone_is_utc`, a warning naming `CAMERA_TIMEZONE` or the user's camera zone in Settings, and `server retime --user <id>`. Its `file_date_names`, base names in walk order, are not printed.
 - A track file's entry counts every point parsed, including those imported before, and its `first` and `last` are its earliest and latest point, not its first and last rows. Entries come in upload order, and `files` is never null.
 
 **Frontend.**
@@ -1004,7 +1011,7 @@ Where the code differs from the specification above, or settles something it lef
 - A finding with one item opens the evidence view with no position and no stepping, as the other parents do. Two or more get "i / n" and wrap round. After a location save or a Re-match there, the checks run again when the evidence view closes.
 - "Most often from {file}" appears only when `top_source` is set, which a tie prevents, and at least 2 of the group's estimates rest on that file.
 - Sentences name raw prefixes as written ("between points from esoko and gpx"), because "a" or "an" cannot be chosen for an unknown one. Distances are whole kilometres from 10 km, and a spacing share is floored, with "under 1%". Severity is shown by the icon's shape and, in words, in the button's label. A 504 has its own sentence.
-- The Upload page merges every batch's report: counts added, `file_date_names` concatenated in upload order, `assumed_zone_is_utc` ORed, the first batch's `camera_zone` kept. The line reads, for example, "Capture times: 38 from EXIF (10 GPS clock, 2 camera clock rule, 20 photo offset, 6 assumed camera zone Europe/Warsaw), 3 from video container, 2 from file date, 1 with no capture time", without the parts that dated no file. The general date tag's count is a sentence of its own, because it splits the EXIF count by tag rather than by rule. The UTC warning gives no count, which the line above already has.
+- The Upload page merges every batch's report: counts added, `file_date_names` concatenated in upload order, `assumed_zone_is_utc` ORed, the first batch's `camera_zone` and `camera_zone_from` kept. The line reads, for example, "Capture times: 38 from EXIF (10 GPS clock, 2 camera clock rule, 20 photo offset, 6 assumed camera zone Europe/Warsaw), 3 from video container, 2 from file date, 1 with no capture time", without the parts that dated no file. The general date tag's count is a sentence of its own, because it splits the EXIF count by tag rather than by rule. The UTC warning gives no count, which the line above already has.
 - A track file whose last point is more than a day after the import finished, by the browser's clock, is warned about ("about 13 years in the future") and listed first, and a line above the list counts such files. The list shows 200 files at a time with Show more, in the page's own scroll: rendering a 4,466-file import at once froze the page for about 4 s, against about 0.2 s now. A time JSON cannot carry reads "year out of range", as in the Checks table. Counts on both receipts and in the Checks view are grouped by the browser's locale.
 - The `toLocale*` rule also covers `src/lib/checks.ts`.
 
@@ -1471,7 +1478,7 @@ Some of the rejected views need defining, so that the reopen triggers mean somet
 - **#22, matcher source preference.** Step 1's options struct and returned source are what #22 builds on. The `others` table and the `independent` line show on real items what it would change. The tie-break ships here rather than in #22. When #22 lands, estimates change and read as `stale` until the next run. Step 2's `time_may_be_estimated_used` matches #22's two formats. #22 keeps KMZ among the preferred sources, because its time spacing was never checked; Step 2's `modal_gap_share` is what can settle that.
 - **#23, parser guards.** Independent. Until it lands, Step 2's `future_track_points` reports what it would have refused, and #23's one-day limit is the threshold used. It stops new rows but does not surface existing ones. The track upload receipt shows a bad span on the day of import.
 - **#24, per-user camera clock rules and the retime port.** Built after Step 1, on its `storage.ReadHead`. The owner's clock rule is the `capture_evidence.zone` value `clock_rule`, with a copy of the rule in `clock_rule`. The ported `retime` updates `capture_evidence` (`by: "retime"`, `retimed_from`), so a repaired row is not identical to an untouched one. The backfill follows `RunRetime`'s pattern. The Step 4 group verdict finds what #24's rule would fix.
-- **#25, per-user camera zone.** `capture_evidence.camera_zone` records the zone actually applied to each file, so per-user and per-batch zones stay explainable. `server_camera_zone` must then become the effective zone for that user.
+- **#25, per-user camera zone.** Built. `capture_evidence.camera_zone` records the zone actually applied to each file and `camera_zone_from` who named it, so per-user and per-batch zones stay explainable. `server_camera_zone` is now the effective zone for that user, with `from`; `rule_today.zone_from` says which zone the re-read used.
 - **#26, edit and shift times.** Depends on #24. Step 4's Copy shift produces the `{media_ids, delta_seconds}` body it specifies. Apply buttons belong to #26. An edit must record itself in `capture_evidence`.
 - **#29, phone upload spike.** The spike decides what a phone upload actually delivers, HEIC or JPEG, and whether position survives. It sets the priority of the HEIC parser entry above, and Step 1's `capture_evidence.src` shows the symptom on real uploads.
 - **#30, capture time from the filename.** Step 4 adds `ingest.FilenameClock`, which #30 can reuse. A filename can fill in a missing time but cannot validate a photo's existing EXIF time. `src` would gain a `filename` value.

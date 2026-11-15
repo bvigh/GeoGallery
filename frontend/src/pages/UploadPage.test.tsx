@@ -19,6 +19,7 @@ vi.mock("@/api/client", async (importOriginal) => {
       uploadGpsTracks: vi.fn(),
       listAlbums: vi.fn(),
       createAlbum: vi.fn(),
+      getSettings: vi.fn(),
     },
   };
 });
@@ -43,6 +44,7 @@ const mockApi = api as unknown as {
   uploadGpsTracks: ReturnType<typeof vi.fn>;
   listAlbums: ReturnType<typeof vi.fn>;
   createAlbum: ReturnType<typeof vi.fn>;
+  getSettings: ReturnType<typeof vi.fn>;
 };
 
 function mediaInput(container: HTMLElement): HTMLInputElement {
@@ -138,6 +140,7 @@ describe("UploadPage", () => {
       failed: [{ file: "broken.gpx", reason: "gpx: XML syntax error on line 1" }],
     });
     mockApi.listAlbums.mockResolvedValue([family, iceland]);
+    mockApi.getSettings.mockResolvedValue({ camera_timezone: null, defaults: { camera_timezone: "Europe/Warsaw" } });
   });
 
   it("uploads files with their mtimes through api.upload", async () => {
@@ -167,7 +170,8 @@ describe("UploadPage", () => {
     expect(await screen.findByText(/^Uploaded 3 files, skipped/)).toBeInTheDocument();
     expect(mockApi.upload).toHaveBeenCalledTimes(3);
     for (const call of mockApi.upload.mock.calls) {
-      expect(call).toHaveLength(2);
+      // No album, and no zone of the upload's own.
+      expect(call.slice(1).filter((arg) => arg !== undefined)).toEqual([]);
       expect(call[1]).toBeUndefined();
     }
     expect(screen.queryByText(/^Added .* to "/)).not.toBeInTheDocument();
@@ -478,17 +482,81 @@ describe("UploadPage", () => {
     });
   });
 
+  describe("camera time zone", () => {
+    const zoneSelect = () => screen.getByLabelText("Camera time zone") as HTMLSelectElement;
+
+    it.each([
+      { name: "the server's zone", settings: { camera_timezone: null, defaults: { camera_timezone: "Europe/Warsaw" } }, label: "Default: Europe/Warsaw" },
+      { name: "the server's own zone", settings: { camera_timezone: null, defaults: { camera_timezone: "server zone (unset)" } }, label: "Default: the server's own zone" },
+      { name: "the caller's zone", settings: { camera_timezone: "Asia/Tokyo", defaults: { camera_timezone: "Europe/Warsaw" } }, label: "Default: your camera zone, Asia/Tokyo" },
+    ])("names the default: $name", async ({ settings, label }) => {
+      mockApi.getSettings.mockResolvedValue(settings);
+      render(<UploadPage />);
+      expect(await screen.findByRole("option", { name: label })).toBeInTheDocument();
+      expect(zoneSelect().value).toBe("");
+    });
+
+    it("still offers the zones when the setting cannot be loaded", async () => {
+      mockApi.getSettings.mockRejectedValue(new Error("down"));
+      render(<UploadPage />);
+      await waitFor(() => expect(mockApi.getSettings).toHaveBeenCalled());
+      expect(screen.getByRole("option", { name: "Default" })).toBeInTheDocument();
+      expect(screen.getByRole("option", { name: "UTC" })).toBeInTheDocument();
+    });
+
+    it("sends no zone by default", async () => {
+      const { container } = render(<UploadPage />);
+      await userEvent.upload(mediaInput(container), new File(["a"], "a.jpg", { type: "image/jpeg" }));
+      await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+      await screen.findByText(/^Uploaded \d+ files?, skipped/);
+      expect(mockApi.upload.mock.calls[0][2]).toBeUndefined();
+    });
+
+    it("sends the chosen zone with every batch, and says what it does", async () => {
+      mockApi.upload.mockResolvedValue({ uploaded: [], skipped: [], failed: [] });
+      const { container } = render(<UploadPage />);
+      await userEvent.selectOptions(zoneSelect(), "America/New_York");
+      expect(
+        screen.getByText(
+          "The files of this upload whose own clocks give no offset are read in America/New_York, and keep that zone."
+        )
+      ).toBeInTheDocument();
+      await userEvent.upload(mediaInput(container), bigVideos("a.mp4", "b.mp4", "c.mp4"));
+      await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+      await screen.findByText(/^Uploaded \d+ files?, skipped/);
+
+      expect(mockApi.upload.mock.calls.map((call) => call[2])).toEqual(["America/New_York", "America/New_York", "America/New_York"]);
+    });
+
+    it("locks the zone choice while uploading", async () => {
+      let finish: (value: UploadResponse) => void = () => {};
+      mockApi.upload.mockReturnValue(new Promise<UploadResponse>((resolve) => (finish = resolve)));
+      const { container } = render(<UploadPage />);
+      await userEvent.upload(mediaInput(container), new File(["a"], "a.jpg", { type: "image/jpeg" }));
+      await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+      await waitFor(() => expect(zoneSelect()).toBeDisabled());
+      finish({ uploaded: ["a.jpg"], skipped: [], failed: [] });
+      await screen.findByText(/^Uploaded \d+ files?, skipped/);
+      expect(zoneSelect()).toBeEnabled();
+    });
+  });
+
   describe("capture time receipt", () => {
     // Speaks of the files dated in the assumed zone only, allows that the zone may be right, and
     // says that only server retime moves files already stored.
-    const UTC_WARNING_REST =
-      "If the camera's clock did not show UTC, those times are off by its offset from UTC. An administrator sets " +
-      "the camera zone with CAMERA_TIMEZONE. A new zone dates new uploads only: these files keep their times until " +
-      "an administrator runs server retime, and uploading them again skips them as duplicates.";
+    const OFF_BY = "If the camera's clock did not show UTC, those times are off by its offset from UTC.";
+    const ONLY_RETIME =
+      "A new zone dates new uploads only: these files keep their times until an administrator runs server retime, " +
+      "and uploading them again skips them as duplicates.";
+    const UTC_WARNING_REST = `${OFF_BY} Set your own camera zone in Settings, or choose a zone for an upload. ${ONLY_RETIME}`;
     const UTC_WARNING = `The assumed camera zone is UTC all year, so the files dated in it were read as UTC. ${UTC_WARNING_REST}`;
     const UNSET_UTC_WARNING =
       "CAMERA_TIMEZONE is unset and the server's zone is UTC, so the files dated in it were read as UTC. " +
       UTC_WARNING_REST;
+    const USER_UTC_WARNING =
+      `Your camera zone is UTC all year, so the files dated in it were read as UTC. ${OFF_BY} ` +
+      `Change your camera zone in Settings, or choose a zone for an upload. ${ONLY_RETIME}`;
 
     // Every video is sent alone, and each request is answered in turn: with a report, with no
     // report (an older backend), or with an error.
@@ -541,6 +609,28 @@ describe("UploadPage", () => {
           camera_zone: "server zone (unset)",
         }),
         line: "Capture times: 4 from EXIF (4 assumed server zone)",
+        general: null,
+      },
+      {
+        name: "the caller's own zone",
+        report: timeReport({
+          bySource: { exif_original: 2 },
+          byZone: { camera: 2 },
+          camera_zone: "Asia/Tokyo",
+          camera_zone_from: "user",
+        }),
+        line: "Capture times: 2 from EXIF (2 assumed your camera zone Asia/Tokyo)",
+        general: null,
+      },
+      {
+        name: "the upload's own zone",
+        report: timeReport({
+          bySource: { exif_original: 2 },
+          byZone: { camera: 2 },
+          camera_zone: "America/New_York",
+          camera_zone_from: "batch",
+        }),
+        line: "Capture times: 2 from EXIF (2 this upload's zone America/New_York)",
         general: null,
       },
       {
@@ -624,6 +714,18 @@ describe("UploadPage", () => {
         }),
         line: "Capture times: 1 from EXIF (1 assumed server zone)",
         warning: UNSET_UTC_WARNING,
+      },
+      {
+        name: "the caller's own zone, UTC all year",
+        report: timeReport({
+          bySource: { exif_original: 1 },
+          byZone: { camera: 1 },
+          camera_zone: "UTC",
+          camera_zone_from: "user",
+          assumed_zone_is_utc: true,
+        }),
+        line: "Capture times: 1 from EXIF (1 assumed your camera zone UTC)",
+        warning: USER_UTC_WARNING,
       },
       {
         name: "a camera zone at UTC for part of the year",
