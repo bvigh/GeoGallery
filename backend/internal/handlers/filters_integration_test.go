@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/bvigh/geogallery/internal/geo"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -136,50 +139,147 @@ func insertBurst(t *testing.T, pool *pgxpool.Pool, ownerID string, n, burst int)
 		RETURNING id::text`, ownerID, n, burst)
 }
 
-// GET /api/media pages with OFFSET, so the order must be total: rows that tie on taken_at must
-// not move between pages, or a client paging through everything sees some twice and some never.
-func TestMediaList_OffsetPagesHoldEveryItemOnce(t *testing.T) {
+// insertUndated inserts n photos owned by ownerID with no taken_at and returns their IDs.
+func insertUndated(t *testing.T, pool *pgxpool.Pool, ownerID string, n int) []string {
+	t.Helper()
+	return queryIDs(t, pool, `
+		INSERT INTO media (owner_id, filename, media_type, storage_key, file_hash)
+		SELECT $1::uuid, 'undated-' || i || '.jpg', 'photo', 'media/' || $1::text || '/undated-' || i,
+		       'hash-' || $1::text || '-undated-' || i
+		FROM generate_series(0, $2::int - 1) AS i
+		RETURNING id::text`, ownerID, n)
+}
+
+// listOrder returns ids in the list's order as Postgres itself sorts them.
+func listOrder(t *testing.T, pool *pgxpool.Pool, ids []string) []string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `
+		SELECT id::text FROM media WHERE id = ANY($1::uuid[]) ORDER BY taken_at DESC NULLS LAST, id`, ids)
+	require.NoError(t, err)
+	ordered, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	require.Len(t, ordered, len(ids))
+	return ordered
+}
+
+// listPage asks for one page of GET /api/media and returns its IDs and the next page's cursor.
+func listPage(t *testing.T, router http.Handler, user, query, cursor string) (ids []string, next string) {
+	t.Helper()
+	path := "/api/media?" + query
+	if cursor != "" {
+		path += "&cursor=" + url.QueryEscape(cursor)
+	}
+	rec := do(t, router, user, http.MethodGet, path, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	return decodeIDs(t, rec), rec.Header().Get(nextCursorHeader)
+}
+
+// pageThrough follows the cursor from the first page to the last, as the frontend does, and
+// returns every page's IDs.
+func pageThrough(t *testing.T, router http.Handler, user, query string) [][]string {
+	t.Helper()
+	var pages [][]string
+	cursor := ""
+	for {
+		page, next := listPage(t, router, user, query, cursor)
+		pages = append(pages, page)
+		if next == "" {
+			return pages
+		}
+		require.NotEqual(t, cursor, next, "the cursor moves on")
+		cursor = next
+	}
+}
+
+// The order is total (taken_at DESC NULLS LAST, then id) and each page starts after the last
+// item of the one before. Items that tie on taken_at, and the undated items after every dated
+// one, must neither repeat nor go missing at a page boundary, wherever it falls.
+func TestMediaList_CursorPagesHoldEveryItemOnce(t *testing.T) {
 	f := newSharingFixture(t)
 	// B's own items and A's shared ones share their timestamps, as when two members upload the
-	// same burst; neither tie group size divides the page size.
+	// same burst; the tie groups of 7 divide none of the page sizes.
 	own := insertBurst(t, f.pool, f.userB, 700, 7)
 	shared := insertBurst(t, f.pool, f.userA, 700, 7)
+	ownUndated := insertUndated(t, f.pool, f.userB, 5)
+	sharedUndated := insertUndated(t, f.pool, f.userA, 6)
 	_, err := f.pool.Exec(context.Background(), `
 		INSERT INTO album_media (album_id, media_id, owner_id)
-		SELECT $1, id, owner_id FROM media WHERE id = ANY($2::uuid[])`, f.family, shared)
+		SELECT $1, id, owner_id FROM media WHERE id = ANY($2::uuid[])`, f.family, slices.Concat(shared, sharedUndated))
 	require.NoError(t, err)
 
-	want := sorted(append(append(append([]string{}, own...), shared...), f.mediaB, f.mediaA, f.mediaAUnlocated)...)
-	var got []string
-	for offset := 0; ; offset += 500 {
-		rec := do(t, f.router, f.userB, http.MethodGet, fmt.Sprintf("/api/media?offset=%d", offset), "")
-		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		page := decodeIDs(t, rec)
-		got = append(got, page...)
-		if len(page) < 500 {
-			break
-		}
-	}
-	pages := map[string]int{}
-	for _, id := range got {
-		pages[id]++
-	}
-	var twice, never []string
-	for _, id := range want {
-		switch pages[id] {
-		case 0:
-			never = append(never, id)
-		case 1:
-		default:
-			twice = append(twice, id)
-		}
-	}
-	assert.Empty(t, twice, "items listed on more than one page")
-	assert.Empty(t, never, "items listed on no page")
-	assert.Len(t, got, len(want))
+	want := listOrder(t, f.pool, slices.Concat(own, shared, ownUndated, sharedUndated,
+		[]string{f.mediaB, f.mediaA, f.mediaAUnlocated}))
+	dated := len(want) - len(ownUndated) - len(sharedUndated)
+	wantShared := listOrder(t, f.pool, slices.Concat(shared, sharedUndated, []string{f.mediaA, f.mediaAUnlocated}))
 
-	// The map asks for large pages: one holds everything, in the same order as the small pages.
-	rec := do(t, f.router, f.userB, http.MethodGet, "/api/media?limit=5000", "")
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, got, decodeIDs(t, rec))
+	tests := []struct {
+		name  string
+		query string
+		want  []string
+		pages int
+	}{
+		{"the map's page holds everything, without a cursor", "limit=5000", want, 1},
+		{"pages that end inside tie groups", "limit=500", want, 3},
+		{"a page that ends at the last dated item", fmt.Sprintf("limit=%d", dated), want, 2},
+		{"a page that ends inside the undated items", fmt.Sprintf("limit=%d", dated+2), want, 2},
+		{"a last page of one", fmt.Sprintf("limit=%d", len(want)-1), want, 2},
+		{"exactly one page: no cursor", fmt.Sprintf("limit=%d", len(want)), want, 1},
+		// The filters' arguments come before the cursor's.
+		{"with filters", "limit=300&media_type=photo&owner=shared", wantShared, 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pages := pageThrough(t, f.router, f.userB, tt.query)
+			assert.Equal(t, tt.want, slices.Concat(pages...), "every item once, in the list's order")
+			assert.Len(t, pages, tt.pages)
+		})
+	}
+}
+
+// A cursor is a position, not a count: items added or deleted before it move nothing after it,
+// where an OFFSET would list an item twice or skip one.
+func TestMediaList_CursorKeepsItsPlace(t *testing.T) {
+	f := newSharingFixture(t)
+	ctx := context.Background()
+	insertBurst(t, f.pool, f.userB, 30, 3)
+	insertUndated(t, f.pool, f.userB, 4)
+	all, next := listPage(t, f.router, f.userB, "limit=5000", "")
+	require.Empty(t, next)
+	require.Len(t, all, 37, "B's burst, undated items and photo, and A's two shared ones")
+
+	first, cursor := listPage(t, f.router, f.userB, "limit=10", "")
+	require.Equal(t, all[:10], first)
+
+	// Between the requests: a new item sorts first, an item on the first page goes, and so does
+	// the item the cursor names.
+	insertMedia(t, f.pool, mediaFixture{owner: f.userB, filename: "newest.jpg", takenAt: "2030-01-01T00:00:00Z"})
+	_, err := f.pool.Exec(ctx, `DELETE FROM media WHERE id = ANY($1::uuid[])`, []string{first[0], first[9]})
+	require.NoError(t, err)
+
+	var rest [][]string
+	for cursor != "" {
+		var page []string
+		page, cursor = listPage(t, f.router, f.userB, "limit=10", cursor)
+		rest = append(rest, page)
+	}
+	assert.Equal(t, all[10:], slices.Concat(rest...))
+
+	t.Run("among the undated items", func(t *testing.T) {
+		all, _ := listPage(t, f.router, f.userB, "limit=5000", "")
+		dated := len(all) - 4
+		limit := fmt.Sprintf("limit=%d", dated+2)
+		page, cursor := listPage(t, f.router, f.userB, limit, "")
+		require.Equal(t, all[:dated+2], page, "the page ends after two undated items")
+
+		// Undated items sort by ID: one goes before the cursor's, one after the last.
+		_, err := f.pool.Exec(ctx, `
+			INSERT INTO media (id, owner_id, filename, media_type, storage_key, file_hash) VALUES
+			('00000000-0000-4000-8000-000000000000', $1, 'first.jpg', 'photo', 'media/first', 'hash-first'),
+			('ffffffff-ffff-4fff-bfff-ffffffffffff', $1, 'last.jpg', 'photo', 'media/last', 'hash-last')`, f.userB)
+		require.NoError(t, err)
+
+		page, cursor = listPage(t, f.router, f.userB, limit, cursor)
+		assert.Empty(t, cursor)
+		assert.Equal(t, slices.Concat(all[dated+2:], []string{"ffffffff-ffff-4fff-bfff-ffffffffffff"}), page)
+	})
 }

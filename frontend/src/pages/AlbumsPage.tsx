@@ -19,9 +19,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-// GET /api/media returns at most this many rows per request.
-const MEDIA_PAGE_SIZE = 500;
-
 // Small text buttons on a mouse; finger-sized, with readable text, on touch.
 const TEXT_BUTTON_CLASS = "text-xs touch:min-h-11 touch:min-w-11 touch:px-2 touch:text-sm";
 // Bordered row actions (Add, Remove) in the members dialog.
@@ -53,16 +50,7 @@ function userLabel(u: { display_name: string | null; email: string | null }, fal
 
 // The caller's own items in the album: exactly what leaving removes.
 async function countOwnItems(albumId: string): Promise<number> {
-  let total = 0;
-  for (let offset = 0; ; offset += MEDIA_PAGE_SIZE) {
-    const page = await api.get<MediaItem[] | null>("/media", {
-      album_id: albumId,
-      owner: "mine",
-      offset: String(offset),
-    });
-    total += (page ?? []).length;
-    if ((page ?? []).length < MEDIA_PAGE_SIZE) return total;
-  }
+  return (await api.listMedia({ album_id: albumId, owner: "mine" })).length;
 }
 
 function leaveMessage(name: string, ownItems: number | null): string {

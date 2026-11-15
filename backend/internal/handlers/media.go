@@ -80,13 +80,71 @@ type mediaItem struct {
 	InitialFov   *float64   `json:"initial_fov"`
 }
 
-// Page sizes for GET /api/media. The map asks for the maximum to load a large library in few
-// requests: every page re-runs the whole filtered sort, so OFFSET pages are not cheaper.
+// Page sizes for GET /api/media. The map and the galleries ask for the maximum, to load a large
+// library in few requests.
 const (
 	defaultListLimit = 500
 	maxListLimit     = 5000
 )
 
+// mediaListColumns are the columns of a GET /api/media item, from media m and its owner u. $1 is
+// the caller.
+const mediaListColumns = `m.id, m.filename, m.media_type,
+	       ST_Y(m.location::geometry) AS lat, ST_X(m.location::geometry) AS lng,
+	       m.gps_confidence, m.gps_source,
+	       m.taken_at, m.storage_key,
+	       CASE WHEN m.owner_id = $1 THEN m.trip_id END AS trip_id,
+	       m.owner_id, COALESCE(u.display_name, u.email) AS owner_name,
+	       m.initial_yaw, m.initial_pitch, m.initial_fov`
+
+// mediaListQuery returns the query for the first n items matching conds (buildMediaFilter's, ANDed)
+// in the list's order, taken_at DESC NULLS LAST, id, that come after the cursor when there is one.
+// The id makes the order total, so items that share a second never move between pages.
+//
+// Dated and undated items are read in two parts and merged. Each part has an order an index gives:
+// Postgres walks media_taken_at_idx back from the cursor and stops after n rows, where one ORDER BY
+// over both would sort every item after the cursor, on every page.
+func mediaListQuery(conds []string, args []any, after *mediaCursor, n int) (string, []any) {
+	arg := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	where := strings.Join(conds, " AND ")
+	limit := arg(n)
+	part := func(cond, order string) string {
+		return fmt.Sprintf(`(SELECT %s
+		FROM media m JOIN users u ON u.id = m.owner_id
+		WHERE %s AND %s
+		ORDER BY %s LIMIT %s)`, mediaListColumns, where, cond, order, limit)
+	}
+
+	var parts []string
+	switch {
+	case after == nil:
+		parts = []string{
+			part("m.taken_at IS NOT NULL", "m.taken_at DESC, m.id"),
+			part("m.taken_at IS NULL", "m.id"),
+		}
+	case after.takenAt != nil:
+		t := arg(*after.takenAt)
+		id := arg(after.id)
+		// taken_at < t OR (taken_at = t AND id > the cursor's), with the bound taken_at <= t spelt
+		// out: that is where Postgres starts walking the index.
+		parts = []string{
+			part(fmt.Sprintf("m.taken_at <= %[1]s AND (m.taken_at < %[1]s OR m.id > %[2]s)", t, id), "m.taken_at DESC, m.id"),
+			part("m.taken_at IS NULL", "m.id"),
+		}
+	default:
+		parts = []string{part("m.taken_at IS NULL AND m.id > "+arg(after.id), "m.id")}
+	}
+	return fmt.Sprintf(`
+		SELECT * FROM (%s) page
+		ORDER BY page.taken_at DESC NULLS LAST, page.id
+		LIMIT %s`, strings.Join(parts, "\n\t\tUNION ALL "), limit), args
+}
+
+// List pages with a cursor: a page with more items after it names the next page's cursor in the
+// X-Next-Cursor header, and the client passes it back as cursor with the same filters.
 func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if err := validateMediaFilters(q); err != nil {
@@ -103,23 +161,25 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	offset, _ := strconv.Atoi(q.Get("offset"))
+	// Refused rather than ignored: a client paging with offset would get the first page forever.
+	if q.Has("offset") {
+		http.Error(w, "offset is not supported: pass the "+nextCursorHeader+" header of the previous page as cursor",
+			http.StatusBadRequest)
+		return
+	}
+	var after *mediaCursor
+	if v := q.Get("cursor"); v != "" {
+		c, err := parseMediaCursor(v)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		after = &c
+	}
 
 	conds, args := buildMediaFilter(q, auth.MustUser(r.Context()).ID)
-	args = append(args, limit, offset)
-	sql := fmt.Sprintf(`
-		SELECT m.id, m.filename, m.media_type,
-		       ST_Y(m.location::geometry) AS lat, ST_X(m.location::geometry) AS lng,
-		       m.gps_confidence, m.gps_source,
-		       m.taken_at, m.storage_key,
-		       CASE WHEN m.owner_id = $1 THEN m.trip_id END AS trip_id,
-		       m.owner_id, COALESCE(u.display_name, u.email) AS owner_name,
-		       m.initial_yaw, m.initial_pitch, m.initial_fov
-		FROM media m JOIN users u ON u.id = m.owner_id
-		WHERE %s
-		ORDER BY m.taken_at DESC NULLS LAST, m.id -- id breaks taken_at ties, so OFFSET pages never overlap
-		LIMIT $%d OFFSET $%d
-	`, strings.Join(conds, " AND "), len(args)-1, len(args))
+	// One row more than the page says whether another page follows.
+	sql, args := mediaListQuery(conds, args, after, limit+1)
 
 	rows, err := h.db.Query(r.Context(), sql, args...)
 	if err != nil {
@@ -130,7 +190,13 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	items := []mediaItem{}
+	read, more := 0, false
 	for rows.Next() {
+		if read == limit {
+			more = true
+			break
+		}
+		read++
 		var m mediaItem
 		var lat, lng *float64
 		if err := rows.Scan(&m.ID, &m.Filename, &m.MediaType, &lat, &lng,
@@ -144,6 +210,8 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 		m.Lng = lng
 		items = append(items, m)
 	}
+	// pgx reports a query's error only once the rows are closed, and the loop may stop early.
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		// Errors raised while the query runs (such as a failed cast) surface here, not from Query.
 		slog.Error("media: list rows failed", "err", err)
@@ -152,6 +220,12 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	// The next page starts after the last item listed. more counts the rows read, not the items
+	// listed, so a row that failed to scan (logged above) does not end the list early.
+	if more && len(items) > 0 {
+		last := items[len(items)-1]
+		w.Header().Set(nextCursorHeader, mediaCursor{takenAt: last.TakenAt, id: last.ID}.String())
+	}
 	if err := json.NewEncoder(w).Encode(items); err != nil {
 		slog.Warn("media: encode list failed", "err", err)
 	}

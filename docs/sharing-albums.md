@@ -231,7 +231,7 @@ The existing "bob's empty library" spec has to stay valid under any spec order. 
 ## Known effects and risks
 
 - **Game scoring scale.** With "All", `max_dist_km` spans own plus shared media, so a friend's far-away album changes the relative scoring of your own photos. "Mine" restores today's behaviour.
-- **List performance.** The `OR EXISTS` stops `media_owner_taken_at_idx` from serving `/api/media` directly. That's fine at family scale. If it gets slow, split the query into `UNION ALL` (own ∪ shared). Pagination (Unimplemented item 3) becomes more pressing because the volume grows.
+- **List performance.** The `OR EXISTS` stops `media_owner_taken_at_idx` from serving `/api/media` directly. Since #36 the list pages by cursor, and a page walks `media_taken_at_idx` back from its cursor with the `EXISTS` as one hashed subplan: on 350k synthetic rows a page of 5,000 took about 50 ms at any depth. A user who owns a small share of a large instance still walks most of the index per page. If that gets slow, split the query into `UNION ALL` (own ∪ shared).
 - **What a share exposes.** Recipients see the item's location, `gps_confidence`, `gps_source`, `taken_at`, `filename` and the EXIF inside the file. That's intended. Legacy `media/{unix_nano}/{filename}` keys on pre-auth data now also reach recipients via presigned URLs, which is the same accepted game-hint risk.
 - **Presigned URLs** (15 min) can be forwarded by a recipient. That is inherent to presigned URLs.
 
@@ -253,7 +253,7 @@ Where the code on `feat/albums-sharing` differs from or adds to the plan above. 
 - Upload: a malformed `album_id` → 404, the same as a non-member. `album_added` is present only when `album_id` was given.
 - The album insert on upload runs **after** `RunGPSMatcher` and `RunTripDetect`. If either fails, the request returns 500 before anything is added to the album, and the files stay in the uploader's library.
 - `registerMedia` hashes the file and looks up `(owner_id, file_hash)` before uploading, so a duplicate never reaches S3 (and the Upload page skips known files before sending them, through `POST /api/media/known-hashes`). It still deletes the object it just uploaded when a concurrent upload of the same file wins the INSERT, or when the INSERT certainly stored nothing (best-effort, logged), so `registrarStorage` has `Delete`. When a failed INSERT may already have committed, it keeps the object and logs a Warn.
-- `GET /api/media` orders by `taken_at DESC NULLS LAST, id`, so OFFSET pages never overlap. A `rows.Err()` returns 500 instead of a silent `[]`.
+- `GET /api/media` orders by `taken_at DESC NULLS LAST, id`, a total order, so its cursor pages never overlap. A `rows.Err()` returns 500 instead of a silent `[]`.
 - `buildMediaFilter` binds `trip_id` and `album_id` in canonical form, because `auth.CanonicalUUID` accepts any separator but Postgres only a dash.
 - The "GPS and trips stay per owner" comment is in `trip_detect.go` as well as `gps_matcher.go`.
 

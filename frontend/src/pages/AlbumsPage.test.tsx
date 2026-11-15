@@ -15,7 +15,7 @@ vi.mock("@/api/client", async (importOriginal) => {
   return {
     ApiError: actual.ApiError,
     api: {
-      get: vi.fn(),
+      listMedia: vi.fn(),
       listAlbums: vi.fn(),
       createAlbum: vi.fn(),
       renameAlbum: vi.fn(),
@@ -41,7 +41,7 @@ vi.mock("@/components/MediaGalleryOverlay", () => ({
 }));
 
 const mockApi = api as unknown as Record<
-  | "get"
+  | "listMedia"
   | "listAlbums"
   | "createAlbum"
   | "renameAlbum"
@@ -178,7 +178,7 @@ describe("AlbumsPage", () => {
     mockApi.removeAlbumMember.mockResolvedValue(undefined);
     mockApi.removeFromAlbum.mockResolvedValue({ removed: 1 });
     mockApi.listUsers.mockResolvedValue(directory);
-    mockApi.get.mockResolvedValue([]);
+    mockApi.listMedia.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -658,14 +658,14 @@ describe("AlbumsPage", () => {
 
     it("leaves after a confirm that counts the caller's own items, then closes and refreshes", async () => {
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-      mockApi.get.mockResolvedValue([makeItem("m1", "u-me"), makeItem("m2", "u-me")]);
+      mockApi.listMedia.mockResolvedValue([makeItem("m1", "u-me"), makeItem("m2", "u-me")]);
       renderPage();
       const dialog = await openMembers(shared);
 
       mockApi.listAlbums.mockResolvedValue([owned]);
       await userEvent.click(await within(dialog).findByRole("button", { name: "Leave album" }));
 
-      expect(mockApi.get).toHaveBeenCalledWith("/media", { album_id: shared.id, owner: "mine", offset: "0" });
+      expect(mockApi.listMedia).toHaveBeenCalledWith({ album_id: shared.id, owner: "mine" });
       expect(confirmSpy).toHaveBeenCalledWith(
         'Leave "Family"? Your 2 items will be removed from the album, and you will lose access to it.'
       );
@@ -675,16 +675,15 @@ describe("AlbumsPage", () => {
       expect(screen.queryByRole("button", { name: shared.name })).not.toBeInTheDocument();
     });
 
+    // listMedia pages through the whole album (client.test.ts); the count is what it resolves to.
     it.each([
-      ["more than one page", () => Promise.resolve(Array.from({ length: 500 }, (_, i) => makeItem(`m${i}`, "u-me"))), "Your 1000 items will be removed"],
+      ["a thousand items", () => Promise.resolve(Array.from({ length: 1000 }, (_, i) => makeItem(`m${i}`, "u-me"))), "Your 1000 items will be removed"],
       ["no own items", () => Promise.resolve([]), "You will lose access to its items."],
       ["a failed count", () => Promise.reject(new Error("boom")), "Your items will be removed"],
-    ])("words the leave confirm for %s", async (_name, page, text) => {
+    ])("words the leave confirm for %s", async (_name, items, text) => {
       vi.spyOn(console, "error").mockImplementation(() => {});
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-      mockApi.get.mockImplementation((_path: string, params: Record<string, string>) =>
-        params.offset === "1000" ? Promise.resolve([]) : page()
-      );
+      mockApi.listMedia.mockImplementation(items);
       renderPage();
       const dialog = await openMembers(shared);
       await userEvent.click(await within(dialog).findByRole("button", { name: "Leave album" }));
@@ -699,11 +698,11 @@ describe("AlbumsPage", () => {
     it("does not ask to leave once the dialog was closed while counting", async () => {
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
       let resolveCount!: (items: MediaItem[]) => void;
-      mockApi.get.mockReturnValue(new Promise<MediaItem[]>((r) => (resolveCount = r)));
+      mockApi.listMedia.mockReturnValue(new Promise<MediaItem[]>((r) => (resolveCount = r)));
       renderPage();
       const dialog = await openMembers(shared);
       await userEvent.click(await within(dialog).findByRole("button", { name: "Leave album" }));
-      expect(mockApi.get).toHaveBeenCalledWith("/media", { album_id: shared.id, owner: "mine", offset: "0" });
+      expect(mockApi.listMedia).toHaveBeenCalledWith({ album_id: shared.id, owner: "mine" });
 
       await userEvent.keyboard("{Escape}");
       await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
@@ -716,7 +715,7 @@ describe("AlbumsPage", () => {
     it("does not ask to leave once another album's members were opened while counting", async () => {
       const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
       let resolveCount!: (items: MediaItem[]) => void;
-      mockApi.get.mockReturnValue(new Promise<MediaItem[]>((r) => (resolveCount = r)));
+      mockApi.listMedia.mockReturnValue(new Promise<MediaItem[]>((r) => (resolveCount = r)));
       renderPage();
       const dialog = await openMembers(shared);
       await userEvent.click(await within(dialog).findByRole("button", { name: "Leave album" }));

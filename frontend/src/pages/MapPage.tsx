@@ -20,9 +20,6 @@ import { ZoomableImage } from "@/components/viewer/ZoomableImage";
 import { EditViewModal } from "@/components/viewer/EditViewModal";
 import { EvidenceView } from "@/components/evidence/EvidenceView";
 
-// The backend's maximum page: every page re-runs the whole filtered query, so fewer is faster.
-const PAGE_SIZE = 5000;
-
 // A row as the reloaded list has it, so the card cannot contradict the map and the evidence view.
 // The keyframes are not in the list: they load per item.
 function withFreshRow(item: MediaItem, rows: Map<string, MediaItem>): MediaItem {
@@ -254,8 +251,6 @@ export function MapPage({ active = true }: { active?: boolean }) {
   }, [active]);
 
   useEffect(() => {
-    let cancelled = false;
-
     const params = filterParams(filters);
     // Under the same filters the current markers stay until the new list is complete, so a
     // reload never empties the map. New filters clear it and fill it page by page.
@@ -267,42 +262,36 @@ export function MapPage({ active = true }: { active?: boolean }) {
     setLoadingMedia(true);
     setListError(null);
 
+    // Aborted when the filters change or the list is reloaded: the request in flight stops.
+    const list = new AbortController();
     const loaded: MediaItem[] = [];
-    let offset = 0;
+    api
+      .listMedia(
+        { ...params, has_location: "true" },
+        {
+          signal: list.signal,
+          onPage: (page) => {
+            if (list.signal.aborted) return;
+            loaded.push(...page);
+            if (!inBackground) setItems([...loaded]);
+          },
+        }
+      )
+      .then(() => {
+        if (list.signal.aborted) return;
+        if (inBackground) setItems(loaded);
+        const rows = new Map(loaded.map((row) => [row.id, row]));
+        setSelected((prev) => (prev ? withFreshRow(prev, rows) : prev));
+        setClusterPeers((prev) => prev.map((peer) => withFreshRow(peer, rows)));
+        setLoadingMedia(false);
+      })
+      .catch((e) => {
+        if (list.signal.aborted) return;
+        setListError(e.message);
+        setLoadingMedia(false);
+      });
 
-    function fetchPage() {
-      api
-        .get<MediaItem[]>("/media", {
-          ...params,
-          has_location: "true",
-          limit: String(PAGE_SIZE),
-          offset: String(offset),
-        })
-        .then((page) => {
-          if (cancelled) return;
-          loaded.push(...page);
-          if (!inBackground) setItems([...loaded]);
-          if (page.length === PAGE_SIZE) {
-            offset += PAGE_SIZE;
-            fetchPage();
-          } else {
-            if (inBackground) setItems(loaded);
-            const rows = new Map(loaded.map((row) => [row.id, row]));
-            setSelected((prev) => (prev ? withFreshRow(prev, rows) : prev));
-            setClusterPeers((prev) => prev.map((peer) => withFreshRow(peer, rows)));
-            setLoadingMedia(false);
-          }
-        })
-        .catch((e) => {
-          if (cancelled) return;
-          setListError(e.message);
-          setLoadingMedia(false);
-        });
-    }
-
-    fetchPage();
-
-    return () => { cancelled = true; };
+    return () => list.abort();
   }, [filters, mediaReload, revisit]);
 
   useEffect(() => {

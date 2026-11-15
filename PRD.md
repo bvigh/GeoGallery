@@ -76,8 +76,8 @@ Delivered beyond the original plan:
 
 #### Phase 3 — Open-source public release: in progress
 
-- Done: `AGENTS.md`, map marker clustering, paged `/api/media` (`limit` up to 5,000 and `offset`).
-- Open: cursor pagination, README refresh and contribution guidelines, published images, CI, `/api/v1`. Tracked in [docs/roadmap.md](docs/roadmap.md) under "Public release".
+- Done: `AGENTS.md`, map marker clustering, cursor pagination for `/api/media` (`limit` up to 5,000).
+- Open: README refresh and contribution guidelines, published images, CI, `/api/v1`. Tracked in [docs/roadmap.md](docs/roadmap.md) under "Public release".
 
 #### Phase 4 — Hosted multi-user: mostly done
 
