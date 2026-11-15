@@ -84,6 +84,22 @@ func (z CameraZone) Name() string {
 	return "server zone (unset)"
 }
 
+// UTCAllYear reports whether loc is at UTC all year: offset 0 on 1 January and on 1 July of the
+// current year, so neither hemisphere's summer time can hide. A zone at UTC for part of the year
+// only, such as Europe/London, is not. A nil loc is UTC, as a zero CameraZone reads it.
+func UTCAllYear(loc *time.Location) bool {
+	if loc == nil {
+		return true
+	}
+	year := time.Now().Year()
+	for _, month := range []time.Month{time.January, time.July} {
+		if _, offset := time.Date(year, month, 1, 12, 0, 0, 0, loc).Zone(); offset != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // maxTagRunes caps one text value read from a file. The figure is a judgement.
 const maxTagRunes = 200
 

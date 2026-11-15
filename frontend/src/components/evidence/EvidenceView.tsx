@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ChevronLeft, ChevronRight, X } from "lucide-react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { ArrowLeft, ChevronLeft, ChevronRight, ExternalLink, X } from "lucide-react";
 import { api, ApiError } from "@/api/client";
 import { EditLocationModal } from "@/components/EditLocationModal";
 import { EvidenceMap } from "@/components/evidence/EvidenceMap";
@@ -9,8 +9,9 @@ import { TimeCard } from "@/components/evidence/TimeCard";
 import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { ITEM_GONE, leadSentence, NOT_OWNER, REMATCH_FAILED, stateBadge } from "@/lib/evidence";
 import { useCloseOnBack } from "@/lib/history";
+import { galleryRoute, routeUrl } from "@/lib/routes";
 import { cn } from "@/lib/utils";
-import type { MediaItem, ProvenanceResponse } from "@/types";
+import type { MediaItem, ProvenanceResponse, ProvenanceTrip } from "@/types";
 
 export interface EvidenceViewProps {
   mediaId: string;
@@ -22,6 +23,9 @@ export interface EvidenceViewProps {
   position?: string; // "3 / 12", counted among own items
   onLocationSaved: (id: string, lat: number, lng: number) => void;
   onRematched: () => void;
+  // Opens the item in its trip's gallery, among the photos taken around it. Given by a parent that
+  // lists items out of context (the Checks view); without it the view offers no trip.
+  onShowInTrip?: (trip: ProvenanceTrip, itemId: string) => void;
 }
 
 const TITLE = "Why here?";
@@ -30,6 +34,8 @@ const headerButton =
   "flex items-center justify-center text-muted-foreground hover:text-foreground touch:min-h-11 touch:min-w-11";
 const actionButton =
   "rounded border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50 touch:min-h-11";
+const tripLink =
+  "inline-flex items-center justify-center rounded border border-border px-2 py-1 text-sm hover:bg-muted touch:min-h-11 touch:min-w-11";
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -56,6 +62,57 @@ function keepTabInside(e: KeyboardEvent, root: HTMLElement | null) {
   }
 }
 
+// A click the browser handles itself: a new tab or window (Ctrl, Cmd, Shift or a middle click).
+function opensElsewhere(e: MouseEvent): boolean {
+  return e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
+}
+
+// The trip the item is in, and two ways to see the item there: in place, over this view, or in a
+// new tab at the trip's own URL, which leaves this view as it is. "Show in trip" is a link to that
+// URL too, so a Ctrl or Cmd click, or a long press on a phone, opens a tab as well.
+function TripRow({
+  trip,
+  itemId,
+  onShow,
+}: {
+  trip: ProvenanceTrip;
+  itemId: string;
+  onShow: (trip: ProvenanceTrip, itemId: string) => void;
+}) {
+  const href = routeUrl(galleryRoute("trips", trip.id, itemId));
+  return (
+    <section aria-label="Trip" className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+      <span className="text-muted-foreground">Trip</span>
+      <span className="min-w-0 max-w-full truncate font-medium" title={trip.name}>
+        {trip.name}
+      </span>
+      <span className="flex items-center gap-1">
+        <a
+          href={href}
+          onClick={(e) => {
+            if (opensElsewhere(e)) return;
+            e.preventDefault();
+            onShow(trip, itemId);
+          }}
+          className={tripLink}
+        >
+          Show in trip
+        </a>
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Show in trip, in a new tab"
+          title="Open in a new tab"
+          className={tripLink}
+        >
+          <ExternalLink className="h-4 w-4" aria-hidden="true" />
+        </a>
+      </span>
+    </section>
+  );
+}
+
 function isTextField(target: EventTarget | null): boolean {
   const element = target as HTMLElement | null;
   return (
@@ -75,6 +132,7 @@ export function EvidenceView({
   position,
   onLocationSaved,
   onRematched,
+  onShowInTrip,
 }: EvidenceViewProps) {
   // The item behind a track point, opened from a chip. One level: Back always returns to mediaId,
   // because the parent's stepping is relative to it.
@@ -287,6 +345,10 @@ export function EvidenceView({
               {!failure && !response && <p className="text-sm text-muted-foreground">Loading…</p>}
               {!failure && response && (
                 <>
+                  {/* Not while the next item loads: the link would open the one still on screen. */}
+                  {onShowInTrip && response.item.trip && !inert && (
+                    <TripRow trip={response.item.trip} itemId={response.item.id} onShow={onShowInTrip} />
+                  )}
                   <section aria-label="Placement" className="space-y-1">
                     <span className="inline-block rounded-full bg-muted px-2 py-0.5 text-xs font-medium">
                       {stateBadge(response.placement.state)}

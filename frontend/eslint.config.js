@@ -26,8 +26,15 @@ export default defineConfig([
     },
   },
   {
-    // Every time on an evidence surface names its clock, which only src/lib/time.ts guarantees.
-    files: ["src/components/evidence/**/*.{ts,tsx}", "src/lib/evidence.ts"],
+    // Every time on an evidence surface (the evidence view, the checks view, the upload receipts)
+    // names its clock, which only src/lib/time.ts guarantees.
+    files: [
+      "src/components/evidence/**/*.{ts,tsx}",
+      "src/lib/evidence.ts",
+      "src/components/checks/**/*.{ts,tsx}",
+      "src/lib/checks.ts",
+      "src/pages/UploadPage.tsx",
+    ],
     ignores: ["**/*.test.{ts,tsx}"],
     rules: {
       "no-restricted-properties": [

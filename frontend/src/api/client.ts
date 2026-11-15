@@ -1,10 +1,12 @@
 import type {
   AdminUser,
+  AgreementResponse,
   Album,
   AlbumMember,
   ApiToken,
   CameraClockRule,
   CameraClockRuleInput,
+  ChecksResponse,
   CreatedApiToken,
   CurrentUser,
   DirectoryUser,
@@ -14,6 +16,7 @@ import type {
   MediaItem,
   OrientationKeyframe,
   ProvenanceResponse,
+  UploadResponse,
 } from "@/types";
 
 // What to add to or remove from an album: explicit media, or a trip's current media.
@@ -173,12 +176,7 @@ async function logout(): Promise<void> {
 
 // album_id is a query param, not a form field, so the backend checks membership
 // before it reads the (up to 4 GiB) body.
-async function upload(form: FormData, albumId?: string): Promise<{
-  uploaded: string[] | null;
-  skipped?: string[] | null;
-  failed?: string[] | null;
-  album_added?: number;
-}> {
+async function upload(form: FormData, albumId?: string): Promise<UploadResponse> {
   const path = albumId ? `/media/upload?album_id=${encodeURIComponent(albumId)}` : "/media/upload";
   const res = await request(path, { method: "POST", body: form });
   if (!res.ok) throw new ApiError(`POST /media/upload failed: ${res.status}`, res.status);
@@ -335,6 +333,26 @@ async function runMatcher(): Promise<void> {
   if (!res.ok) throw new ApiError(`POST /gps-matcher/run failed: ${res.status}`, res.status);
 }
 
+// The checks run on the server for seconds, so the Checks view cancels a request it no longer
+// needs: when it closes or loads again.
+async function getCancellable<T>(path: string, signal?: AbortSignal, params?: QueryParams): Promise<T> {
+  const res = await request(withQuery(path, params), { signal });
+  if (!res.ok) throw new ApiError(`GET ${path} failed: ${res.status}`, res.status);
+  return res.json();
+}
+
+// The library-wide checks of the caller's tracks and items. A 504 is the server's time limit.
+function checks(signal?: AbortSignal): Promise<ChecksResponse> {
+  return getCancellable<ChecksResponse>("/checks", signal);
+}
+
+// Each log file against the other formats, and its time spacing, from the log file at index `from`
+// on, as far as the server's time budget goes (up to a minute). The index is a number, never a
+// label, so no file name reaches the URL. A 503 means the server is running other comparisons.
+function checksAgreement(from: number, signal?: AbortSignal): Promise<AgreementResponse> {
+  return getCancellable<AgreementResponse>("/checks/agreement", signal, { from: String(from) });
+}
+
 export const api = {
   get,
   post,
@@ -371,6 +389,8 @@ export const api = {
   mediaProvenance,
   mediaProvenanceFile,
   runMatcher,
+  checks,
+  checksAgreement,
   listCameraClockRules,
   createCameraClockRule,
   updateCameraClockRule,

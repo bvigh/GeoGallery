@@ -91,6 +91,58 @@ func TestRouter_ProvenanceIsGzipped(t *testing.T) {
 	})
 }
 
+func TestRouter_ChecksAreGzipped(t *testing.T) {
+	pool := testdb.New(t)
+	var userID string
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		INSERT INTO users (issuer, subject, email) VALUES ('https://idp.test', 'gz', 'gz@example.test')
+		RETURNING id::text`).Scan(&userID))
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO gps_tracks (owner_id, source, recorded_at, location)
+		VALUES ($1, 'gpx:gz.gpx', '2001-02-03T12:00:00Z', ST_SetSRID(ST_MakePoint(20, 10), 4326))`, userID)
+	require.NoError(t, err)
+
+	cfg := &config.Config{PublicOrigin: "http://localhost:5173", SessionTTLHours: 720}
+	h := routeHandlers{checks: handlers.NewChecksHandler(pool, time.Hour)}
+	router := newRouter(http.NewCrossOriginProtection(), auth.New(compressStore{userID: userID}, nil, cfg), h)
+
+	get := func(path, acceptEncoding string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.AddCookie(&http.Cookie{Name: "gg_session", Value: userSession})
+		if acceptEncoding != "" {
+			req.Header.Set("Accept-Encoding", acceptEncoding)
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		return rec
+	}
+
+	for _, path := range []string{"/api/checks", "/api/checks/agreement"} {
+		t.Run(path+" gzip when accepted", func(t *testing.T) {
+			rec := get(path, "gzip")
+			assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
+			zr, err := gzip.NewReader(rec.Body)
+			require.NoError(t, err)
+			body, err := io.ReadAll(zr)
+			require.NoError(t, err)
+			var got struct {
+				Files []struct {
+					Source string `json:"source"`
+				} `json:"files"`
+			}
+			require.NoError(t, json.Unmarshal(body, &got), string(body))
+			require.Len(t, got.Files, 1)
+			assert.Equal(t, "gpx:gz.gpx", got.Files[0].Source)
+		})
+		t.Run(path+" plain otherwise", func(t *testing.T) {
+			rec := get(path, "")
+			assert.Empty(t, rec.Header().Get("Content-Encoding"))
+			assert.Contains(t, rec.Body.String(), "gpx:gz.gpx")
+		})
+	}
+}
+
 func TestRouter_MediaListIsGzipped(t *testing.T) {
 	pool := testdb.New(t)
 	var userID string

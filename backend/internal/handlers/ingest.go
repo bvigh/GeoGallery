@@ -36,9 +36,10 @@ func NewIngestDeps(pool *pgxpool.Pool, s *storage.Client, matchWindow time.Durat
 }
 
 type ScanResult struct {
-	Ingested int
-	Skipped  int
-	Failed   int
+	Ingested   int
+	Skipped    int
+	Failed     int
+	TimeReport TimeReport // how the ingested files' capture times were read
 }
 
 var supportedExts = map[string]bool{
@@ -53,7 +54,7 @@ var supportedExts = map[string]bool{
 // trip detection are skipped, and ctx.Err() is returned.
 func RunIngestScan(ctx context.Context, deps IngestDeps, dir, ownerID string) (ScanResult, error) {
 	slog.Info("ingest: scan started", "dir", dir, "owner_id", ownerID)
-	var res ScanResult
+	res := ScanResult{TimeReport: newTimeReport(deps.registrar.cameraZone)}
 
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -80,15 +81,16 @@ func RunIngestScan(ctx context.Context, deps IngestDeps, dir, ownerID string) (S
 			return nil
 		}
 		mtime := info.ModTime()
-		_, inserted, err := deps.registrar.registerMedia(ctx, ownerID, f, info.Size(), d.Name(), &mtime)
+		registered, err := deps.registrar.registerMedia(ctx, ownerID, f, info.Size(), d.Name(), &mtime)
 		f.Close()
 		if err != nil {
 			slog.Error("ingest: register media failed", "path", path, "err", err)
 			res.Failed++
 			return nil
 		}
-		if inserted {
+		if registered.inserted {
 			res.Ingested++
+			res.TimeReport.add(d.Name(), registered)
 		} else {
 			res.Skipped++
 		}

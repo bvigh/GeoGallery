@@ -20,6 +20,9 @@ vi.mock("../api/client", async (importOriginal) => {
       listAlbums: vi.fn(),
       createAlbum: vi.fn(),
       addToAlbum: vi.fn(),
+      // The real Checks view.
+      checks: vi.fn(),
+      checksAgreement: vi.fn(),
     },
   };
 });
@@ -36,7 +39,7 @@ vi.mock("@/components/MediaGalleryOverlay", () => ({
 }));
 
 const mockApi = api as unknown as Record<
-  "get" | "patch" | "listAlbums" | "createAlbum" | "addToAlbum",
+  "get" | "patch" | "listAlbums" | "createAlbum" | "addToAlbum" | "checks",
   ReturnType<typeof vi.fn>
 >;
 
@@ -470,6 +473,46 @@ describe("TripsPage", () => {
       name: "Iceland 2024",
       start_date: "2024-07-01",
       end_date: "2024-07-14",
+    });
+  });
+
+  describe("checks", () => {
+    const checksView = () => screen.queryByRole("dialog", { name: "Checks" });
+
+    it("runs nothing until the header's button opens the view", async () => {
+      mockApi.checks.mockReturnValue(new Promise(() => {}));
+      renderPage();
+      await screen.findByText("Iceland 2024");
+      expect(mockApi.checks).not.toHaveBeenCalled();
+      expect(checksView()).not.toBeInTheDocument();
+
+      const button = screen.getByRole("button", { name: "Checks" });
+      expect(button).toHaveClass("touch:min-h-11");
+      await userEvent.click(button);
+      expect(checksView()).toBeInTheDocument();
+      expect(mockApi.checks).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId("gallery")).not.toBeInTheDocument();
+
+      await userEvent.click(within(checksView()!).getByRole("button", { name: "Close" }));
+      expect(checksView()).not.toBeInTheDocument();
+      // The closed view's history entry is left again.
+      await settleHistory();
+    });
+
+    it("opens again on a new run each time", async () => {
+      mockApi.checks.mockReturnValue(new Promise(() => {}));
+      renderPage();
+      await screen.findByText("Iceland 2024");
+      await userEvent.click(screen.getByRole("button", { name: "Checks" }));
+      await userEvent.keyboard("{Escape}");
+      expect(checksView()).not.toBeInTheDocument();
+      await settleHistory();
+
+      await userEvent.click(screen.getByRole("button", { name: "Checks" }));
+      expect(mockApi.checks).toHaveBeenCalledTimes(2);
+      expect(mockApi.checks.mock.calls[0][0].aborted).toBe(true);
+      await userEvent.keyboard("{Escape}");
+      await settleHistory();
     });
   });
 

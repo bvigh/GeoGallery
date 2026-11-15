@@ -143,12 +143,41 @@ export interface LibraryCamera {
 }
 
 // POST /api/gps-tracks/upload. skipped: points imported before; empty: files without a
-// timestamped point; failed: files that could not be read.
+// timestamped point; failed: files that could not be read; files: each file that held points.
 export interface GpsUploadResult {
   inserted: number;
   skipped: number;
   empty: string[];
   failed: { file: string; reason: string }[];
+  files?: TrackFileReport[]; // older backends omit it
+}
+
+// One file of a track upload that held at least one point.
+export interface TrackFileReport {
+  file: string; // the uploaded file name
+  format: string; // what the backend read it as: gpx, nmea, ...
+  points: number; // read from the file, whether imported before or not
+  first: string | null; // RFC 3339 UTC; null when JSON cannot carry the year
+  last: string | null;
+}
+
+// POST /api/media/upload. Go sends an empty list as null.
+export interface UploadResponse {
+  uploaded: string[] | null;
+  skipped?: string[] | null; // duplicates; older backends omit it
+  failed?: string[] | null;
+  album_added?: number; // with ?album_id only: new uploads and duplicates the album gained
+  time_report?: TimeReport; // older backends omit it
+}
+
+// How the capture times of one upload request's new files were read, counted by the values their
+// capture_evidence records. Duplicates and failed files are not counted.
+export interface TimeReport {
+  by_source: Record<CaptureSource, number>;
+  by_zone: Record<ZoneRule, number>;
+  camera_zone: string; // the IANA name, or the literal "server zone (unset)"
+  assumed_zone_is_utc: boolean; // a file was read in the camera zone, and that zone is UTC all year
+  file_date_names: string[]; // the files dated by their modified date (src "mtime")
 }
 
 export interface GuessResult {
@@ -330,6 +359,12 @@ export interface Warning {
   level: "warn" | "info";
 }
 
+// The trip an own item is in, so the Checks view can open the item among its neighbours.
+export interface ProvenanceTrip {
+  id: string;
+  name: string;
+}
+
 export interface ProvenanceResponse {
   item: {
     id: string;
@@ -345,6 +380,7 @@ export interface ProvenanceResponse {
     width_px: number | null;
     height_px: number | null;
     duration_sec: number | null;
+    trip: ProvenanceTrip | null; // the owner's trip the item is in
   };
   time: {
     recorded: "ingest" | "backfill" | "retime" | "not_recorded";
@@ -403,4 +439,77 @@ export interface FileReread {
   class: "same" | "whole_offset" | "other" | "no_file_time" | "stored_has_no_time" | "unverifiable_transcoded";
   checks: { id: string; level: "ok" | "warn" | "info"; delta_s: number | null }[];
   tags: { name: string; value: string }[];
+}
+
+// Checks: GET /api/checks and /api/checks/agreement (docs/gps-debugging.md, Step 2). The caller's own
+// tracks and items only. Every instant is RFC 3339 in UTC, or null when JSON cannot carry its year.
+
+export type CheckCode =
+  | "pair_impossible"
+  | "future_track_points"
+  | "taken_after_upload"
+  | "stale_estimates"
+  | "pair_far"
+  | "orphan_points"
+  | "time_may_be_estimated_used";
+
+// One track file: every point with one source label, derived labels (exif, manual) included.
+export interface ChecksFile {
+  source: string; // the full label, e.g. "gpx:ride.gpx", "exif", "manual"
+  format: string; // the raw prefix, the part before the first colon
+  kind: TrackSource["kind"];
+  points: number;
+  first: string | null;
+  last: string | null;
+  items_placed: number; // own estimates whose recomputed before or after point has this label
+}
+
+// How far one log format's points sit from photos with their own position, within 5 s.
+export interface ChecksResidual {
+  format: string; // a log format's raw prefix
+  n: number; // own-position photos with a point of this format within 5 s
+  p50_m: number;
+  p90_m: number;
+}
+
+export interface ChecksGroup {
+  key: string;
+  label: string;
+  count: number;
+  evidence: Record<string, string | number | null>; // keys per code (lib/checks.ts)
+  media_ids: string[]; // at most 200, by taken_at then id; [] for findings about points only
+}
+
+export interface ChecksCheck {
+  code: CheckCode;
+  severity: "high" | "low";
+  total: number; // distinct items, or points for the two point checks, across all groups
+  groups: ChecksGroup[]; // count desc, then key; [] when nothing was found
+}
+
+export interface ChecksResponse {
+  generated_at: string;
+  window_s: number; // GPS_MATCH_WINDOW_HOURS in seconds
+  files: ChecksFile[]; // by source
+  residuals: ChecksResidual[];
+  checks: ChecksCheck[]; // all seven, high severity first
+}
+
+// One log file compared with the other formats at up to 20 moments, and its time spacing.
+export interface AgreementFile {
+  source: string;
+  samples: number;
+  matched: number;
+  median_m: number | null; // null with fewer than 5 matches
+  modal_gap_share: number | null; // share of gaps equal to the file's most common one; null with fewer than 10 gaps
+}
+
+// One request of a comparison: the log files from index `from` on, in label order, as far as the
+// server's time budget went. The view asks again from next_from until it is null.
+export interface AgreementResponse {
+  generated_at: string;
+  files: AgreementFile[]; // the log files this request compared, in label order
+  truncated: boolean; // true exactly when next_from is not null
+  total_files: number; // log files in this request's inventory
+  next_from: number | null; // the index of the first log file not compared; null once the last was
 }

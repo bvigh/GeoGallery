@@ -85,9 +85,9 @@ func TestRegisterMedia_TranscodedVideoKeepsItsExifTime(t *testing.T) {
 	store := &keepingUploadStorage{}
 	reg := &MediaRegistrar{db: &mockRegistrarDB{}, storage: store, cameraZone: zone}
 
-	_, inserted, err := reg.registerMedia(context.Background(), "owner-1", bytes.NewReader(clip), int64(len(clip)), "clip.mp4", nil)
+	res, err := reg.registerMedia(context.Background(), "owner-1", bytes.NewReader(clip), int64(len(clip)), "clip.mp4", nil)
 	require.NoError(t, err)
-	require.True(t, inserted)
+	require.True(t, res.inserted)
 
 	tmp, stored, err := ingest.ProbeVideo(bytes.NewReader(store.body))
 	require.NoError(t, err)

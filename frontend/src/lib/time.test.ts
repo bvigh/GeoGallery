@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { browserTimeZone, formatDuration, formatInstant, formatOffset } from "@/lib/time";
+import { browserTimeZone, formatDuration, formatInstant, formatOffset, formatSpan } from "@/lib/time";
 
 // CI runners are UTC, so every expectation names its zone, and the locale is fixed.
 const british = { locale: "en-GB" };
@@ -101,6 +101,26 @@ describe("formatDuration", () => {
     [-3600, "1 h"],
   ])("ignores the sign of %d", (seconds, want) => {
     expect(formatDuration(seconds)).toBe(want);
+  });
+});
+
+describe("formatSpan", () => {
+  const day = 86400;
+  it.each([
+    ["a short span exactly", 3725, "1 h 2 min"],
+    ["59 days exactly", 59 * day + 7 * 3600, "59 d 7 h"],
+    ["60 days in months", 60 * day, "about 2 months"],
+    ["396 days in months", 396 * day, "about 13 months"],
+    ["just under two years in months", 729 * day, "about 24 months"],
+    ["two years in years", 731 * day, "about 2 years"],
+    ["a GPS week rollover in years", 1024 * 7 * day, "about 20 years"],
+    ["4887 days in years", 4887 * day + 7 * 3600, "about 13 years"],
+  ])("formats %s", (_name, seconds, want) => {
+    expect(formatSpan(seconds)).toBe(want);
+  });
+
+  it("ignores the sign", () => {
+    expect(formatSpan(-396 * day)).toBe("about 13 months");
   });
 });
 

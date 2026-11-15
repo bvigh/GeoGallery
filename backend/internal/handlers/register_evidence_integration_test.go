@@ -68,9 +68,9 @@ func TestRegisterMedia_Integration_StoresEvidence(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			content := exiftest.JPEG(tt.photo)
 			name := strings.ReplaceAll(tt.name, " ", "-") + ".jpg"
-			id, inserted, err := reg.registerMedia(context.Background(), owner, bytes.NewReader(content), int64(len(content)), name, tt.mtime)
+			res, err := reg.registerMedia(context.Background(), owner, bytes.NewReader(content), int64(len(content)), name, tt.mtime)
 			require.NoError(t, err, "a debug field must never fail an upload")
-			require.True(t, inserted)
+			require.True(t, res.inserted)
 
 			var model *string
 			var width, height *int
@@ -78,7 +78,7 @@ func TestRegisterMedia_Integration_StoresEvidence(t *testing.T) {
 			var evidence []byte
 			require.NoError(t, pool.QueryRow(context.Background(), `
 				SELECT camera_model, width_px, height_px, duration_sec, capture_evidence
-				FROM media WHERE id = $1`, id).Scan(&model, &width, &height, &duration, &evidence))
+				FROM media WHERE id = $1`, res.mediaID).Scan(&model, &width, &height, &duration, &evidence))
 			assert.Equal(t, tt.wantModel, model)
 			assert.Equal(t, tt.wantWidth, width)
 			assert.Equal(t, tt.wantHeight, height)
@@ -90,6 +90,7 @@ func TestRegisterMedia_Integration_StoresEvidence(t *testing.T) {
 			for key, want := range tt.wantEvidence {
 				assert.Equal(t, want, got[key], key)
 			}
+			assertReturnsEvidence(t, res, got)
 		})
 	}
 }
@@ -100,16 +101,16 @@ func TestRegisterMedia_Integration_VideoColumns(t *testing.T) {
 	reg := &MediaRegistrar{db: pool, storage: &fakeObjectStore{}}
 	owner := createUser(t, pool, "alice")
 
-	id, inserted, err := reg.registerMedia(context.Background(), owner, bytes.NewReader(content), int64(len(content)), "clip.mp4", nil)
+	res, err := reg.registerMedia(context.Background(), owner, bytes.NewReader(content), int64(len(content)), "clip.mp4", nil)
 	require.NoError(t, err)
-	require.True(t, inserted)
+	require.True(t, res.inserted)
 
 	var width, height int
 	var duration float64
 	var src, encoder string
 	require.NoError(t, pool.QueryRow(context.Background(), `
 		SELECT width_px, height_px, duration_sec, capture_evidence->>'src', capture_evidence->>'encoder'
-		FROM media WHERE id = $1`, id).Scan(&width, &height, &duration, &src, &encoder))
+		FROM media WHERE id = $1`, res.mediaID).Scan(&width, &height, &duration, &src, &encoder))
 	assert.Equal(t, 32, width)
 	assert.Equal(t, 16, height)
 	assert.InDelta(t, 1.0, duration, 0.2)

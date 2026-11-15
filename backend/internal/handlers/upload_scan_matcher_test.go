@@ -153,6 +153,17 @@ func uploadFiles(filenames ...string) *http.Request {
 	return withTestUser(r)
 }
 
+// The time_report of a test upload through a registrar with a zero camera zone, of files that hold no
+// time and are sent without a file_mtime: when none is stored as a new row, and when one is.
+const (
+	timeReportNothingNew = `{"by_source":{"exif_original":0,"exif_ifd0":0,"container":0,"mtime":0,"none":0},` +
+		`"by_zone":{"gps":0,"clock_rule":0,"offset":0,"camera":0},` +
+		`"camera_zone":"server zone (unset)","assumed_zone_is_utc":false,"file_date_names":[]}`
+	timeReportOneUndated = `{"by_source":{"exif_original":0,"exif_ifd0":0,"container":0,"mtime":0,"none":1},` +
+		`"by_zone":{"gps":0,"clock_rule":0,"offset":0,"camera":0},` +
+		`"camera_zone":"server zone (unset)","assumed_zone_is_utc":false,"file_date_names":[]}`
+)
+
 func noopMatcher(context.Context, matcherDB, string, time.Duration, bool) error { return nil }
 func noopTripDetect(context.Context, tripDetectDB, string, int) error           { return nil }
 
@@ -298,7 +309,7 @@ func TestUpload_SkipsTripDetectWhenNothingUploaded(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.False(t, tripDetectCalled)
-	assert.JSONEq(t, `{"uploaded":null,"skipped":["photo.jpg"],"failed":null}`, w.Body.String())
+	assert.JSONEq(t, `{"uploaded":null,"skipped":["photo.jpg"],"failed":null,"time_report":`+timeReportNothingNew+`}`, w.Body.String())
 }
 
 func TestUpload_TripDetectError_Returns500(t *testing.T) {
@@ -426,7 +437,8 @@ func TestUpload_WithoutAlbumIDLeavesResponseUnchanged(t *testing.T) {
 	h.Upload(w, uploadFiles("photo.jpg"))
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.JSONEq(t, `{"uploaded":["photo.jpg"],"skipped":null,"failed":null}`, w.Body.String(), "no album_added")
+	assert.JSONEq(t, `{"uploaded":["photo.jpg"],"skipped":null,"failed":null,"time_report":`+timeReportOneUndated+`}`, w.Body.String(),
+		"no album_added")
 	assert.Empty(t, db.lookups)
 	assert.Empty(t, db.inserts)
 }
@@ -447,42 +459,42 @@ func TestRegisterMedia_ReturnsMediaID(t *testing.T) {
 	known := map[string]bool{hash: true}
 	raced := map[string]bool{"photo.jpg": true}
 	const lookup, insert = "lookup", "insert"
+	existing := registerResult{mediaID: "existing-" + hash} // a duplicate, dated when it was first stored
 	tests := []struct {
 		name         string
 		db           *mockRegistrarDB
 		deleteErr    error
-		wantID       string
-		wantInserted bool
+		want         registerResult
 		wantErr      error
 		wantSQL      []string
 		wantUploaded bool
 		wantDeleted  bool // the uploaded object is deleted again
 	}{
-		{"new file returns the inserted ID", &mockRegistrarDB{}, nil,
-			"new-photo.jpg", true, nil, []string{lookup, insert}, true, false},
+		{"new file returns the inserted ID and how it was dated", &mockRegistrarDB{}, nil,
+			registerResult{mediaID: "new-photo.jpg", inserted: true, src: captureSrcNone}, nil, []string{lookup, insert}, true, false},
 		{"duplicate returns the existing ID without uploading", &mockRegistrarDB{known: known}, nil,
-			"existing-" + hash, false, nil, []string{lookup}, false, false},
+			existing, nil, []string{lookup}, false, false},
 		{"duplicate lookup fails before uploading", &mockRegistrarDB{lookupErrs: []error{dbDown}}, nil,
-			"", false, dbDown, []string{lookup}, false, false},
+			registerResult{}, dbDown, []string{lookup}, false, false},
 		{"concurrent duplicate returns the winner's ID", &mockRegistrarDB{raced: raced}, nil,
-			"existing-" + hash, false, nil, []string{lookup, insert, lookup}, true, true},
+			existing, nil, []string{lookup, insert, lookup}, true, true},
 		{"concurrent duplicate still counts when deleting its object fails", &mockRegistrarDB{raced: raced}, errors.New("s3 down"),
-			"existing-" + hash, false, nil, []string{lookup, insert, lookup}, true, true},
+			existing, nil, []string{lookup, insert, lookup}, true, true},
 		{"insert rejected by the server", &mockRegistrarDB{insertErr: rejected}, nil,
-			"", false, rejected, []string{lookup, insert}, true, true},
+			registerResult{}, rejected, []string{lookup, insert}, true, true},
 		{"insert never sent", &mockRegistrarDB{insertErr: notSentError{}}, nil,
-			"", false, notSentError{}, []string{lookup, insert}, true, true},
+			registerResult{}, notSentError{}, []string{lookup, insert}, true, true},
 		{"insert outcome unknown keeps the object", &mockRegistrarDB{insertErr: dbDown}, nil,
-			"", false, dbDown, []string{lookup, insert}, true, false},
+			registerResult{}, dbDown, []string{lookup, insert}, true, false},
 		{"lookup after a concurrent duplicate fails", &mockRegistrarDB{raced: raced, lookupErrs: []error{nil, pgx.ErrNoRows}}, nil,
-			"", false, pgx.ErrNoRows, []string{lookup, insert, lookup}, true, true},
+			registerResult{}, pgx.ErrNoRows, []string{lookup, insert, lookup}, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &mockUploadStorage{deleteErr: tt.deleteErr}
 			reg := &MediaRegistrar{db: tt.db, storage: store}
 
-			id, inserted, err := reg.registerMedia(context.Background(), testOwnerID,
+			got, err := reg.registerMedia(context.Background(), testOwnerID,
 				strings.NewReader(content), int64(len(content)), "photo.jpg", nil)
 
 			if tt.wantErr != nil {
@@ -490,8 +502,7 @@ func TestRegisterMedia_ReturnsMediaID(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			assert.Equal(t, tt.wantID, id)
-			assert.Equal(t, tt.wantInserted, inserted)
+			assert.Equal(t, tt.want, got)
 			if tt.wantUploaded {
 				require.Len(t, store.keys, 1)
 			} else {
@@ -643,7 +654,8 @@ func TestUpload_AlbumIDAddsUploadedAndDuplicates(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	assert.Positive(t, body.reads)
-	assert.JSONEq(t, `{"uploaded":["a.jpg"],"skipped":["dup.jpg"],"failed":["broken.jpg"],"album_added":2}`, w.Body.String())
+	assert.JSONEq(t, `{"uploaded":["a.jpg"],"skipped":["dup.jpg"],"failed":["broken.jpg"],"album_added":2,"time_report":`+
+		timeReportOneUndated+`}`, w.Body.String())
 	require.Len(t, db.lookups, 1)
 	assert.Equal(t, []any{testAlbumID, testOwnerID}, db.lookups[0], "the album ID is canonicalised")
 	require.Len(t, db.inserts, 1, "one insert for the whole request")
@@ -667,9 +679,9 @@ func TestUpload_AlbumIDOutcomes(t *testing.T) {
 		wantInserts int
 	}{
 		{"every file fails", &failOnceStorage{failAt: 0}, nil, nil, nil, http.StatusOK,
-			`{"uploaded":null,"skipped":null,"failed":["a.jpg"],"album_added":0}`, 0},
+			`{"uploaded":null,"skipped":null,"failed":["a.jpg"],"album_added":0,"time_report":` + timeReportNothingNew + `}`, 0},
 		{"only duplicates", &mockUploadStorage{}, knownUploads("a.jpg"), nil, nil, http.StatusOK,
-			`{"uploaded":null,"skipped":["a.jpg"],"failed":null,"album_added":1}`, 1},
+			`{"uploaded":null,"skipped":["a.jpg"],"failed":null,"album_added":1,"time_report":` + timeReportNothingNew + `}`, 1},
 		{"album insert fails", &mockUploadStorage{}, nil, errors.New("db down"), nil, http.StatusInternalServerError, "", 1},
 		{"matcher fails before the album insert", &mockUploadStorage{}, nil, nil, errors.New("matcher down"),
 			http.StatusInternalServerError, "", 0},
@@ -706,6 +718,12 @@ func writeFile(t *testing.T, dir, name, content string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
 }
 
+// scanCounts is res without its time report, for a test about the counts alone.
+func scanCounts(res ScanResult) ScanResult {
+	res.TimeReport = TimeReport{}
+	return res
+}
+
 func TestRunIngestScan_CallsMatcherWithReprocess(t *testing.T) {
 	var capturedReprocess bool
 	var capturedOwner string
@@ -726,7 +744,7 @@ func TestRunIngestScan_CallsMatcherWithReprocess(t *testing.T) {
 	res, err := RunIngestScan(context.Background(), deps, t.TempDir(), testOwnerID)
 
 	require.NoError(t, err)
-	assert.Equal(t, ScanResult{}, res)
+	assert.Equal(t, ScanResult{TimeReport: newTimeReport(ingest.CameraZone{})}, res, "an empty folder still has its report")
 	assert.True(t, matcherCalled)
 	assert.True(t, capturedReprocess)
 	assert.Equal(t, testOwnerID, capturedOwner)
@@ -798,7 +816,7 @@ func TestRunIngestScan_CountsIngestedSkippedFailed(t *testing.T) {
 			res, err := RunIngestScan(context.Background(), deps, dir, testOwnerID)
 
 			require.NoError(t, err)
-			assert.Equal(t, tt.want, res)
+			assert.Equal(t, tt.want, scanCounts(res))
 			for _, args := range db.args {
 				assert.Equal(t, testOwnerID, args[0])
 			}
@@ -829,7 +847,7 @@ func TestRunIngestScan_PreCancelledContext(t *testing.T) {
 	res, err := RunIngestScan(ctx, deps, dir, testOwnerID)
 
 	assert.ErrorIs(t, err, context.Canceled)
-	assert.Equal(t, ScanResult{}, res)
+	assert.Equal(t, ScanResult{}, scanCounts(res))
 	assert.Empty(t, store.keys, "no file may be uploaded")
 	assert.False(t, matcherCalled)
 	assert.False(t, tripDetectCalled)
@@ -878,7 +896,7 @@ func TestRegisterMedia_WaitsForAnExifSlot(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := reg.registerMedia(context.Background(), testOwnerID, bytes.NewReader(photo), int64(len(photo)), "a.jpg", nil)
+		_, err := reg.registerMedia(context.Background(), testOwnerID, bytes.NewReader(photo), int64(len(photo)), "a.jpg", nil)
 		done <- err
 	}()
 
@@ -909,7 +927,7 @@ func TestRegisterMedia_StopsWaitingForAnExifSlotWhenCancelled(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := reg.registerMedia(ctx, testOwnerID, bytes.NewReader(photo), int64(len(photo)), "a.jpg", nil)
+		_, err := reg.registerMedia(ctx, testOwnerID, bytes.NewReader(photo), int64(len(photo)), "a.jpg", nil)
 		done <- err
 	}()
 

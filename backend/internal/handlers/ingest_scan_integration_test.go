@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bvigh/geogallery/internal/ingest"
+	"github.com/bvigh/geogallery/internal/ingest/exiftest"
 	"github.com/bvigh/geogallery/internal/testdb"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -54,7 +56,7 @@ func TestRunIngestScan_Integration_OwnershipAndDedup(t *testing.T) {
 
 	res, err := RunIngestScan(ctx, deps, dir, userA)
 	require.NoError(t, err)
-	assert.Equal(t, ScanResult{Ingested: 2}, res)
+	assert.Equal(t, ScanResult{Ingested: 2}, scanCounts(res))
 	assert.Equal(t, 2, countMedia(t, pool, userA), "both rows are owned by A")
 	assert.Equal(t, 0, countMedia(t, pool, userB))
 	assert.Equal(t, []string{userA}, matcherOwners)
@@ -65,7 +67,7 @@ func TestRunIngestScan_Integration_OwnershipAndDedup(t *testing.T) {
 
 	res, err = RunIngestScan(ctx, deps, dir, userA)
 	require.NoError(t, err)
-	assert.Equal(t, ScanResult{Skipped: 2}, res, "a second run for A deduplicates")
+	assert.Equal(t, ScanResult{Skipped: 2}, scanCounts(res), "a second run for A deduplicates")
 	assert.Equal(t, 2, countMedia(t, pool, userA))
 	assert.Len(t, store.keys, 2, "the second run uploads nothing")
 	assert.Empty(t, store.deleted)
@@ -73,7 +75,7 @@ func TestRunIngestScan_Integration_OwnershipAndDedup(t *testing.T) {
 
 	res, err = RunIngestScan(ctx, deps, dir, userB)
 	require.NoError(t, err)
-	assert.Equal(t, ScanResult{Ingested: 2}, res, "dedup is per owner, so B ingests the same files again")
+	assert.Equal(t, ScanResult{Ingested: 2}, scanCounts(res), "dedup is per owner, so B ingests the same files again")
 	assert.Equal(t, 2, countMedia(t, pool, userB))
 	assert.Equal(t, []string{userA, userA, userB}, matcherOwners)
 	assert.Equal(t, []string{userA, userA, userB}, tripOwners)
@@ -90,6 +92,61 @@ func TestRunIngestScan_Integration_OwnershipAndDedup(t *testing.T) {
 	assert.Equal(t, 1, tripsB)
 }
 
+// The scan's receipt is the capture_evidence of the rows it stored, counted. The database decides
+// which files are new, so a second scan of the folder counts only the file added since.
+func TestRunIngestScan_Integration_TimeReportCountsTheStoredEvidence(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	owner := createUser(t, pool, "alice")
+	insertClockRule(t, pool, owner, "Panasonic", "DC-TZ200", 120, ptr("2018-07-01"), nil)
+	dir := t.TempDir()
+	for name, content := range map[string][]byte{
+		"camera.jpg": photoInCameraZone, "ifd0.jpg": photoIFD0, "gps.jpg": photoGPSClock, "rule.jpg": exiftest.JPEG(tz200Winter),
+		"offset.jpg": photoOffsetTag, "too-far.jpg": photoTooFar, "copied.jpg": []byte("no exif: copied"),
+	} {
+		writeFile(t, dir, name, string(content))
+	}
+	var matcherOwners, tripOwners []string
+	deps := recordingIngestDeps(pool, &fakeObjectStore{}, &matcherOwners, &tripOwners)
+	deps.registrar.cameraZone = ingest.CameraZone{Loc: mustLoadLocation(t, "Europe/Warsaw"), Set: true, Rules: panasonicOffsetRule}
+	// stored counts the owner's rows by one key of their capture_evidence, null as "".
+	stored := func(key string) map[string]int {
+		t.Helper()
+		rows, err := pool.Query(ctx, `
+			SELECT COALESCE(capture_evidence->>($2::text), ''), count(*)::int
+			FROM media WHERE owner_id = $1 GROUP BY 1`, owner, key)
+		require.NoError(t, err)
+		defer rows.Close()
+		counts := map[string]int{}
+		for rows.Next() {
+			var value string
+			var n int
+			require.NoError(t, rows.Scan(&value, &n))
+			counts[value] = n
+		}
+		require.NoError(t, rows.Err())
+		return counts
+	}
+
+	res, err := RunIngestScan(ctx, deps, dir, owner)
+
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"exif_original": 4, "exif_ifd0": 1, "mtime": 1, "none": 1}, stored("src"))
+	assert.Equal(t, map[string]int{"gps": 1, "clock_rule": 1, "offset": 1, "camera": 2, "": 2}, stored("zone"))
+	assert.Equal(t, TimeSourceCounts{ExifOriginal: 4, ExifIFD0: 1, Mtime: 1, None: 1}, res.TimeReport.BySource)
+	assert.Equal(t, TimeZoneCounts{GPS: 1, ClockRule: 1, Offset: 1, Camera: 2}, res.TimeReport.ByZone)
+	assert.Equal(t, []string{"copied.jpg"}, res.TimeReport.FileDateNames)
+
+	writeFile(t, dir, "later.jpg", "no exif: later")
+	res, err = RunIngestScan(ctx, deps, dir, owner)
+
+	require.NoError(t, err)
+	assert.Equal(t, ScanResult{Ingested: 1, Skipped: 7}, scanCounts(res))
+	assert.Equal(t, TimeSourceCounts{Mtime: 1}, res.TimeReport.BySource, "the files stored before are not counted again")
+	assert.Equal(t, TimeZoneCounts{}, res.TimeReport.ByZone)
+	assert.Equal(t, []string{"later.jpg"}, res.TimeReport.FileDateNames)
+}
+
 func TestRunIngestScan_Integration_ZeroByteVideoCountsAsFailed(t *testing.T) {
 	pool := testdb.New(t)
 	userA := createUser(t, pool, "alice")
@@ -104,7 +161,7 @@ func TestRunIngestScan_Integration_ZeroByteVideoCountsAsFailed(t *testing.T) {
 	res, err := RunIngestScan(context.Background(), deps, dir, userA)
 
 	require.NoError(t, err, "per-file failures do not abort the scan")
-	assert.Equal(t, ScanResult{Ingested: 1, Failed: 1}, res)
+	assert.Equal(t, ScanResult{Ingested: 1, Failed: 1}, scanCounts(res))
 	assert.Equal(t, 1, countMedia(t, pool, userA))
 	assert.Equal(t, []string{userA}, matcherOwners, "matcher still runs after a per-file failure")
 }

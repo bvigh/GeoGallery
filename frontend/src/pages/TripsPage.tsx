@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { ListChecks, X } from "lucide-react";
 import type { Album, Trip } from "../types";
 import { api, ApiError } from "../api/client";
 import { MediaGalleryOverlay } from "@/components/MediaGalleryOverlay";
 import { AlbumPickerDialog } from "@/components/albums/AlbumPickerDialog";
 import { useCurrentUser } from "@/components/auth/AuthContext";
+import { ChecksView } from "@/components/checks/ChecksView";
 import { useHistoryChange } from "@/lib/history";
 import { LAST_VIEWED_CLASS, useLastViewed, useRevealLastViewed } from "@/lib/lastViewed";
 import { currentRoute } from "@/lib/routes";
@@ -75,6 +76,8 @@ export function TripsPage() {
   const [editStartDate, setEditStartDate] = useState("");
   const [editEndDate, setEditEndDate] = useState("");
   const [pickerTrip, setPickerTrip] = useState<Trip | null>(null);
+  // Mounted only once asked for: the checks take seconds on the server, so no visit runs them.
+  const [checksOpen, setChecksOpen] = useState(false);
   const [notices, setNotices] = useState<Notice[]>([]);
   const nextNoticeId = useRef(0);
   const [lastViewed, rememberViewed] = useLastViewed(me.id, "trips");
@@ -177,7 +180,18 @@ export function TripsPage() {
 
   return (
     <div className="h-full overflow-y-auto p-4 sm:p-6">
-      <h1 className="mb-4 text-xl font-semibold">Trips</h1>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-xl font-semibold">Trips</h1>
+        <button
+          type="button"
+          onClick={() => setChecksOpen(true)}
+          title="Find suspect track files, formats and items"
+          className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-muted touch:min-h-11"
+        >
+          <ListChecks className="h-4 w-4" aria-hidden="true" />
+          Checks
+        </button>
+      </div>
       {trips.length === 0 && (
         <p className="text-muted-foreground">No trips yet. Upload some media to get started.</p>
       )}
@@ -335,6 +349,7 @@ export function TripsPage() {
           }}
         />
       )}
+      {checksOpen && <ChecksView onClose={() => setChecksOpen(false)} />}
     </div>
   );
 }

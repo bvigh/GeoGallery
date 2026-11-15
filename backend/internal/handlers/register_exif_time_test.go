@@ -39,16 +39,17 @@ func mustLoadLocation(t *testing.T, name string) *time.Location {
 }
 
 // registerFile runs content through registerMedia against a mock database and returns the arguments
-// of the media INSERT.
+// of the media INSERT. What registerMedia returns about the time is checked against the evidence.
 func registerFile(t *testing.T, zone ingest.CameraZone, content []byte, filename string, mtime *time.Time) []any {
 	t.Helper()
 	db := &mockRegistrarDB{}
 	reg := &MediaRegistrar{db: db, storage: &mockUploadStorage{}, cameraZone: zone}
-	_, inserted, err := reg.registerMedia(context.Background(), "owner-1", bytes.NewReader(content), int64(len(content)), filename, mtime)
+	res, err := reg.registerMedia(context.Background(), "owner-1", bytes.NewReader(content), int64(len(content)), filename, mtime)
 	require.NoError(t, err)
-	require.True(t, inserted)
+	require.True(t, res.inserted)
 	for i, sql := range db.sqls {
 		if strings.Contains(sql, "INSERT INTO media") {
+			assertReturnsEvidence(t, res, decodeEvidence(t, db.args[i]))
 			return db.args[i]
 		}
 	}
@@ -63,6 +64,18 @@ func decodeEvidence(t *testing.T, insert []any) map[string]any {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(raw, &got))
 	return got
+}
+
+// assertReturnsEvidence checks that registerMedia returned the src and zone the new row's
+// capture_evidence records, a null zone as "".
+func assertReturnsEvidence(t *testing.T, res registerResult, evidence map[string]any) {
+	t.Helper()
+	assert.Equal(t, evidence["src"], res.src, "src")
+	zone := ""
+	if evidence["zone"] != nil {
+		zone = evidence["zone"].(string)
+	}
+	assert.Equal(t, zone, res.zone, "zone")
 }
 
 // evidenceWith returns the object for a file with no EXIF and no video data, plus overrides. The
@@ -112,9 +125,9 @@ func TestRegisterMedia_ExifTimeZone(t *testing.T) {
 			db := &mockRegistrarDB{}
 			reg := &MediaRegistrar{db: db, storage: &mockUploadStorage{}, cameraZone: tt.zone}
 			photo := exiftest.JPEG(tt.photo)
-			_, inserted, err := reg.registerMedia(context.Background(), "owner-1", bytes.NewReader(photo), int64(len(photo)), "P1011841.JPG", &mtime)
+			res, err := reg.registerMedia(context.Background(), "owner-1", bytes.NewReader(photo), int64(len(photo)), "P1011841.JPG", &mtime)
 			require.NoError(t, err)
-			require.True(t, inserted)
+			require.True(t, res.inserted)
 
 			want, err := time.Parse(time.RFC3339, tt.want)
 			require.NoError(t, err)
@@ -403,9 +416,9 @@ func TestRegisterMedia_TranscodedObjectKeepsTheTimeIngestRead(t *testing.T) {
 	store := &keepingUploadStorage{}
 	reg := &MediaRegistrar{db: &mockRegistrarDB{}, storage: store, cameraZone: ingest.CameraZone{Loc: time.UTC, Set: true}}
 
-	_, inserted, err := reg.registerMedia(context.Background(), "owner-1", bytes.NewReader(content), int64(len(content)), "clip.mp4", &mtime)
+	res, err := reg.registerMedia(context.Background(), "owner-1", bytes.NewReader(content), int64(len(content)), "clip.mp4", &mtime)
 	require.NoError(t, err)
-	require.True(t, inserted)
+	require.True(t, res.inserted)
 
 	tmp, stored, err := ingest.ProbeVideo(bytes.NewReader(store.body))
 	require.NoError(t, err)

@@ -55,11 +55,11 @@ func newClockRuleFixture(t *testing.T) *clockRuleFixture {
 // ingest stores content for owner through registerMedia, and keeps the object so it can be re-read.
 func (f *clockRuleFixture) ingest(t *testing.T, owner, filename string, content []byte) string {
 	t.Helper()
-	id, inserted, err := f.reg.registerMedia(context.Background(), owner, bytes.NewReader(content), int64(len(content)), filename, nil)
+	res, err := f.reg.registerMedia(context.Background(), owner, bytes.NewReader(content), int64(len(content)), filename, nil)
 	require.NoError(t, err)
-	require.True(t, inserted)
-	f.keep(t, id, content)
-	return id
+	require.True(t, res.inserted)
+	f.keep(t, res.mediaID, content)
+	return res.mediaID
 }
 
 func (f *clockRuleFixture) keep(t *testing.T, id string, content []byte) {
@@ -174,7 +174,7 @@ func TestClockRules_Integration_Ingest(t *testing.T) {
 		res, err := RunIngestScan(context.Background(), deps, dir, alice)
 
 		require.NoError(t, err)
-		assert.Equal(t, ScanResult{Ingested: 1}, res)
+		assert.Equal(t, ScanResult{Ingested: 1}, scanCounts(res))
 		takenAt, evidence := f.stored(t, mediaIDByName(t, f.pool, alice, "P1050001.JPG"))
 		assert.Equal(t, "2020-12-24T16:00:00Z", takenAt)
 		assert.Equal(t, "clock_rule", evidence["zone"])
@@ -283,10 +283,10 @@ func TestClockRules_Integration_LoadFailure(t *testing.T) {
 	uploadedBefore := len(f.store.keys)
 
 	photo := exiftest.JPEG(tz200Winter)
-	_, inserted, err := f.reg.registerMedia(context.Background(), alice, bytes.NewReader(photo), int64(len(photo)), "P1033627.JPG", nil)
+	res, err := f.reg.registerMedia(context.Background(), alice, bytes.NewReader(photo), int64(len(photo)), "P1033627.JPG", nil)
 
 	require.ErrorContains(t, err, "load clock rules")
-	assert.False(t, inserted)
+	assert.False(t, res.inserted)
 	var count int
 	require.NoError(t, f.pool.QueryRow(context.Background(), `SELECT count(*) FROM media WHERE owner_id = $1`, alice).Scan(&count))
 	assert.Equal(t, 1, count, "no row for the file")

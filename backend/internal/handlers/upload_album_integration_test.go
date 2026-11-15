@@ -135,10 +135,10 @@ func TestUploadToAlbum_AddsNewFilesAndDuplicates(t *testing.T) {
 	f := newSharingFixture(t)
 	familyQuery := url.Values{"album_id": {f.family}}
 
-	// Without album_id an upload is unchanged: no album_added, and no album gains anything.
+	// Without album_id an upload answers no album_added, and no album gains anything.
 	rec, _ := uploadParts(t, f.router, f.userB, nil, uploadPart{"old.jpg", "bytes B uploaded earlier"})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, []string{"failed", "skipped", "uploaded"}, jsonKeys(t, rec.Body.Bytes()))
+	assert.Equal(t, []string{"failed", "skipped", "time_report", "uploaded"}, jsonKeys(t, rec.Body.Bytes()))
 	assert.Equal(t, sorted(f.mediaA, f.mediaAUnlocated), albumContents(t, f.pool, f.family))
 	oldID := mediaIDByName(t, f.pool, f.userB, "old.jpg")
 
@@ -185,7 +185,8 @@ func TestUploadToAlbum_AddsNewFilesAndDuplicates(t *testing.T) {
 
 	// A file that fails leaves album_added at 0.
 	rec, _ = uploadParts(t, f.router, f.userB, familyQuery, uploadPart{"empty.mp4", ""})
-	assert.JSONEq(t, `{"uploaded":null,"skipped":null,"failed":["empty.mp4"],"album_added":0}`, rec.Body.String())
+	assert.JSONEq(t, `{"uploaded":null,"skipped":null,"failed":["empty.mp4"],"album_added":0,"time_report":`+timeReportNothingNew+`}`,
+		rec.Body.String())
 
 	// No cross-user dedup: the album owner uploading B's bytes gets her own row, and the album
 	// holds both copies.
@@ -210,10 +211,10 @@ func TestRegisterMedia_Integration_ReturnsExistingIDForDuplicates(t *testing.T) 
 
 	register := func(ownerID, filename string) (string, bool) {
 		t.Helper()
-		id, inserted, err := reg.registerMedia(context.Background(), ownerID,
+		res, err := reg.registerMedia(context.Background(), ownerID,
 			strings.NewReader(content), int64(len(content)), filename, nil)
 		require.NoError(t, err)
-		return id, inserted
+		return res.mediaID, res.inserted
 	}
 
 	first, inserted := register(userA, "one.jpg")

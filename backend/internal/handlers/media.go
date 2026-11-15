@@ -283,6 +283,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	var uploaded, skipped, failed []string
 	var mediaIDs []string // uploaded and duplicate files alike, for the album
+	timeReport := newTimeReport(h.registrar.cameraZone)
 	for i, fh := range files {
 		fileStart := time.Now()
 		f, err := fh.Open()
@@ -300,16 +301,17 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		mediaID, inserted, err := h.registrar.registerMedia(r.Context(), ownerID, f, fh.Size, fh.Filename, fallbackMtime)
+		registered, err := h.registrar.registerMedia(r.Context(), ownerID, f, fh.Size, fh.Filename, fallbackMtime)
 		f.Close()
 		if err != nil {
 			slog.Error("upload: register media failed", "file", fh.Filename, "size", fh.Size, "err", err)
 			failed = append(failed, fh.Filename)
 			continue
 		}
-		mediaIDs = append(mediaIDs, mediaID)
-		if inserted {
+		mediaIDs = append(mediaIDs, registered.mediaID)
+		if registered.inserted {
 			uploaded = append(uploaded, fh.Filename)
+			timeReport.add(fh.Filename, registered)
 			slog.Info("upload: file stored", "file", fh.Filename, "size", fh.Size, "elapsed", time.Since(fileStart))
 		} else {
 			skipped = append(skipped, fh.Filename)
@@ -347,7 +349,7 @@ func (h *MediaHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("upload: done", "owner", ownerID, "uploaded", len(uploaded), "duplicates", len(skipped),
 		"failed", len(failed), "album_id", albumID, "album_added", albumAdded, "elapsed", time.Since(start))
-	resp := map[string]any{"uploaded": uploaded, "skipped": skipped, "failed": failed}
+	resp := map[string]any{"uploaded": uploaded, "skipped": skipped, "failed": failed, "time_report": timeReport}
 	if albumID != "" {
 		resp["album_added"] = albumAdded
 	}

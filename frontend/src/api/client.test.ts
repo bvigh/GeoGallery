@@ -446,6 +446,73 @@ describe("api client", () => {
     });
   });
 
+  describe("checks", () => {
+    it.each([
+      { name: "checks()", call: (signal?: AbortSignal) => api.checks(signal), url: "/api/checks" },
+      {
+        name: "checksAgreement() from the first file",
+        call: (signal?: AbortSignal) => api.checksAgreement(0, signal),
+        url: "/api/checks/agreement?from=0",
+      },
+      {
+        name: "checksAgreement() from where the last request stopped",
+        call: (signal?: AbortSignal) => api.checksAgreement(1500, signal),
+        url: "/api/checks/agreement?from=1500",
+      },
+    ])("$name fetches with the signal that cancels it", async ({ call, url }) => {
+      const body = { generated_at: "2000-01-01T00:00:00Z" };
+      const signal = new AbortController().signal;
+      fetchMock.mockResolvedValue(response(200, body));
+      await expect(call(signal)).resolves.toEqual(body);
+      expect(fetchMock).toHaveBeenCalledWith(url, { signal });
+    });
+
+    it("checks() works without a signal", async () => {
+      fetchMock.mockResolvedValue(response(200, {}));
+      await api.checks();
+      expect(fetchMock).toHaveBeenCalledWith("/api/checks", { signal: undefined });
+    });
+
+    it.each([
+      { name: "checks() on the server's time limit", call: () => api.checks(), status: 504, message: "GET /checks failed: 504" },
+      { name: "checks() for a token", call: () => api.checks(), status: 403, message: "GET /checks failed: 403" },
+      {
+        name: "checksAgreement() when the database fails",
+        call: () => api.checksAgreement(0),
+        status: 500,
+        message: "GET /checks/agreement failed: 500",
+      },
+      {
+        name: "checksAgreement() while the server runs other comparisons",
+        call: () => api.checksAgreement(300),
+        status: 503,
+        message: "GET /checks/agreement failed: 503",
+      },
+      { name: "checksAgreement() on a bad index", call: () => api.checksAgreement(-1), status: 400, message: "GET /checks/agreement failed: 400" },
+    ])("$name rejects with the status", async ({ call, status, message }) => {
+      fetchMock.mockResolvedValue(response(status));
+      const error = await call().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status, message });
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { name: "checks()", call: () => api.checks() },
+      { name: "checksAgreement()", call: () => api.checksAgreement(0) },
+    ])("$name redirects to login on 401", async ({ call }) => {
+      fetchMock.mockResolvedValue(response(401));
+      await expect(call()).rejects.toBeInstanceOf(ApiError);
+      expect(assign).toHaveBeenCalledWith("/api/auth/login?return_to=" + encodeURIComponent("/trips?x=1"));
+    });
+
+    it("lets an abort reach the caller", async () => {
+      const aborted = new DOMException("Aborted", "AbortError");
+      fetchMock.mockRejectedValue(aborted);
+      await expect(api.checksAgreement(0, new AbortController().signal)).rejects.toBe(aborted);
+    });
+  });
+
   describe("camera clock rules", () => {
     const input = {
       make: "Panasonic",

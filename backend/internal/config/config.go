@@ -129,16 +129,7 @@ func Load() (*Config, error) {
 // is UTC all year, as in a container without TZ: photo times would then be read as UTC, which is
 // rarely what a camera clock shows.
 func (c *Config) CameraTimezoneFallsBackToUTC() bool {
-	if c.CameraTimezoneSet {
-		return false
-	}
-	year := time.Now().Year()
-	for _, month := range []time.Month{time.January, time.July} {
-		if _, offset := time.Date(year, month, 1, 12, 0, 0, 0, c.CameraTimezone).Zone(); offset != 0 {
-			return false
-		}
-	}
-	return true
+	return !c.CameraTimezoneSet && ingest.UTCAllYear(c.CameraTimezone)
 }
 
 // normalisePublicURL trims one trailing slash and rejects anything beyond scheme://host[:port]:

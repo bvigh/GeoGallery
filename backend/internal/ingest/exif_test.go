@@ -513,6 +513,28 @@ func TestCameraZone_Name(t *testing.T) {
 	}
 }
 
+func TestUTCAllYear(t *testing.T) {
+	tests := []struct {
+		name string
+		loc  *time.Location
+		want bool
+	}{
+		{"UTC", time.UTC, true},
+		{"a nil zone reads as UTC", nil, true},
+		{"UTC all year under another name", mustZone(t, "Africa/Abidjan"), true},
+		{"a fixed zone at UTC", time.FixedZone("", 0), true},
+		{"UTC in winter only", mustZone(t, "Europe/London"), false},
+		{"UTC in summer only", mustZone(t, "Atlantic/Azores"), false},
+		{"never UTC", mustZone(t, "Europe/Warsaw"), false},
+		{"a fixed zone off UTC", time.FixedZone("", 3600), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, UTCAllYear(tt.loc))
+		})
+	}
+}
+
 func TestIsRealOffset(t *testing.T) {
 	tests := []struct {
 		offset time.Duration

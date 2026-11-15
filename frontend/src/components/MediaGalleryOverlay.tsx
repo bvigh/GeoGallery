@@ -184,6 +184,13 @@ interface Props {
   // The item to open on, from the URL. When it is not in the list, the gallery opens on the first
   // item and says so.
   initialItemId?: string | null;
+  // False keeps the gallery out of the URL, though route still names its trip or album. For a
+  // gallery opened over a view without a URL (the Checks view): its history entry is taken over by
+  // the evidence view it replaced, which would keep showing a URL left there.
+  inUrl?: boolean;
+  // Called when an own item's location may have changed: a location saved, or a re-match from the
+  // evidence view. The list itself is fetched again either way.
+  onItemsChanged?: () => void;
 }
 
 export function MediaGalleryOverlay({
@@ -196,6 +203,8 @@ export function MediaGalleryOverlay({
   onRemoveFromAlbum,
   route,
   initialItemId = null,
+  inUrl = true,
+  onItemsChanged,
 }: Props) {
   const user = useCurrentUser();
   const [items, setItems] = useState<MediaItem[]>([]);
@@ -242,7 +251,11 @@ export function MediaGalleryOverlay({
   // The phone's back gesture closes the gallery instead of leaving the app. Until the list is in,
   // the URL keeps the item it was opened on.
   const urlItemId = loading ? initialItemId : (currentItem?.id ?? null);
-  useCloseOnBack(onClose, true, route ? routeUrl(galleryRoute(route.tab, route.collectionId, urlItemId)) : null);
+  useCloseOnBack(
+    onClose,
+    true,
+    route && inUrl ? routeUrl(galleryRoute(route.tab, route.collectionId, urlItemId)) : null
+  );
 
   // Fetch all matching media, sorted chronologically
   useEffect(() => {
@@ -372,6 +385,7 @@ export function MediaGalleryOverlay({
 
   // Re-fetch all media so GPS-matched neighbours get their updated coordinates
   function refreshItems() {
+    onItemsChanged?.();
     api
       .listMedia(paramsRef.current)
       .then((data) => {

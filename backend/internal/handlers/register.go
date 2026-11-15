@@ -84,12 +84,23 @@ type videoExif struct {
 	ok   bool
 }
 
-// registerMedia stores one media file for ownerID and returns its media ID. inserted is false when
-// the file is a duplicate by (owner_id, file_hash): mediaID is then the existing row's ID, so the
-// caller can still add it to an album. The hash only needs the head and the tail of the file, so a
-// duplicate is found before the file is probed, transcoded or uploaded. Two concurrent calls with
-// the same file can both miss that lookup: the INSERT's ON CONFLICT settles it, and the object
-// uploaded for the losing call, or for an INSERT the database rejected, is deleted again.
+// registerResult is what registerMedia did with one file.
+type registerResult struct {
+	mediaID  string
+	inserted bool // false for a duplicate: mediaID is then the existing row's
+	// src and zone are what the new row's capture_evidence records as src and zone, zone "" where
+	// that is null. A duplicate was dated when it was first stored, so it has neither.
+	src  string
+	zone string
+}
+
+// registerMedia stores one media file for ownerID and returns its media ID, with how the new row's
+// taken_at was read. inserted is false when the file is a duplicate by (owner_id, file_hash):
+// mediaID is then the existing row's ID, so the caller can still add it to an album. The hash only
+// needs the head and the tail of the file, so a duplicate is found before the file is probed,
+// transcoded or uploaded. Two concurrent calls with the same file can both miss that lookup: the
+// INSERT's ON CONFLICT settles it, and the object uploaded for the losing call, or for an INSERT
+// the database rejected, is deleted again.
 //
 // The file is read with ownerID's camera clock rules, loaded once per call before its EXIF is
 // decoded. They describe that owner's cameras, so they never apply to another owner's file. When
@@ -102,18 +113,18 @@ func (r *MediaRegistrar) registerMedia(
 	size int64,
 	filename string,
 	fallbackMtime *time.Time,
-) (mediaID string, inserted bool, err error) {
+) (registerResult, error) {
 	if size <= 0 {
-		return "", false, errors.New("empty file")
+		return registerResult{}, errors.New("empty file")
 	}
 	head := make([]byte, min(size, mediaHeadSize))
 	if _, err := io.ReadFull(io.NewSectionReader(body, 0, size), head); err != nil {
-		return "", false, fmt.Errorf("read head: %w", err)
+		return registerResult{}, fmt.Errorf("read head: %w", err)
 	}
 
 	rules, err := loadClockRules(ctx, r.db, ownerID)
 	if err != nil {
-		return "", false, err
+		return registerResult{}, err
 	}
 	zone := r.cameraZone
 	zone.Clock = rules
@@ -121,7 +132,7 @@ func (r *MediaRegistrar) registerMedia(
 	ext := strings.ToLower(filepath.Ext(filename))
 	exifData, err := extractExifInSlot(ctx, head, zone)
 	if err != nil {
-		return "", false, fmt.Errorf("wait to read exif: %w", err)
+		return registerResult{}, fmt.Errorf("wait to read exif: %w", err)
 	}
 	// Insta360 and similar cameras write moov at end of file, so EXIF dimension extraction from
 	// the head alone fails, and the video is probed with ffprobe instead.
@@ -129,16 +140,17 @@ func (r *MediaRegistrar) registerMedia(
 
 	fileHash, err := mediaHash(body, size, head, probeVideo)
 	if err != nil {
-		return "", false, fmt.Errorf("hash: %w", err)
+		return registerResult{}, fmt.Errorf("hash: %w", err)
 	}
+	var mediaID string
 	err = r.db.QueryRow(ctx,
 		`SELECT id FROM media WHERE owner_id = $1 AND file_hash = $2`, ownerID, fileHash,
 	).Scan(&mediaID)
 	if err == nil {
-		return mediaID, false, nil
+		return registerResult{mediaID: mediaID}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return "", false, fmt.Errorf("look up duplicate: %w", err)
+		return registerResult{}, fmt.Errorf("look up duplicate: %w", err)
 	}
 
 	if probeVideo && zone.Rules.DatesVideosFromExif() {
@@ -148,7 +160,7 @@ func (r *MediaRegistrar) registerMedia(
 		// to it as to a photo, for the model this EXIF names.
 		v, err := videoExifInSlot(ctx, head, zone)
 		if err != nil {
-			return "", false, fmt.Errorf("wait to read video exif: %w", err)
+			return registerResult{}, fmt.Errorf("wait to read video exif: %w", err)
 		}
 		if v.ok {
 			exifData = v.exif
@@ -162,7 +174,7 @@ func (r *MediaRegistrar) registerMedia(
 		// Buffer the full video to a temp file so ffprobe can read the container metadata.
 		tmpFile, probe, err = ingest.ProbeVideo(io.NewSectionReader(body, 0, size))
 		if err != nil {
-			return "", false, err
+			return registerResult{}, err
 		}
 		mediaType = ingest.DetectMediaTypeFromProbe(exifData, filename, ext, probe)
 	} else {
@@ -185,7 +197,7 @@ func (r *MediaRegistrar) registerMedia(
 			os.Remove(tmpFile.Name())
 			if terr != nil {
 				slog.Error("register: transcode failed", "filename", filename, "err", terr)
-				return "", false, terr
+				return registerResult{}, terr
 			}
 			tmpFile = transcoded
 			// Update size from the transcoded file so the S3 upload length is correct.
@@ -198,7 +210,7 @@ func (r *MediaRegistrar) registerMedia(
 			os.Remove(tmpFile.Name())
 		}()
 		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-			return "", false, err
+			return registerResult{}, err
 		}
 		uploadBody = tmpFile
 	} else {
@@ -208,7 +220,7 @@ func (r *MediaRegistrar) registerMedia(
 	key := newStorageKey(ownerID, ext)
 	if err := r.storage.Upload(ctx, key, uploadBody, size, contentTypeFor(ext)); err != nil {
 		slog.Error("register: S3 upload failed", "key", key, "err", err)
-		return "", false, err
+		return registerResult{}, err
 	}
 
 	takenAt := exifData.TakenAt
@@ -258,9 +270,9 @@ func (r *MediaRegistrar) registerMedia(
 		if err := r.db.QueryRow(ctx,
 			`SELECT id FROM media WHERE owner_id = $1 AND file_hash = $2`, ownerID, fileHash,
 		).Scan(&mediaID); err != nil {
-			return "", false, fmt.Errorf("look up duplicate: %w", err)
+			return registerResult{}, fmt.Errorf("look up duplicate: %w", err)
 		}
-		return mediaID, false, nil
+		return registerResult{mediaID: mediaID}, nil
 	}
 	if err != nil {
 		if insertRejected(err) {
@@ -268,7 +280,7 @@ func (r *MediaRegistrar) registerMedia(
 		} else {
 			slog.Warn("register: media insert failed, keeping the object in case the row was stored", "key", key, "err", err)
 		}
-		return "", false, err
+		return registerResult{}, err
 	}
 	// A video's location tag makes no track point. The tag can be the phone's last known fix, and
 	// taken_at is when the recording ended, so the pair is too loose to place other media.
@@ -277,7 +289,11 @@ func (r *MediaRegistrar) registerMedia(
 			slog.Warn("register: exif GPS track insert failed", "err", err)
 		}
 	}
-	return mediaID, true, nil
+	res := registerResult{mediaID: mediaID, inserted: true, src: evidence.Src}
+	if evidence.Zone != nil {
+		res.zone = *evidence.Zone
+	}
+	return res, nil
 }
 
 // The years time.Time marshals to JSON.

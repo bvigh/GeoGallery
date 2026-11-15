@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -187,17 +188,35 @@ type fileError struct {
 }
 
 type trackUploadResponse struct {
-	Inserted int         `json:"inserted"`
-	Skipped  int         `json:"skipped"`
-	Empty    []string    `json:"empty"`
-	Failed   []fileError `json:"failed"`
+	Inserted int               `json:"inserted"`
+	Skipped  int               `json:"skipped"`
+	Empty    []string          `json:"empty"`
+	Failed   []fileError       `json:"failed"`
+	Files    []trackFileReport `json:"files"` // the files that had points, in upload order
+}
+
+// trackFileReport describes one imported track file, so a span reaching years ahead or back shows
+// on the day of the import rather than as a misplaced photo later.
+type trackFileReport struct {
+	File   string     `json:"file"`
+	Format string     `json:"format"`
+	Points int        `json:"points"` // every point parsed, new or imported before
+	First  *time.Time `json:"first"`  // the earliest point, in UTC; null for a year JSON cannot carry
+	Last   *time.Time `json:"last"`   // the latest point, likewise
+}
+
+// newTrackFileReport describes file's points, of which there is at least one.
+func newTrackFileReport(file, format string, points []gpstrack.Point) trackFileReport {
+	byTime := func(a, b gpstrack.Point) int { return a.Time.Compare(b.Time) }
+	first, last := slices.MinFunc(points, byTime).Time, slices.MaxFunc(points, byTime).Time
+	return trackFileReport{File: file, Format: format, Points: len(points), First: utcTime(&first), Last: utcTime(&last)}
 }
 
 // Upload imports track files (multipart field "files") in any format gpstrack.Parse reads. Each
 // point's source is "<format>:<file name>", so re-uploading a file skips its points; a
 // GeoGallery JSON row keeps its own source. A file that cannot be read is reported in failed and
-// the rest still import; a file without a usable point is reported in empty. The matcher runs
-// once at the end.
+// the rest still import; a file without a usable point is reported in empty, and each of the others
+// in files, with its format and its span. The matcher runs once at the end.
 func (h *GPSTrackHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	ownerID := auth.MustUser(r.Context()).ID
 	r.Body = http.MaxBytesReader(w, r.Body, maxTrackUploadBytes)
@@ -225,7 +244,7 @@ func (h *GPSTrackHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	resp := trackUploadResponse{Empty: []string{}, Failed: []fileError{}}
+	resp := trackUploadResponse{Empty: []string{}, Failed: []fileError{}, Files: []trackFileReport{}}
 	anyPoints := false
 	for _, fh := range files {
 		format, points, err := parseTrackFile(fh)
@@ -256,6 +275,7 @@ func (h *GPSTrackHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Inserted += inserted
 		resp.Skipped += len(rows) - inserted
+		resp.Files = append(resp.Files, newTrackFileReport(fh.Filename, format, points))
 	}
 
 	if anyPoints {
