@@ -71,9 +71,9 @@ func registerWithRules(t *testing.T, zone ingest.CameraZone, rules ingest.ClockR
 	db := &mockRegistrarDB{clockRules: rules}
 	reg := &MediaRegistrar{db: db, storage: &mockUploadStorage{}, cameraZone: zone}
 	mtime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	_, inserted, err := reg.registerMedia(context.Background(), "owner-1", bytes.NewReader(content), int64(len(content)), filename, &mtime)
+	res, err := reg.registerMedia(context.Background(), "owner-1", bytes.NewReader(content), int64(len(content)), filename, &mtime)
 	require.NoError(t, err)
-	require.True(t, inserted)
+	require.True(t, res.inserted)
 	for i, sql := range db.sqls {
 		if strings.Contains(sql, "INSERT INTO media") {
 			return db.args[i], db
@@ -156,10 +156,10 @@ func TestRegisterMedia_AppliesTheOwnersClockRules(t *testing.T) {
 		db := &mockRegistrarDB{known: map[string]bool{partialHash(photo): true}}
 		reg := &MediaRegistrar{db: db, storage: &mockUploadStorage{}, cameraZone: zone}
 
-		_, inserted, err := reg.registerMedia(context.Background(), "owner-1", bytes.NewReader(photo), int64(len(photo)), "P1033627.JPG", nil)
+		res, err := reg.registerMedia(context.Background(), "owner-1", bytes.NewReader(photo), int64(len(photo)), "P1033627.JPG", nil)
 
 		require.NoError(t, err)
-		assert.False(t, inserted)
+		assert.False(t, res.inserted)
 		assert.Len(t, db.ruleLoads, 1)
 	})
 }
@@ -213,12 +213,11 @@ func TestRegisterMedia_ClockRuleLoadFailureFailsTheFile(t *testing.T) {
 		store := &mockUploadStorage{}
 		reg := &MediaRegistrar{db: db, storage: store, cameraZone: utcZone}
 
-		id, inserted, err := reg.registerMedia(context.Background(), testOwnerID, bytes.NewReader(photo), int64(len(photo)), "P1033627.JPG", nil)
+		res, err := reg.registerMedia(context.Background(), testOwnerID, bytes.NewReader(photo), int64(len(photo)), "P1033627.JPG", nil)
 
 		require.ErrorIs(t, err, boom)
 		assert.ErrorContains(t, err, "load clock rules")
-		assert.Empty(t, id)
-		assert.False(t, inserted)
+		assert.Zero(t, res)
 		assert.Empty(t, db.sqls, "no media row is looked up or written")
 		assert.Empty(t, store.keys, "nothing is stored")
 		assert.Empty(t, exifDecodeSlots)
@@ -257,7 +256,7 @@ func TestRegisterMedia_ClockRuleLoadFailureFailsTheFile(t *testing.T) {
 		res, err := RunIngestScan(context.Background(), deps, dir, testOwnerID)
 
 		require.NoError(t, err)
-		assert.Equal(t, ScanResult{Failed: 1}, res)
+		assert.Equal(t, ScanResult{Failed: 1}, scanCounts(res))
 	})
 }
 
@@ -305,7 +304,7 @@ func TestIngest_ClockRulesFollowTheOwner(t *testing.T) {
 		res, err := RunIngestScan(context.Background(), deps, dir, testOwnerID)
 
 		require.NoError(t, err)
-		assert.Equal(t, ScanResult{Ingested: 1}, res)
+		assert.Equal(t, ScanResult{Ingested: 1}, scanCounts(res))
 		assert.Equal(t, [][]any{{testOwnerID}}, db.ruleLoads)
 		assert.Equal(t, map[string]*string{"P1033627.JPG": ptr("2019-03-13T17:28:15Z")}, takenAt(t, db))
 	})

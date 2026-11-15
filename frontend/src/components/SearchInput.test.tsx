@@ -41,7 +41,8 @@ describe("SearchInput", () => {
   it("is finger-sized on touch, with text large enough that iOS does not zoom in", async () => {
     render(<Harness onSubmit={vi.fn()} />);
     const input = screen.getByRole("searchbox", { name: "Search albums" });
-    expect(input).toHaveClass("touch:text-base", "touch:pr-11");
+    // Padding, a 16 px line and the border come to 42 px: the minimum makes the field 44 px.
+    expect(input).toHaveClass("touch:min-h-11", "touch:text-base", "touch:pr-11");
     await userEvent.type(input, "ice");
     expect(screen.getByRole("button", { name: "Clear search" })).toHaveClass("touch:h-11", "touch:w-11");
   });

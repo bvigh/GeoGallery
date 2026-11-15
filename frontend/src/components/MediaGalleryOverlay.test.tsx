@@ -979,6 +979,18 @@ describe("MediaGalleryOverlay", () => {
       await act(async () => refetch.resolve([{ ...first, lat: 48.2, lng: 16.4 }, third]));
     });
 
+    it("tells the parent when an item's location may have changed", async () => {
+      const onItemsChanged = vi.fn();
+      await openEvidence([first, third], { onItemsChanged });
+      mockApi.listMedia.mockResolvedValue([first, third]);
+      expect(onItemsChanged).not.toHaveBeenCalled();
+      act(() => evidence.props!.onLocationSaved("first", 12.5, 34.5));
+      expect(onItemsChanged).toHaveBeenCalledTimes(1);
+      act(() => evidence.props!.onRematched());
+      expect(onItemsChanged).toHaveBeenCalledTimes(2);
+      await waitFor(() => expect(mockApi.listMedia).toHaveBeenCalledTimes(3));
+    });
+
     it("leaves the other items alone when the saved item is not in the gallery", async () => {
       await openEvidence([first, third]);
       mockApi.listMedia.mockResolvedValue([first, third]);
@@ -1546,6 +1558,22 @@ describe("MediaGalleryOverlay", () => {
       const { unmount } = renderOverlay({ route });
       expect(await screen.findByText("No media here")).toBeInTheDocument();
       await waitFor(() => expect(location()).toBe("/albums/a1"));
+      unmount();
+      await settleHistory();
+    });
+
+    it("leaves the URL alone when kept out of it, though the route still names the trip", async () => {
+      await settleHistory();
+      window.history.replaceState(null, "", "/trips");
+      const { unmount } = renderOverlay({ route: { tab: "trips", collectionId: "t1" }, inUrl: false, initialItemId: "gone" });
+      expect(await findPosition("1 / 2")).toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent("That item is not in this trip.");
+      await userEvent.keyboard("{ArrowRight}");
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
+      await settleHistory();
+      expect(location()).toBe("/trips");
+      // It still owns a history entry, so back closes it.
+      expect((window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY]).toBe(1);
       unmount();
       await settleHistory();
     });

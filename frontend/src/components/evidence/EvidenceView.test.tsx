@@ -515,6 +515,87 @@ describe("EvidenceView", () => {
     });
   });
 
+  describe("the item's trip", () => {
+    const trip = { id: "t1", name: "Lakes 2023" };
+    const tripRow = () => screen.queryByRole("region", { name: "Trip" });
+
+    it("offers the trip only to a parent that can show it, and only for an item in a trip", async () => {
+      serve({ a: { item: { trip } }, b: { item: { trip: null } } });
+      const { update } = renderView();
+      await loaded("a");
+      expect(tripRow()).not.toBeInTheDocument();
+
+      update({ onShowInTrip: vi.fn() });
+      expect(within(tripRow()!).getByText("Lakes 2023")).toBeInTheDocument();
+
+      update({ mediaId: "b", onShowInTrip: vi.fn() });
+      await loaded("b");
+      expect(tripRow()).not.toBeInTheDocument();
+    });
+
+    it("shows the item in its trip on a plain click, and leaves other clicks to the browser", async () => {
+      serve({ a: { item: { trip } } });
+      const onShowInTrip = vi.fn();
+      renderView({ onShowInTrip });
+      await loaded("a");
+      const link = within(tripRow()!).getByRole("link", { name: "Show in trip" });
+      // A link to the trip's own URL, so the browser can open it in a tab too.
+      expect(link).toHaveAttribute("href", "/trips/t1?item=a");
+      expect(link).not.toHaveAttribute("target");
+      expect(link).toHaveClass("touch:min-h-11");
+
+      const plain = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+      act(() => {
+        link.dispatchEvent(plain);
+      });
+      expect(plain.defaultPrevented).toBe(true);
+      expect(onShowInTrip).toHaveBeenCalledWith(trip, "a");
+
+      onShowInTrip.mockClear();
+      for (const init of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { button: 1 }]) {
+        const elsewhere = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ...init });
+        act(() => {
+          link.dispatchEvent(elsewhere);
+        });
+        expect(elsewhere.defaultPrevented).toBe(false);
+      }
+      expect(onShowInTrip).not.toHaveBeenCalled();
+    });
+
+    it("opens the trip in a new tab from its own link", async () => {
+      serve({ a: { item: { trip } } });
+      const onShowInTrip = vi.fn();
+      renderView({ onShowInTrip });
+      await loaded("a");
+      const link = within(tripRow()!).getByRole("link", { name: "Show in trip, in a new tab" });
+      expect(link).toHaveAttribute("href", "/trips/t1?item=a");
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link).toHaveAttribute("rel", "noopener noreferrer");
+      expect(link).toHaveClass("touch:min-h-11", "touch:min-w-11");
+      // jsdom navigates nowhere; the view must not take the click over.
+      const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+      act(() => {
+        link.dispatchEvent(click);
+      });
+      expect(onShowInTrip).not.toHaveBeenCalled();
+    });
+
+    it("hides the trip while the next item loads, so it never opens the one still on screen", async () => {
+      serve({ a: { item: { trip } }, b: { item: { trip: { id: "t2", name: "Coast" } } } });
+      const { update } = renderView({ onShowInTrip: vi.fn() });
+      await loaded("a");
+      expect(tripRow()).toBeInTheDocument();
+
+      const next = deferred<ProvenanceResponse>();
+      mockApi.mediaProvenance.mockReturnValue(next.promise);
+      update({ mediaId: "b" });
+      expect(tripRow()).not.toBeInTheDocument();
+
+      await act(async () => next.resolve(makeResponse("b", { item: { trip: { id: "t2", name: "Coast" } } })));
+      expect(within(tripRow()!).getByRole("link", { name: "Show in trip" })).toHaveAttribute("href", "/trips/t2?item=b");
+    });
+  });
+
   describe("actions", () => {
     it.each([
       ["current", false],

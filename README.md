@@ -207,7 +207,7 @@ Folder ingest is an operator command, not an HTTP endpoint. It reads the server'
    docker compose exec backend ./server scan --user <id>    # or: cd backend && go run ./cmd/server scan --user <id>
    ```
 
-`scan` walks `INGEST_WATCH_DIR` (or `--dir <path>`). In Docker, `./ingest` is mounted at `/ingest`. The scanner reads EXIF, extracts GPS and timestamps, uploads to MinIO and inserts into the database. Then it runs the GPS matcher and trip detection for that user, and prints `ingested=N skipped=M failed=K`. It exits 1 if any file failed or the run was interrupted (Ctrl-C stops after the current file).
+`scan` walks `INGEST_WATCH_DIR` (or `--dir <path>`). In Docker, `./ingest` is mounted at `/ingest`. The scanner reads EXIF, extracts GPS and timestamps, uploads to MinIO and inserts into the database. Then it runs the GPS matcher and trip detection for that user, and prints `ingested=N skipped=M failed=K`, then how the newly ingested files' capture times were read: `by_source: exif_original=N exif_ifd0=N container=N mtime=N none=N` and `by_zone: gps=N clock_rule=N offset=N camera=N camera_zone="<name>"` (duplicates and failed files are not counted). When EXIF times were read in a camera zone that is UTC all year, it adds a `warning:` line naming `CAMERA_TIMEZONE` and `server retime --user <id>`. Results go to stdout and logs to stderr. It exits 1 if any file failed or the run was interrupted (Ctrl-C stops after the current file).
 
 Files are deduplicated per user by a partial hash (first + last 64 KB), so re-scanning is always safe. It refuses unknown, disabled and unclaimed users.
 

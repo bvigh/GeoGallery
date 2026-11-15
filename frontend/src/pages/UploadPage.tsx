@@ -1,10 +1,14 @@
-import { useState, useRef } from "react";
-import { Upload, X } from "lucide-react";
+import { memo, useMemo, useState, useRef } from "react";
+import { flushSync } from "react-dom";
+import { AlertTriangle, Upload, X } from "lucide-react";
 import { api, ApiError } from "@/api/client";
 import { MAX_FILE_BYTES, planUploadBatches } from "@/lib/uploadBatches";
 import { canHashFiles, mediaHash } from "@/lib/mediaHash";
-import type { Album } from "@/types";
+import { formatCount } from "@/lib/numbers";
+import { browserTimeZone, formatInstant, formatSpan, YEAR_OUT_OF_RANGE } from "@/lib/time";
+import type { Album, TimeReport, TrackFileReport } from "@/types";
 import { AlbumPickerDialog } from "@/components/albums/AlbumPickerDialog";
+import { Fact } from "@/components/evidence/PointCard";
 
 const GiB = 1024 ** 3;
 const MiB = 1024 ** 2;
@@ -23,6 +27,8 @@ interface GpsSummary {
   skipped: number;
   empty: string[];
   failed: string[];
+  files: TrackFileReport[];
+  finishedAt: number; // ms since epoch: the now a file's last point is compared with
 }
 
 interface UploadResult {
@@ -32,10 +38,12 @@ interface UploadResult {
   // Set when the upload went into an album: how many files the album gained,
   // new uploads and duplicates already in the library alike.
   album?: { name: string; added: number };
+  // How the new files' capture times were read; null when the backend did not say.
+  times: TimeReport | null;
 }
 
-function plural(n: number) {
-  return `${n} file${n !== 1 ? "s" : ""}`;
+function plural(n: number, noun = "file") {
+  return `${formatCount(n)} ${noun}${n !== 1 ? "s" : ""}`;
 }
 
 function albumGoneMessage(name: string) {
@@ -80,7 +88,9 @@ async function findKnownFiles(files: File[], onProgress: (msg: string) => void):
   try {
     const hashes: string[] = [];
     for (const [i, file] of files.entries()) {
-      if (i % 50 === 0) onProgress(`Checking for files already in your library (${i} of ${files.length})`);
+      if (i % 50 === 0) {
+        onProgress(`Checking for files already in your library (${formatCount(i)} of ${formatCount(files.length)})`);
+      }
       hashes.push(await mediaHash(file));
     }
     const ids = new Map<string, string>();
@@ -118,6 +128,232 @@ function ResultList({ title, names, error }: { title: string; names: string[]; e
   );
 }
 
+function addCounts<K extends string>(a: Record<K, number>, b: Record<K, number>): Record<K, number> {
+  const sum = { ...a };
+  for (const key of Object.keys(b) as K[]) sum[key] += b[key];
+  return sum;
+}
+
+// One report for all batches of an upload. They reach the same server, so they share its camera zone.
+function mergeTimeReports(a: TimeReport | null, b: TimeReport): TimeReport {
+  if (!a) return b;
+  return {
+    by_source: addCounts(a.by_source, b.by_source),
+    by_zone: addCounts(a.by_zone, b.by_zone),
+    camera_zone: a.camera_zone,
+    assumed_zone_is_utc: a.assumed_zone_is_utc || b.assumed_zone_is_utc,
+    file_date_names: [...a.file_date_names, ...b.file_date_names],
+  };
+}
+
+// The backend's camera zone when CAMERA_TIMEZONE is unset: the server's own zone, which has no name.
+const SERVER_ZONE_UNSET = "server zone (unset)";
+
+// "38 from EXIF (10 GPS clock, 20 photo offset, 8 assumed camera zone Europe/Warsaw), 2 from file
+// date": what dated the new files, sources and zone rules in the order ingest tries them. Empty when
+// no file was new.
+function captureTimesLine({ by_source: source, by_zone: zone, camera_zone: cameraZone }: TimeReport): string {
+  const counted = (parts: [count: number, text: string][]) =>
+    parts.filter(([count]) => count > 0).map(([count, text]) => `${formatCount(count)} ${text}`);
+  const rules = counted([
+    [zone.gps, "GPS clock"],
+    [zone.clock_rule, "camera clock rule"],
+    [zone.offset, "photo offset"],
+    [zone.camera, cameraZone === SERVER_ZONE_UNSET ? "assumed server zone" : `assumed camera zone ${cameraZone}`],
+  ]);
+  return counted([
+    [source.exif_original + source.exif_ifd0, rules.length > 0 ? `from EXIF (${rules.join(", ")})` : "from EXIF"],
+    [source.container, "from video container"],
+    [source.mtime, "from file date"],
+    [source.none, "with no capture time"],
+  ]).join(", ");
+}
+
+// The warning when files were dated in a camera zone that is UTC all year. It speaks of those files
+// only, and allows that the zone may be right (Iceland keeps UTC all year). A new zone dates new
+// uploads only, and these files would be skipped as duplicates if sent again: only server retime
+// moves them.
+function assumedUtcWarning(cameraZone: string): string {
+  const read =
+    cameraZone === SERVER_ZONE_UNSET
+      ? "CAMERA_TIMEZONE is unset and the server's zone is UTC"
+      : "The assumed camera zone is UTC all year";
+  return (
+    `${read}, so the files dated in it were read as UTC. If the camera's clock did not show UTC, those times ` +
+    "are off by its offset from UTC. An administrator sets the camera zone with CAMERA_TIMEZONE. A new zone " +
+    "dates new uploads only: these files keep their times until an administrator runs server retime, and " +
+    "uploading them again skips them as duplicates."
+  );
+}
+
+// How the capture times of the new files were read. Files the browser found in the library were
+// never sent, and duplicates the server skipped were dated before, so neither is counted.
+function CaptureTimes({ report }: { report: TimeReport }) {
+  const [namesShown, setNamesShown] = useState(false);
+  const line = captureTimesLine(report);
+  if (!line) return null;
+  const general = report.by_source.exif_ifd0;
+  const names = report.file_date_names;
+  return (
+    <div className="mt-1 space-y-1 text-sm">
+      <p>Capture times: {line}</p>
+      {general > 0 && (
+        <p className="text-muted-foreground">
+          {general === 1 ? "1 EXIF time comes" : `${formatCount(general)} EXIF times come`} from the general date
+          tag, which editing software can rewrite.
+        </p>
+      )}
+      {names.length > 0 && (
+        <div>
+          <button
+            type="button"
+            aria-expanded={namesShown}
+            onClick={() => setNamesShown((shown) => !shown)}
+            className="flex items-center gap-1 text-left hover:text-foreground touch:min-h-11"
+          >
+            <span aria-hidden="true" className="w-3 text-xs text-muted-foreground">
+              {namesShown ? "▾" : "▸"}
+            </span>
+            {plural(names.length)} from file date
+          </button>
+          {namesShown && (
+            <ul className="mt-1 max-h-48 list-disc overflow-y-auto pl-4 text-muted-foreground">
+              {names.map((name, i) => (
+                <li key={i} className="[overflow-wrap:anywhere]">
+                  {name}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+      {report.assumed_zone_is_utc && (
+        <p className="flex gap-2">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden="true" />
+          <span>{assumedUtcWarning(report.camera_zone)}</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+const DAY_S = 86400;
+
+// How far a file's last point lies ahead of now, in seconds, when that is more than a day; else null.
+function aheadOfNow(file: TrackFileReport, now: number): number | null {
+  if (file.last === null) return null;
+  const ahead = (Date.parse(file.last) - now) / 1000;
+  return ahead > DAY_S ? ahead : null;
+}
+
+// A time of a track file. A track point has no camera clock: UTC and the browser zone, each labelled.
+function TrackTime({ label, iso, zone }: { label: string; iso: string | null; zone: string }) {
+  if (iso === null) return <Fact label={label}>{YEAR_OUT_OF_RANGE}</Fact>;
+  return (
+    <>
+      <Fact label={`${label}, UTC`}>{formatInstant(iso, "UTC")}</Fact>
+      <Fact label={`${label}, your browser`}>{formatInstant(iso, zone)}</Fact>
+    </>
+  );
+}
+
+// Rows of the track receipt rendered at a time, as in the Checks view's track files. A dashcam or
+// Samsung Health export holds thousands of files, and formatting and laying out every row at once
+// froze the page for seconds when the import finished.
+const TRACK_FILES_PAGE = 200;
+
+interface TrackRowProps {
+  file: TrackFileReport;
+  ahead: number | null; // seconds its last point lies ahead of now, when more than a day
+  zone: string; // the browser's
+  pageStart: boolean; // the first row of a page, which takes the focus when Show more adds it
+}
+
+// Memoized, so Show more formats only the rows it adds.
+const TrackRow = memo(function TrackRow({ file, ahead, zone, pageStart }: TrackRowProps) {
+  return (
+    <li className="py-2" tabIndex={pageStart ? -1 : undefined}>
+      <p className="font-medium [overflow-wrap:anywhere]">{file.file}</p>
+      <p className="text-xs text-muted-foreground">
+        {file.format} · {plural(file.points, "point")}
+      </p>
+      <dl className="mt-1 space-y-0.5 text-xs">
+        <TrackTime label="First" iso={file.first} zone={zone} />
+        <TrackTime label="Last" iso={file.last} zone={zone} />
+      </dl>
+      {ahead !== null && (
+        <p className="mt-1 flex gap-2 text-xs">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" aria-hidden="true" />
+          <span>Its last point is {formatSpan(ahead)} in the future, so its times are probably wrong.</span>
+        </p>
+      )}
+    </li>
+  );
+});
+
+// How many of the receipt's files end more than a day ahead; its list shows them first.
+function aheadSummary(ahead: number, total: number): string {
+  const one = ahead === 1;
+  const which = one ? "1 of them ends" : `${formatCount(ahead)} of them end`;
+  const first = ahead === total ? "" : one ? " It is listed first." : " They are listed first.";
+  return `${which} more than a day in the future, so ${one ? "its" : "their"} times are probably wrong.${first}`;
+}
+
+// Every track file with points, from every batch of the import, with the span of its times: a log
+// dated decades ahead (a receiver that lost its GPS week) shows on the day it is imported. File names
+// are rendered as text only. Memoized: the page renders again on every progress message of a media
+// upload.
+const TrackFiles = memo(function TrackFiles({ files, now }: { files: TrackFileReport[]; now: number }) {
+  const [limit, setLimit] = useState(TRACK_FILES_PAGE);
+  const listRef = useRef<HTMLUListElement>(null);
+  // Files dated ahead come first, so the first page holds them unless there are more than a page.
+  const { rows, aheadCount } = useMemo(() => {
+    const all = files.map((file) => ({ file, ahead: aheadOfNow(file, now) }));
+    const dated = all.filter((row) => row.ahead !== null);
+    return { rows: [...dated, ...all.filter((row) => row.ahead === null)], aheadCount: dated.length };
+  }, [files, now]);
+  if (rows.length === 0) return null;
+  const zone = browserTimeZone();
+
+  // The focus moves to the first row added, as a screen reader should read on from there. Left on
+  // the button, it would fall to the page's start when the last page removes it.
+  const showMore = () => {
+    flushSync(() => setLimit(limit + TRACK_FILES_PAGE));
+    (listRef.current?.children[limit] as HTMLElement | undefined)?.focus();
+  };
+
+  return (
+    <div className="mt-4 rounded-lg border bg-muted p-3 text-sm">
+      <p className="font-medium">{plural(rows.length)} with timestamped points</p>
+      {aheadCount > 0 && rows.length > 1 && (
+        <p className="mt-1 flex gap-2 text-xs">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" aria-hidden="true" />
+          <span>{aheadSummary(aheadCount, rows.length)}</span>
+        </p>
+      )}
+      <ul ref={listRef} className="mt-1 divide-y">
+        {rows.slice(0, limit).map((row, i) => (
+          <TrackRow key={i} file={row.file} ahead={row.ahead} zone={zone} pageStart={i % TRACK_FILES_PAGE === 0} />
+        ))}
+      </ul>
+      {rows.length > limit && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={showMore}
+            className="rounded-lg border bg-background px-3 py-1.5 font-medium hover:bg-accent touch:min-h-11"
+          >
+            Show more
+          </button>
+          <span className="text-xs text-muted-foreground">
+            {formatCount(limit)} of {formatCount(rows.length)} shown
+          </span>
+        </div>
+      )}
+    </div>
+  );
+});
+
 export function UploadPage() {
   const [files, setFiles] = useState<FileList | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -140,11 +376,12 @@ export function UploadPage() {
     setGpsError(null);
     setGpsResult(null);
     const { batches, tooLarge } = planUploadBatches(selected, GPS_BATCH_BYTES, GPS_MAX_FILE_BYTES, GPS_BATCH_FILES);
-    const summary: GpsSummary = {
+    const summary: Omit<GpsSummary, "finishedAt"> = {
       inserted: 0,
       skipped: 0,
       empty: [],
       failed: tooLarge.map((f) => `${f.name}: larger than ${GPS_MAX_FILE_BYTES / MiB} MiB`),
+      files: [],
     };
     const errors: string[] = [];
     // A failed batch does not stop the others: each one is its own request.
@@ -156,12 +393,13 @@ export function UploadPage() {
         summary.skipped += data.skipped;
         summary.empty.push(...data.empty);
         summary.failed.push(...data.failed.map((f) => `${f.file}: ${f.reason}`));
+        summary.files.push(...(data.files ?? []));
       } catch (e: unknown) {
         summary.failed.push(...batch.map((f) => f.name));
         errors.push(e instanceof Error ? e.message : "Import failed");
       }
     }
-    setGpsResult(summary);
+    setGpsResult({ ...summary, finishedAt: Date.now() });
     setGpsError(errors.length > 0 ? [...new Set(errors)].join("; ") : null);
     setGpsProgress(null);
     setImporting(false);
@@ -204,6 +442,7 @@ export function UploadPage() {
     const failedNames: string[] = [];
     const errors: string[] = [];
     let albumGone = false;
+    let times: TimeReport | null = null;
 
     // Files already in the library are not sent, but still go into the album, as the server
     // does with the duplicates it skips.
@@ -236,7 +475,7 @@ export function UploadPage() {
 
     for (const [i, batch] of batches.entries()) {
       const done = uploaded.length + skipped.length;
-      setProgress(`Uploading batch ${i + 1} of ${batches.length} (${done} file(s) done)`);
+      setProgress(`Uploading batch ${i + 1} of ${batches.length} (${formatCount(done)} file(s) done)`);
       const form = new FormData();
       for (const file of batch) {
         form.append("files", file);
@@ -249,6 +488,7 @@ export function UploadPage() {
         uploaded.push(...(data.uploaded ?? []));
         skipped.push(...(data.skipped ?? unreported(batch, data.uploaded, data.failed)));
         failedNames.push(...(data.failed ?? []));
+        if (data.time_report) times = mergeTimeReports(times, data.time_report);
       } catch (e: unknown) {
         failedNames.push(...batch.map((f) => f.name));
         // The backend answers 404 for an album the caller cannot add to, before reading the files.
@@ -273,6 +513,7 @@ export function UploadPage() {
       skipped,
       failed: failedNames,
       album: album ? { name: album.name, added: albumAdded } : undefined,
+      times,
     });
     setError(errors.length > 0 ? [...new Set(errors)].join("; ") : null);
     setProgress(null);
@@ -350,9 +591,7 @@ export function UploadPage() {
 
         {files && files.length > 0 && (
           <div className="mt-4">
-            <p className="mb-2 text-sm text-muted-foreground">
-              {files.length} file{files.length !== 1 ? "s" : ""} selected
-            </p>
+            <p className="mb-2 text-sm text-muted-foreground">{plural(files.length)} selected</p>
             <button
               className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50 touch:min-h-11 touch:px-6"
               onClick={handleUpload}
@@ -367,14 +606,15 @@ export function UploadPage() {
         {result && (
           <>
             <p className="mt-4 text-sm font-medium">
-              Uploaded {plural(result.uploaded.length)}, skipped {result.skipped.length}, failed{" "}
-              {result.failed.length}
+              Uploaded {plural(result.uploaded.length)}, skipped {formatCount(result.skipped.length)}, failed{" "}
+              {formatCount(result.failed.length)}
             </p>
             {result.album && (
               <p className="mt-1 text-sm font-medium">
                 Added {plural(result.album.added)} to "{result.album.name}"
               </p>
             )}
+            {result.times && <CaptureTimes report={result.times} />}
             <ResultList title={`Uploaded ${plural(result.uploaded.length)}`} names={result.uploaded} />
             <ResultList
               title={`${plural(result.skipped.length)} skipped (already in your library)`}
@@ -416,7 +656,7 @@ export function UploadPage() {
           {gpsResult && (
             <>
               <p className="mt-2 text-muted-foreground">
-                Imported {gpsResult.inserted} point(s), {gpsResult.skipped} already imported
+                Imported {formatCount(gpsResult.inserted)} point(s), {formatCount(gpsResult.skipped)} already imported
               </p>
               <ResultList
                 title={`${plural(gpsResult.empty.length)} without timestamped points`}
@@ -426,6 +666,8 @@ export function UploadPage() {
             </>
           )}
           {gpsError && <p className="mt-2 text-red-500">{gpsError}</p>}
+          {/* Last: a page of files runs to thousands of pixels, and would push the failures out of sight. */}
+          {gpsResult && <TrackFiles files={gpsResult.files} now={gpsResult.finishedAt} />}
         </div>
 
         <div className="mt-4 rounded-lg border p-4 text-sm text-muted-foreground">

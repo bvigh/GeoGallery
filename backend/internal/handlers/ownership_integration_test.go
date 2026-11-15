@@ -479,7 +479,8 @@ func TestOwnership_SameFileUploadedByTwoUsers(t *testing.T) {
 	require.Equal(t, http.StatusOK, uploadAs(t, f.router, f.userB, "shared.jpg", content).Code)
 	rec := uploadAs(t, f.router, f.userA, "renamed.jpg", content)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"uploaded":null,"skipped":["renamed.jpg"],"failed":null}`, rec.Body.String(), "A's re-upload is deduplicated")
+	assert.JSONEq(t, `{"uploaded":null,"skipped":["renamed.jpg"],"failed":null,"time_report":`+timeReportNothingNew+`}`, rec.Body.String(),
+		"A's re-upload is deduplicated")
 
 	rows, err := f.pool.Query(context.Background(),
 		`SELECT owner_id::text, storage_key FROM media WHERE filename = 'shared.jpg' ORDER BY owner_id`)
@@ -602,6 +603,8 @@ func TestOwnership_GPSUploadIsOwnedByCaller(t *testing.T) {
 	resp = uploadTrackFiles(t, f.router, f.userB, gpx)
 	assert.Equal(t, 0, resp.Inserted, "re-uploading the same file adds nothing")
 	assert.Equal(t, 2, resp.Skipped)
+	require.Len(t, resp.Files, 1)
+	assert.Equal(t, 2, resp.Files[0].Points, "the file's entry still counts every point parsed")
 
 	assert.Nil(t, snapshotMedia(t, f.pool, f.mediaAUnlocated).lat, "B's upload never geolocates A's media")
 }

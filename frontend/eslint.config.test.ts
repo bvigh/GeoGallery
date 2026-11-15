@@ -23,6 +23,10 @@ describe("no-restricted-properties on evidence surfaces", () => {
     ["src/lib/evidence.ts"],
     ["src/components/evidence/TimeCard.tsx"],
     ["src/components/evidence/nested/Row.ts"],
+    ["src/lib/checks.ts"],
+    ["src/components/checks/ChecksView.tsx"],
+    ["src/components/checks/nested/Row.ts"],
+    ["src/pages/UploadPage.tsx"],
   ])("refuses browser-local time formatting in %s", async (filePath) => {
     expect(await restricted(filePath, code)).toHaveLength(3);
   });
@@ -30,6 +34,9 @@ describe("no-restricted-properties on evidence surfaces", () => {
   it.each([
     ["a test of a component", "src/components/evidence/TimeCard.test.tsx"],
     ["the library's test", "src/lib/evidence.test.ts"],
+    ["a test of the checks view", "src/components/checks/ChecksView.test.tsx"],
+    ["the checks library's test", "src/lib/checks.test.ts"],
+    ["the upload page's test", "src/pages/UploadPage.test.tsx"],
     ["another page", "src/pages/SettingsPage.tsx"],
     ["another library file", "src/lib/time.ts"],
   ])("leaves %s alone", async (_name, filePath) => {

@@ -52,9 +52,9 @@ func TestRegisterMedia_VideoLocationTag(t *testing.T) {
 
 			db := &mockRegistrarDB{}
 			reg := &MediaRegistrar{db: db, storage: &mockUploadStorage{}}
-			_, inserted, err := reg.registerMedia(context.Background(), "owner-1", f, info.Size(), "clip.mp4", &mtime)
+			res, err := reg.registerMedia(context.Background(), "owner-1", f, info.Size(), "clip.mp4", &mtime)
 			require.NoError(t, err)
-			require.True(t, inserted)
+			require.True(t, res.inserted)
 
 			var insert []any
 			for i, sql := range db.sqls {

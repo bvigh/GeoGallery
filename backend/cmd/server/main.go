@@ -238,8 +238,9 @@ func scanTargetError(users []auth.UserRecord, userID string) error {
 
 type scanFunc func(ctx context.Context, dir, ownerID string) (handlers.ScanResult, error)
 
-// runScan validates the target user, runs the scan and prints its counts on stdout. Any error,
-// an interrupt or a non-zero failed count makes the command exit 1.
+// runScan validates the target user, runs the scan and prints its counts on stdout, then how the
+// ingested files' capture times were read. Any error, an interrupt or a non-zero failed count makes
+// the command exit 1.
 func runScan(ctx context.Context, stdout io.Writer, scan scanFunc, users []auth.UserRecord, userID, dir string) error {
 	// Postgres emits lowercase UUIDs; the owner ID also becomes the S3 key prefix, so it must be canonical.
 	userID = strings.ToLower(userID)
@@ -248,6 +249,7 @@ func runScan(ctx context.Context, stdout io.Writer, scan scanFunc, users []auth.
 	}
 	res, err := scan(ctx, dir, userID)
 	fmt.Fprintf(stdout, "ingested=%d skipped=%d failed=%d\n", res.Ingested, res.Skipped, res.Failed)
+	writeTimeReport(stdout, res.TimeReport, userID)
 	switch {
 	case ctx.Err() != nil:
 		return errors.New("interrupted; re-run scan to finish")
@@ -257,6 +259,23 @@ func runScan(ctx context.Context, stdout io.Writer, scan scanFunc, users []auth.
 		return fmt.Errorf("%d file(s) failed to ingest; see the errors above", res.Failed)
 	}
 	return nil
+}
+
+// writeTimeReport prints how the ingested files were dated: by source, then EXIF times by the rule
+// that gave their offset, with the camera zone. It warns when EXIF times were read in a camera zone
+// that is UTC all year, which few camera clocks show, and says how to repair them.
+func writeTimeReport(w io.Writer, r handlers.TimeReport, userID string) {
+	src, zone := r.BySource, r.ByZone
+	fmt.Fprintf(w, "by_source: exif_original=%d exif_ifd0=%d container=%d mtime=%d none=%d\n",
+		src.ExifOriginal, src.ExifIFD0, src.Container, src.Mtime, src.None)
+	fmt.Fprintf(w, "by_zone: gps=%d clock_rule=%d offset=%d camera=%d camera_zone=%q\n",
+		zone.GPS, zone.ClockRule, zone.Offset, zone.Camera, r.CameraZone)
+	if r.AssumedZoneIsUTC {
+		fmt.Fprintf(w, "warning: the EXIF times of %d file(s) were read in camera zone %q, which is UTC all year. "+
+			"If your camera clocks show another zone, set CAMERA_TIMEZONE to it (e.g. Europe/Warsaw), "+
+			"then run `server retime --user %s` to list the times that would move, and again with --apply to move them.\n",
+			zone.Camera, r.CameraZone, userID)
+	}
 }
 
 type retimeFunc func(ctx context.Context, ownerID string, report func(handlers.RetimeChange)) (handlers.RetimeResult, error)
@@ -391,6 +410,7 @@ type routeHandlers struct {
 	albums     *handlers.AlbumHandler
 	admin      *handlers.AdminHandler
 	provenance *handlers.ProvenanceHandler
+	checks     *handlers.ChecksHandler
 	clockRules *handlers.CameraClockRuleHandler
 }
 
@@ -437,6 +457,7 @@ func serve() {
 		albums:     handlers.NewAlbumHandler(pool),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
 		provenance: handlers.NewProvenanceHandler(pool, s3Client, matchWindow, cameraZone(cfg)),
+		checks:     handlers.NewChecksHandler(pool, matchWindow),
 		clockRules: handlers.NewCameraClockRuleHandler(pool),
 	}
 
@@ -510,6 +531,10 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 				// These return the owner's location history and capture evidence: never via token.
 				r.With(middleware.Compress(5, "application/json")).Get("/media/{id}/provenance", h.provenance.Get)
 				r.Get("/media/{id}/provenance/file", h.provenance.File)
+				// These return the owner's track files and findings drawn from their location
+				// history: never via token. A large library's file list runs to hundreds of KB.
+				r.With(middleware.Compress(5, "application/json")).Get("/checks", h.checks.Get)
+				r.With(middleware.Compress(5, "application/json")).Get("/checks/agreement", h.checks.Agreement)
 				// These change who can read whose media, and the directory lists everyone's email:
 				// never via token.
 				r.Delete("/albums/{id}", h.albums.Delete)

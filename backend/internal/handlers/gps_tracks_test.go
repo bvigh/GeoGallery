@@ -379,7 +379,11 @@ func TestTrackUpload_ParsesEachFileByExtension(t *testing.T) {
 		trackFile{"FILE240615-120000.NMEA", driveNMEA},
 	))
 
-	assert.Equal(t, trackUploadResponse{Inserted: 3, Empty: []string{}, Failed: []fileError{}}, resp)
+	noon := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	assert.Equal(t, trackUploadResponse{Inserted: 3, Empty: []string{}, Failed: []fileError{}, Files: []trackFileReport{
+		{File: "walk.gpx", Format: "gpx", Points: 2, First: &noon, Last: ptr(noon.Add(time.Second))},
+		{File: "FILE240615-120000.NMEA", Format: "nmea", Points: 1, First: &noon, Last: &noon},
+	}}, resp)
 	assert.Equal(t, []string{"gpx:walk.gpx", "gpx:walk.gpx", "nmea:FILE240615-120000.NMEA"}, db.sources,
 		"source is <format>:<file name>, so re-uploading the file skips its points")
 	assert.Equal(t, []any{testOwnerID, testOwnerID, testOwnerID}, db.owners)
@@ -407,6 +411,57 @@ func TestTrackUpload_ReportsFailedAndEmptyFiles(t *testing.T) {
 	assert.Contains(t, resp.Failed[0].Reason, "unsupported file type")
 	assert.Equal(t, "broken.gpx", resp.Failed[1].File)
 	assert.True(t, strings.HasPrefix(resp.Failed[1].Reason, "gpx: "), resp.Failed[1].Reason)
+}
+
+// Each file with points is listed with its format, how many points it held and their span in UTC,
+// whatever their order in the file and the process's own zone, so a track dated years ahead shows on
+// the day it is imported. Empty and failed files are not listed.
+func TestTrackUpload_FileReports(t *testing.T) {
+	saved := time.Local
+	t.Cleanup(func() { time.Local = saved })
+	time.Local = time.FixedZone("TEST+9", 9*3600)
+	h := &GPSTrackHandler{db: &insertRecorder{}, matchWindow: time.Hour,
+		runMatcher: func(context.Context, matcherDB, string, time.Duration, bool) error { return nil }}
+	// files is the upload's files list, as JSON.
+	files := func(t *testing.T, w *httptest.ResponseRecorder) string {
+		t.Helper()
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var resp map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		return string(resp["files"])
+	}
+
+	got := files(t, postTrackFiles(h,
+		trackFile{"notes.txt", "hello"},
+		trackFile{"planned-route.gpx", `<gpx><trkpt lat="47.5" lon="19.0"/></gpx>`},
+		trackFile{"walk.gpx", `<gpx><trk><trkseg>
+		  <trkpt lat="47.6" lon="19.1"><time>2024-06-15T14:00:01+02:00</time></trkpt>
+		  <trkpt lat="47.5" lon="19.0"><time>2024-06-15T12:00:00Z</time></trkpt>
+		  <trkpt lat="47.7" lon="19.2"><time>2024-06-15T11:59:59Z</time></trkpt>
+		</trkseg></trk></gpx>`},
+		trackFile{"FILE240615-120000.NMEA", driveNMEA},
+		trackFile{"location_data.json", `[{"start_time": 1718452805000, "latitude": 47.5, "longitude": 19.0},
+		  {"start_time": 1718452800000, "latitude": 47.6, "longitude": 19.1}]`},
+		trackFile{"points.json", `[{"recorded_at": "2024-06-15T21:00:00+09:00", "lat": 47.5, "lng": 19.0, "source": "gpx:ride.gpx"}]`},
+		// A receiver with a broken date: its span runs past the years JSON can carry at both ends.
+		trackFile{"broken-date.gpx", `<gpx><trk><trkseg>
+		  <trkpt lat="47.5" lon="19.0"><time>0000-01-01T00:30:00+01:00</time></trkpt>
+		  <trkpt lat="47.6" lon="19.1"><time>9999-12-31T23:30:00-01:00</time></trkpt>
+		</trkseg></trk></gpx>`},
+	))
+
+	assert.JSONEq(t, `[
+		{"file": "walk.gpx", "format": "gpx", "points": 3, "first": "2024-06-15T11:59:59Z", "last": "2024-06-15T12:00:01Z"},
+		{"file": "FILE240615-120000.NMEA", "format": "nmea", "points": 1, "first": "2024-06-15T12:00:00Z", "last": "2024-06-15T12:00:00Z"},
+		{"file": "location_data.json", "format": "samsung_health", "points": 2, "first": "2024-06-15T12:00:00Z", "last": "2024-06-15T12:00:05Z"},
+		{"file": "points.json", "format": "geogallery", "points": 1, "first": "2024-06-15T12:00:00Z", "last": "2024-06-15T12:00:00Z"},
+		{"file": "broken-date.gpx", "format": "gpx", "points": 2, "first": null, "last": null}
+	]`, got)
+
+	t.Run("never null", func(t *testing.T) {
+		got := files(t, postTrackFiles(h, trackFile{"notes.txt", "hello"}, trackFile{"empty.nmea", ""}))
+		assert.JSONEq(t, `[]`, got)
+	})
 }
 
 func TestTrackUpload_NothingImportable_NoInsertNoMatcher(t *testing.T) {
@@ -451,6 +506,9 @@ func TestTrackUpload_DuplicatesCountedAsSkipped(t *testing.T) {
 
 	assert.Equal(t, 0, resp.Inserted)
 	assert.Equal(t, 2, resp.Skipped)
+	noon := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	assert.Equal(t, []trackFileReport{{File: "walk.gpx", Format: "gpx", Points: 2, First: &noon, Last: ptr(noon.Add(time.Second))}},
+		resp.Files, "every point parsed, imported before or not")
 }
 
 func TestTrackUpload_BadRequests(t *testing.T) {

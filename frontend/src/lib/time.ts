@@ -62,6 +62,23 @@ export function formatDuration(seconds: number): string {
   return parts.join(" ");
 }
 
+const DAY_S = 86400;
+const YEAR_S = 365.2425 * DAY_S;
+const MONTH_S = YEAR_S / 12;
+
+// A span that can run to years, such as a log dated by a receiver that lost its GPS week, in the
+// largest unit that keeps it readable: "about 13 years", "about 4 months". Below 60 days it is
+// formatDuration's exact "4 d 7 h". Like formatDuration, it has no direction.
+export function formatSpan(seconds: number): string {
+  const absolute = Math.abs(seconds);
+  if (absolute >= 2 * YEAR_S) return `about ${Math.round(absolute / YEAR_S)} years`;
+  if (absolute >= 60 * DAY_S) return `about ${Math.round(absolute / MONTH_S)} months`;
+  return formatDuration(seconds);
+}
+
+// What an instant reads as when the server sent null because JSON cannot carry its year.
+export const YEAR_OUT_OF_RANGE = "year out of range";
+
 // A UTC offset as written in EXIF, for example "+01:00" or "-03:30".
 export function formatOffset(minutes: number): string {
   const absolute = Math.abs(minutes);

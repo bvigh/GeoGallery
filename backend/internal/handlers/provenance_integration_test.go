@@ -335,6 +335,31 @@ func TestProvenance_ItemFieldsAndEvidence(t *testing.T) {
 	})
 }
 
+// The item's trip lets the Checks view open it among its neighbours. It is the owner's own trip,
+// and an item in no trip has none.
+func TestProvenance_ItemTrip(t *testing.T) {
+	f := newProvenanceFixture(t)
+	owner := createUser(t, f.pool, "owner")
+	tripID := insertTrip(t, f.pool, owner, "Lakes 2023", true, "2023-06-01", "2023-06-09")
+	inTrip := f.item(t, owner, provItem{filename: "lake.jpg", takenAt: provAt})
+	_, err := f.pool.Exec(context.Background(), `UPDATE media SET trip_id = $1 WHERE id = $2`, tripID, inTrip)
+	require.NoError(t, err)
+	loose := f.item(t, owner, provItem{filename: "loose.jpg", takenAt: provAt})
+
+	got := f.get(t, owner, inTrip)
+	require.NotNil(t, got.Item.Trip)
+	assert.Equal(t, provenanceTrip{ID: tripID, Name: "Lakes 2023"}, *got.Item.Trip)
+	assert.Nil(t, f.get(t, owner, loose).Item.Trip)
+
+	// On the wire: an object, or null.
+	rec := do(t, f.router, owner, http.MethodGet, "/api/media/"+loose+"/provenance", "")
+	var raw struct {
+		Item map[string]json.RawMessage `json:"item"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	assert.JSONEq(t, "null", string(raw.Item["trip"]))
+}
+
 // A year RFC 3339 cannot express must not cost the owner the whole view: the row can exist, because
 // PostgreSQL accepts it and ingest stores what a crafted file says.
 func TestProvenance_StoredYearJSONCannotCarry(t *testing.T) {

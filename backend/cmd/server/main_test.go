@@ -15,6 +15,8 @@ import (
 	"github.com/bvigh/geogallery/internal/config"
 	"github.com/bvigh/geogallery/internal/handlers"
 	"github.com/bvigh/geogallery/internal/ingest"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -66,6 +68,21 @@ func (routeStore) ListAPITokens(context.Context, string) ([]auth.APIToken, error
 	return []auth.APIToken{}, nil
 }
 
+// refusingPool is a real pool whose every connection attempt fails before it reaches the network:
+// a handler over it answers 500, which shows that a request got past the auth middleware.
+func refusingPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig("postgres://route-test@db.invalid/route-test")
+	require.NoError(t, err)
+	cfg.BeforeConnect = func(context.Context, *pgx.ConnConfig) error {
+		return errors.New("no database in route tests")
+	}
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return pool
+}
+
 func newTestRouter(t *testing.T) http.Handler {
 	t.Helper()
 	cfg := &config.Config{PublicOrigin: "http://localhost:5173", SessionTTLHours: 720}
@@ -81,6 +98,7 @@ func newTestRouter(t *testing.T) http.Handler {
 		albums:     handlers.NewAlbumHandler(nil),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
 		provenance: handlers.NewProvenanceHandler(nil, nil, time.Hour, ingest.CameraZone{}),
+		checks:     handlers.NewChecksHandler(refusingPool(t), time.Hour),
 		clockRules: handlers.NewCameraClockRuleHandler(nil),
 	}
 	return newRouter(cop, auth.New(store, nil, cfg), h)
@@ -125,6 +143,16 @@ func TestRouter_AuthWiring(t *testing.T) {
 		// No DB here either: a malformed ID is 404 from the handler's own check.
 		{"session provenance, malformed id", http.MethodGet, "/api/media/" + badID + "/provenance", false, userSession, nil, http.StatusNotFound},
 		{"session provenance file, malformed id", http.MethodGet, "/api/media/" + badID + "/provenance/file", false, userSession, nil, http.StatusNotFound},
+		{"token checks", http.MethodGet, "/api/checks", true, "", nil, http.StatusForbidden},
+		{"token checks agreement", http.MethodGet, "/api/checks/agreement", true, "", nil, http.StatusForbidden},
+		{"anonymous checks", http.MethodGet, "/api/checks", false, "", nil, http.StatusUnauthorized},
+		{"anonymous checks agreement", http.MethodGet, "/api/checks/agreement", false, "", nil, http.StatusUnauthorized},
+		// The checks handler's pool refuses every connection: its 500 shows a session reached it,
+		// and a 400 that the agreement checks from before touching the database.
+		{"session checks", http.MethodGet, "/api/checks", false, userSession, nil, http.StatusInternalServerError},
+		{"session checks agreement", http.MethodGet, "/api/checks/agreement", false, userSession, nil, http.StatusInternalServerError},
+		{"session checks agreement, malformed from", http.MethodGet, "/api/checks/agreement?from=-1", false, userSession, nil, http.StatusBadRequest},
+		{"token checks agreement, malformed from", http.MethodGet, "/api/checks/agreement?from=-1", true, "", nil, http.StatusForbidden},
 
 		// The album handler has no DB here: these statuses come from its input checks, which shows
 		// the request got past the auth middleware.
@@ -445,6 +473,23 @@ func TestFormatUTCOffset(t *testing.T) {
 func TestRunScan(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
+	// The scan's time report is printed as it comes, after the counts, whatever the outcome.
+	report := handlers.TimeReport{CameraZone: "Europe/Warsaw", FileDateNames: []string{}}
+	const reportOut = "by_source: exif_original=0 exif_ifd0=0 container=0 mtime=0 none=0\n" +
+		"by_zone: gps=0 clock_rule=0 offset=0 camera=0 camera_zone=\"Europe/Warsaw\"\n"
+	everySource := handlers.TimeReport{
+		BySource:      handlers.TimeSourceCounts{ExifOriginal: 6, ExifIFD0: 4, Container: 3, Mtime: 2, None: 1},
+		ByZone:        handlers.TimeZoneCounts{GPS: 1, ClockRule: 2, Offset: 3, Camera: 4},
+		CameraZone:    "Europe/Warsaw",
+		FileDateNames: []string{"a.jpg", "b.jpg"},
+	}
+	assumedUTC := handlers.TimeReport{
+		BySource:         handlers.TimeSourceCounts{ExifOriginal: 1},
+		ByZone:           handlers.TimeZoneCounts{Camera: 1},
+		CameraZone:       "server zone (unset)",
+		AssumedZoneIsUTC: true,
+		FileDateNames:    []string{},
+	}
 
 	tests := []struct {
 		name       string
@@ -456,18 +501,29 @@ func TestRunScan(t *testing.T) {
 		wantOut    string
 		wantErr    string
 	}{
-		{"success", context.Background(), "active-user", handlers.ScanResult{Ingested: 2, Skipped: 1}, nil,
-			true, "ingested=2 skipped=1 failed=0\n", ""},
-		{"failed files exit non-zero", context.Background(), "active-user", handlers.ScanResult{Ingested: 1, Failed: 1}, nil,
-			true, "ingested=1 skipped=0 failed=1\n", "1 file(s) failed"},
-		{"scan error", context.Background(), "active-user", handlers.ScanResult{}, errors.New("gps matcher: boom"),
-			true, "ingested=0 skipped=0 failed=0\n", "gps matcher: boom"},
-		{"interrupted", cancelled, "active-user", handlers.ScanResult{Ingested: 1}, context.Canceled,
-			true, "ingested=1 skipped=0 failed=0\n", "interrupted; re-run scan to finish"},
+		{"success", context.Background(), "active-user", handlers.ScanResult{Ingested: 2, Skipped: 1, TimeReport: report}, nil,
+			true, "ingested=2 skipped=1 failed=0\n" + reportOut, ""},
+		{"failed files exit non-zero", context.Background(), "active-user", handlers.ScanResult{Ingested: 1, Failed: 1, TimeReport: report}, nil,
+			true, "ingested=1 skipped=0 failed=1\n" + reportOut, "1 file(s) failed"},
+		{"scan error", context.Background(), "active-user", handlers.ScanResult{TimeReport: report}, errors.New("gps matcher: boom"),
+			true, "ingested=0 skipped=0 failed=0\n" + reportOut, "gps matcher: boom"},
+		{"interrupted", cancelled, "active-user", handlers.ScanResult{Ingested: 1, TimeReport: report}, context.Canceled,
+			true, "ingested=1 skipped=0 failed=0\n" + reportOut, "interrupted; re-run scan to finish"},
 		{"unclaimed user refused before scanning", context.Background(), auth.LegacyOwnerID, handlers.ScanResult{}, nil,
 			false, "", "user is unclaimed"},
-		{"uppercase id normalised", context.Background(), "ACTIVE-USER", handlers.ScanResult{Ingested: 1}, nil,
-			true, "ingested=1 skipped=0 failed=0\n", ""},
+		{"uppercase id normalised", context.Background(), "ACTIVE-USER", handlers.ScanResult{Ingested: 1, TimeReport: report}, nil,
+			true, "ingested=1 skipped=0 failed=0\n" + reportOut, ""},
+		{"every source and zone rule counted", context.Background(), "active-user", handlers.ScanResult{Ingested: 16, TimeReport: everySource}, nil,
+			true, "ingested=16 skipped=0 failed=0\n" +
+				"by_source: exif_original=6 exif_ifd0=4 container=3 mtime=2 none=1\n" +
+				"by_zone: gps=1 clock_rule=2 offset=3 camera=4 camera_zone=\"Europe/Warsaw\"\n", ""},
+		{"a camera zone at UTC all year warns", context.Background(), "ACTIVE-USER", handlers.ScanResult{Ingested: 1, TimeReport: assumedUTC}, nil,
+			true, "ingested=1 skipped=0 failed=0\n" +
+				"by_source: exif_original=1 exif_ifd0=0 container=0 mtime=0 none=0\n" +
+				"by_zone: gps=0 clock_rule=0 offset=0 camera=1 camera_zone=\"server zone (unset)\"\n" +
+				"warning: the EXIF times of 1 file(s) were read in camera zone \"server zone (unset)\", which is UTC all year. " +
+				"If your camera clocks show another zone, set CAMERA_TIMEZONE to it (e.g. Europe/Warsaw), " +
+				"then run `server retime --user active-user` to list the times that would move, and again with --apply to move them.\n", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

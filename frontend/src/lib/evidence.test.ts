@@ -114,6 +114,7 @@ function facts(
       width_px: null,
       height_px: null,
       duration_sec: null,
+      trip: null,
       ...item,
     },
     placement: {

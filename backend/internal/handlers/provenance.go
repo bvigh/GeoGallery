@@ -124,6 +124,14 @@ type provenanceItem struct {
 	WidthPx       *int       `json:"width_px"`
 	HeightPx      *int       `json:"height_px"`
 	DurationSec   *float64   `json:"duration_sec"`
+	// Trip is the owner's trip the item is in, nil when it is in none. The Checks view opens the
+	// item there, among the photos taken around it.
+	Trip *provenanceTrip `json:"trip"`
+}
+
+type provenanceTrip struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type provenanceTime struct {
@@ -302,26 +310,32 @@ func (h *ProvenanceHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// loadItem reads one own item and its capture evidence. The literal owner_id is what makes a
-// foreign or shared item pgx.ErrNoRows.
+// loadItem reads one own item, its trip and its capture evidence. The literal owner_id is what
+// makes a foreign or shared item pgx.ErrNoRows, and the trip is the owner's too: the composite
+// trip FK keeps media in their owner's trips, and the join says so again.
 func (h *ProvenanceHandler) loadItem(ctx context.Context, id, ownerID string) (provenanceItem, []byte, error) {
 	var item provenanceItem
 	var evidence []byte
+	var tripID, tripName *string
 	err := h.db.QueryRow(ctx, `
 		SELECT m.id::text, m.filename, m.media_type, m.taken_at, m.created_at,
 		       ST_Y(m.location::geometry), ST_X(m.location::geometry),
 		       m.gps_source, m.gps_confidence, m.camera_model, m.width_px, m.height_px, m.duration_sec,
-		       m.capture_evidence
+		       m.capture_evidence, t.id::text, t.name
 		FROM media m
+		LEFT JOIN trips t ON t.id = m.trip_id AND t.owner_id = m.owner_id
 		WHERE m.id = $1 AND m.owner_id = $2
 	`, id, ownerID).Scan(
 		&item.ID, &item.Filename, &item.MediaType, &item.TakenAt, &item.CreatedAt,
 		&item.Lat, &item.Lng,
 		&item.GPSSource, &item.GPSConfidence, &item.CameraModel, &item.WidthPx, &item.HeightPx, &item.DurationSec,
-		&evidence,
+		&evidence, &tripID, &tripName,
 	)
 	if err != nil {
 		return provenanceItem{}, nil, err
+	}
+	if tripID != nil && tripName != nil {
+		item.Trip = &provenanceTrip{ID: *tripID, Name: *tripName}
 	}
 	item.CreatedAt = item.CreatedAt.UTC()
 	item.TakenAt = utcTime(item.TakenAt)
