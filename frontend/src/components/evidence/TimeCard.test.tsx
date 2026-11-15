@@ -9,9 +9,15 @@ import {
   type ResponseOverrides,
 } from "@/components/evidence/evidenceTestUtils";
 import { TimeCard } from "@/components/evidence/TimeCard";
-import { CLOCK_RULE_KEEPS_TIME, REREAD_NOT_RECORDED, VIDEO_TIME_MAY_BE_END } from "@/lib/evidence";
+import {
+  CLOCK_RULE_KEEPS_TIME,
+  EDIT_KEEPS_TIME,
+  REREAD_NOT_RECORDED,
+  timeEditSentence,
+  VIDEO_TIME_MAY_BE_END,
+} from "@/lib/evidence";
 import { browserTimeZone, formatInstant } from "@/lib/time";
-import type { FileReread } from "@/types";
+import type { FileReread, TimeEdit } from "@/types";
 
 vi.mock("@/api/client", () => ({
   api: { mediaProvenanceFile: vi.fn() },
@@ -355,7 +361,7 @@ describe("TimeCard", () => {
       expect(screen.getByText("Differs by exactly 1 h. An older rule or a changed setting would explain it.")).toBeInTheDocument();
       expect(
         screen.getByText(
-          "Today's reading uses your rule for Panasonic DC-TZ200 (clock showed UTC+02:00). A stored time moves only when an administrator runs server retime."
+          "Today's reading uses your rule for Panasonic DC-TZ200 (clock showed UTC+02:00). A stored time moves only when you edit or shift it, or an administrator runs server retime."
         )
       ).toBeInTheDocument();
       // The chips still describe how the stored time was read.
@@ -390,6 +396,170 @@ describe("TimeCard", () => {
       render(card("a"));
       expect(screen.queryByText(/Re-timed/)).not.toBeInTheDocument();
       expect(screen.queryByText("Before re-time")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("a time the owner changed", () => {
+    // The stored 00:01 came from a change that moved the time an hour back.
+    const edit: TimeEdit = {
+      v: 1,
+      kind: "set",
+      at: "2026-11-15T19:00:00Z",
+      from: "2000-01-01T01:01:00Z",
+      original: "2000-01-01T02:01:00Z",
+      delta_s: -3600,
+      wall: "2000-01-01T01:01:00",
+      zone: "Europe/Warsaw",
+      offset_min: 60,
+    };
+    const edited: ResponseOverrides = { time: { edit } };
+
+    function stubZone() {
+      return vi
+        .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+        .mockReturnValue({ timeZone: "Asia/Tokyo" } as Intl.ResolvedDateTimeFormatOptions);
+    }
+
+    it("says who changed it, when and to what, and that server retime keeps it", () => {
+      const zone = stubZone();
+      render(card("a", edited));
+      expect(screen.getByText(timeEditSentence(edit, "Asia/Tokyo"))).toBeInTheDocument();
+      expect(screen.getByText(timeEditSentence(edit, "Asia/Tokyo"))).toHaveTextContent("Asia/Tokyo");
+      expect(screen.getByText("Entered as 2000-01-01 01:01:00 in Europe/Warsaw, UTC+01:00 on that date.")).toBeInTheDocument();
+      expect(screen.getByText(EDIT_KEEPS_TIME)).toBeInTheDocument();
+      zone.mockRestore();
+    });
+
+    it("lists the time before the change and the one before the first change, in UTC and the browser zone", () => {
+      const zone = stubZone();
+      render(card("a", edited));
+      const before = screen.getByText("Before your change").parentElement!;
+      expect(before).toHaveTextContent(formatInstant("2000-01-01T01:01:00Z", "UTC"));
+      expect(before).toHaveTextContent(formatInstant("2000-01-01T01:01:00Z", "Asia/Tokyo"));
+      const first = screen.getByText("Before your first change").parentElement!;
+      expect(first).toHaveTextContent(formatInstant("2000-01-01T02:01:00Z", "UTC"));
+      expect(first).toHaveTextContent(formatInstant("2000-01-01T02:01:00Z", "Asia/Tokyo"));
+      zone.mockRestore();
+    });
+
+    it("leaves out the time before the first change when it is the one before this change", () => {
+      render(card("a", { time: { edit: { ...edit, original: edit.from } } }));
+      expect(screen.getByText("Before your change")).toBeInTheDocument();
+      expect(screen.queryByText("Before your first change")).not.toBeInTheDocument();
+    });
+
+    // The evidence still says how the file's own time was read; the stored time is the owner's.
+    function fileClockRow() {
+      return screen.getByText("Camera clock in the file").parentElement!.querySelector("dd")!.textContent;
+    }
+
+    it("marks the stored time as changed by hand, and what follows as the file's reading", () => {
+      render(card("a", edited));
+      expect(chips()).toEqual(["Set by hand", "EXIF capture time", "Etc/GMT-1; nothing in the file confirms this"]);
+      expect(screen.getByText("Read from the file:")).toBeInTheDocument();
+      expect(screen.queryByText("Camera")).not.toBeInTheDocument();
+      expect(fileClockRow()).toBe("2000:01:01 01:01:00 +01:00 · assumed");
+    });
+
+    it("marks a shifted time as shifted", () => {
+      render(card("a", { time: { edit: { ...edit, kind: "shift", wall: null, zone: null, offset_min: null } } }));
+      expect(chips()[0]).toBe("Shifted by hand");
+    });
+
+    it("words an undated item given a time by hand", () => {
+      const none = makeEvidence({ src: "none", zone: null, wall: null, offset_used_min: null });
+      const first: TimeEdit = { ...edit, from: null, original: null, delta_s: null };
+      render(card("a", { time: { evidence: none, edit: first } }));
+      expect(screen.getAllByText("UTC")[0].parentElement).toHaveTextContent(formatInstant("2000-01-01T00:01:00Z", "UTC"));
+      expect(chips()).toEqual(["Set by hand", "No capture time"]);
+      expect(fileClockRow()).toBe("No wall clock.");
+      expect(screen.getByText(/The item had no capture time before\.$/)).toBeInTheDocument();
+      expect(screen.queryByText("Before your change")).not.toBeInTheDocument();
+    });
+
+    it("never calls a time set by hand the file's modified date", async () => {
+      const mtime = makeEvidence({ src: "mtime", zone: null, wall: null, offset_used_min: null });
+      reread.mockResolvedValue(makeReread({ class: "no_file_time", delta_s: null, rule_today: null }));
+      render(card("a", { time: { evidence: mtime, edit } }));
+      expect(fileClockRow()).toBe("No wall clock in the file.");
+      expect(chips()).toEqual(["Set by hand", "File modified time, may be wrong"]);
+      fireEvent.click(screen.getByRole("button", { name: "Check against the file" }));
+      await advance(0);
+      expect(
+        screen.getByText(
+          "No capture time could be read from this file. This reader understands EXIF in JPEG and TIFF only. The stored time is the one you set by hand."
+        )
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/This is the file's modified date/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/The stored time is the file's modified date/)).not.toBeInTheDocument();
+    });
+
+    it("says the file's time, not the stored one, was read as UTC", () => {
+      const utc = makeEvidence({ camera_zone: "server zone (unset)", camera_zone_utc_fallback: true });
+      render(card("a", { time: { evidence: utc, edit } }));
+      expect(
+        screen.getByText("The file's time was read as UTC, because CAMERA_TIMEZONE is unset and the server's zone is UTC.")
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/^This time was read as UTC/)).not.toBeInTheDocument();
+    });
+
+    it("words a shift, which entered no wall clock", () => {
+      const shift: TimeEdit = { ...edit, kind: "shift", wall: null, zone: null, offset_min: null };
+      render(card("a", { time: { edit: shift } }));
+      expect(screen.getByText(/^You shifted this time 1 h earlier on /)).toBeInTheDocument();
+      expect(screen.queryByText(/^Entered as/)).not.toBeInTheDocument();
+    });
+
+    it("says in the file re-read that the stored time need not match the file", async () => {
+      reread.mockResolvedValue(makeReread({ class: "whole_offset", delta_s: 3600 }));
+      render(card("a", edited));
+      fireEvent.click(screen.getByRole("button", { name: "Check against the file" }));
+      await advance(0);
+      expect(screen.getByText("Differs by exactly 1 h. Your change explains the difference.")).toBeInTheDocument();
+      expect(screen.queryByText(/older rule/)).not.toBeInTheDocument();
+    });
+
+    it("measures a re-time from the time it left, not the time changed since", () => {
+      const retimed = makeEvidence({ by: "retime", retimed_from: "2000-01-01T03:01:00Z" });
+      render(card("a", { time: { recorded: "retime", evidence: retimed, edit } }));
+      // server retime moved 03:01 to 02:01; the owner then moved 02:01 to 01:01 and on to 00:01.
+      expect(screen.getByText("Re-timed on the server: 1 h earlier than the time stored before.")).toBeInTheDocument();
+    });
+
+    it.each([
+      ["null", { time: { edit: null } }],
+      ["missing, from an older backend", {}],
+    ] as const)("says nothing of a change when the edit is %s", (_name, overrides) => {
+      render(card("a", overrides));
+      expect(screen.queryByText(/You (set|shifted) this time/)).not.toBeInTheDocument();
+      expect(screen.queryByText(EDIT_KEEPS_TIME)).not.toBeInTheDocument();
+      expect(screen.queryByText("Before your change")).not.toBeInTheDocument();
+    });
+
+    it("reads the file again once the stored time changed, after 400 ms", async () => {
+      const { rerender } = render(card("a", notRecorded));
+      await advance(400);
+      expect(reread).toHaveBeenCalledTimes(1);
+
+      rerender(card("a", { ...notRecorded, item: { taken_at: "2000-01-01T00:00:00Z" } }));
+      expect(screen.queryByText("Today's rules agree with the stored time.")).not.toBeInTheDocument();
+      await advance(399);
+      expect(reread).toHaveBeenCalledTimes(1);
+      await advance(1);
+      expect(reread).toHaveBeenCalledTimes(2);
+      expect(screen.getByText("Today's rules agree with the stored time.")).toBeInTheDocument();
+    });
+
+    it("offers the button again once a time read on request changed", async () => {
+      const { rerender } = render(card("a"));
+      fireEvent.click(screen.getByRole("button", { name: "Check against the file" }));
+      await advance(0);
+      expect(screen.queryByRole("button", { name: "Check against the file" })).not.toBeInTheDocument();
+
+      rerender(card("a", { item: { taken_at: "2000-01-01T00:00:00Z" }, ...edited }));
+      expect(screen.getByRole("button", { name: "Check against the file" })).toBeEnabled();
+      expect(screen.queryByText(/Today's rules agree/)).not.toBeInTheDocument();
+      expect(reread).toHaveBeenCalledTimes(1);
     });
   });
 

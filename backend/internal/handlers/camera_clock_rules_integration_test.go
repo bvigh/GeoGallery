@@ -350,7 +350,7 @@ func TestCameraClockRules_CapHoldsUnderConcurrentPosts(t *testing.T) {
 	assert.Equal(t, maxClockRulesPerOwner, countClockRules(t, c.pool, c.user))
 }
 
-// POST and PUT of one owner wait for the owner lock (lockClockRuleOwner), so they run one after the
+// POST and PUT of one owner wait for the owner lock (lockOwnerRow), so they run one after the
 // other.
 func TestCameraClockRules_WritesWaitForTheOwnerLock(t *testing.T) {
 	c := newClockRulesAPI(t)

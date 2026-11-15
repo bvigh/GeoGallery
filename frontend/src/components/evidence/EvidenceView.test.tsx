@@ -1,5 +1,5 @@
 import type { ComponentProps } from "react";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/api/client";
@@ -9,7 +9,8 @@ import type { EvidenceMap } from "@/components/evidence/EvidenceMap";
 import type { PickedPoint } from "@/components/evidence/PointCard";
 import { ITEM_GONE, NOT_OWNER, REMATCH_FAILED } from "@/lib/evidence";
 import { BACK_DEPTH_KEY } from "@/lib/history";
-import type { ProvenanceResponse } from "@/types";
+import { FOLLOWUP_FAILED } from "@/lib/timeEdit";
+import type { ProvenanceResponse, SetTakenAtResult } from "@/types";
 
 vi.mock("@/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/client")>();
@@ -20,6 +21,7 @@ vi.mock("@/api/client", async (importOriginal) => {
       mediaProvenanceFile: vi.fn(),
       runMatcher: vi.fn(),
       updateLocation: vi.fn(),
+      setTakenAt: vi.fn(),
     },
   };
 });
@@ -48,7 +50,7 @@ vi.mock("@/components/evidence/EvidenceMap", () => ({
 }));
 
 const mockApi = api as unknown as Record<
-  "mediaProvenance" | "mediaProvenanceFile" | "runMatcher" | "updateLocation",
+  "mediaProvenance" | "mediaProvenanceFile" | "runMatcher" | "updateLocation" | "setTakenAt",
   ReturnType<typeof vi.fn>
 >;
 
@@ -82,6 +84,8 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+const timeSaved: SetTakenAtResult = { taken_at: "2000-01-01T00:00:00Z", trip_id: "t9", followup_failed: false };
 
 // What each id answers; every other id gets a plain response.
 function serve(responses: Record<string, ResponseOverrides> = {}) {
@@ -142,6 +146,7 @@ beforeEach(() => {
   mockApi.mediaProvenanceFile.mockResolvedValue(makeReread());
   mockApi.runMatcher.mockResolvedValue(undefined);
   mockApi.updateLocation.mockResolvedValue(undefined);
+  mockApi.setTakenAt.mockResolvedValue(timeSaved);
 });
 
 // An open view would pop its history entry after the next test began.
@@ -718,6 +723,177 @@ describe("EvidenceView", () => {
       await loaded("a");
       await userEvent.click(screen.getByRole("button", { name: "Place by hand" }));
       expect(screen.getByText("11.500000, 22.500000")).toBeInTheDocument();
+    });
+  });
+
+  describe("the capture time", () => {
+    const editButton = () => screen.getByRole("button", { name: "Edit capture time" });
+    const timeDialog = () => screen.queryByRole("dialog", { name: "Edit capture time" });
+
+    // The editor starts from the stored time, which there is nothing to save in: a date moves it.
+    async function saveTime() {
+      fireEvent.change(within(timeDialog()!).getByLabelText("Date"), { target: { value: "2000-01-02" } });
+      await userEvent.click(within(timeDialog()!).getByRole("button", { name: "Save time" }));
+    }
+
+    it("opens the time editor on the item on screen, and saves through it", async () => {
+      const onTimeChanged = vi.fn();
+      renderView({ onTimeChanged });
+      await loaded("a");
+      await userEvent.click(editButton());
+      const dialog = timeDialog()!;
+      expect(within(dialog).getByText("a.jpg")).toBeInTheDocument();
+      expect(mockApi.mediaProvenance).toHaveBeenCalledTimes(1);
+
+      await saveTime();
+      expect(mockApi.setTakenAt).toHaveBeenCalledWith("a", expect.stringMatching(/^2000-01-02T/), expect.anything());
+      await waitFor(() => expect(onTimeChanged).toHaveBeenCalledWith("a", timeSaved));
+      // The provenance is read again: the time, its track point and the placement changed.
+      await waitFor(() => expect(mockApi.mediaProvenance).toHaveBeenCalledTimes(2));
+      expect(timeDialog()).not.toBeInTheDocument();
+    });
+
+    it("reports a save with the id of the item jumped to", async () => {
+      serve({ a: { placement: { now: linkedNow } } });
+      const onTimeChanged = vi.fn();
+      renderView({ onTimeChanged });
+      await loaded("a");
+      await userEvent.click(screen.getByRole("button", { name: "Your photo behind.jpg" }));
+      await loaded("behind");
+      await userEvent.click(editButton());
+      await saveTime();
+      await waitFor(() => expect(onTimeChanged).toHaveBeenCalledWith("behind", timeSaved));
+    });
+
+    // Every host shows this view over its own notices: the follow-up's failure is said here.
+    it("says when the save's follow-up failed, until another item is shown", async () => {
+      mockApi.setTakenAt.mockResolvedValue({ ...timeSaved, followup_failed: true });
+      const { update } = renderView();
+      await loaded("a");
+      await userEvent.click(editButton());
+      await saveTime();
+      const actions = screen.getByRole("region", { name: "Actions" });
+      expect(await within(actions).findByRole("status")).toHaveTextContent(FOLLOWUP_FAILED);
+      // Still there once the provenance is read again.
+      await waitFor(() => expect(mockApi.mediaProvenance).toHaveBeenCalledTimes(2));
+      expect(within(actions).getByRole("status")).toHaveTextContent(FOLLOWUP_FAILED);
+
+      update({ mediaId: "b" });
+      await loaded("b");
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    });
+
+    // The Checks view says why the trip gallery opened from here closed, which it no longer can.
+    it("says the parent's notice beside its own, for as long as the parent gives it", async () => {
+      mockApi.setTakenAt.mockResolvedValue({ ...timeSaved, followup_failed: true });
+      const { update } = renderView({ notice: "The gallery closed." });
+      await loaded("a");
+      const actions = screen.getByRole("region", { name: "Actions" });
+      expect(within(actions).getByRole("status")).toHaveTextContent("The gallery closed.");
+
+      await userEvent.click(editButton());
+      await saveTime();
+      await waitFor(() => expect(within(actions).getAllByRole("status")).toHaveLength(2));
+      expect(within(actions).getAllByRole("status").map((p) => p.textContent)).toEqual([
+        "The gallery closed.",
+        FOLLOWUP_FAILED,
+      ]);
+
+      update({ notice: null });
+      expect(within(actions).getByRole("status")).toHaveTextContent(FOLLOWUP_FAILED);
+    });
+
+    it("says nothing of a failed follow-up on an item stepped to while the save ran", async () => {
+      const save = deferred<SetTakenAtResult>();
+      mockApi.setTakenAt.mockReturnValue(save.promise);
+      const onTimeChanged = vi.fn();
+      const { update } = renderView({ onTimeChanged });
+      await loaded("a");
+      await userEvent.click(editButton());
+      await saveTime();
+      // Closed while saving, then on to the next item.
+      await userEvent.keyboard("{Escape}");
+      update({ mediaId: "b" });
+      await loaded("b");
+
+      await act(async () => save.resolve({ ...timeSaved, followup_failed: true }));
+      expect(onTimeChanged).toHaveBeenCalledWith("a", { ...timeSaved, followup_failed: true });
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    });
+
+    it("says nothing more after a save whose follow-up ran", async () => {
+      const onTimeChanged = vi.fn();
+      renderView({ onTimeChanged });
+      await loaded("a");
+      await userEvent.click(editButton());
+      await saveTime();
+      await waitFor(() => expect(onTimeChanged).toHaveBeenCalled());
+      await waitFor(() => expect(mockApi.mediaProvenance).toHaveBeenCalledTimes(2));
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    });
+
+    it("keeps the button shut between a step and its response", async () => {
+      const { update } = renderView();
+      await loaded("a");
+      expect(editButton()).toBeEnabled();
+
+      const next = deferred<ProvenanceResponse>();
+      mockApi.mediaProvenance.mockReturnValue(next.promise);
+      update({ mediaId: "b" });
+      expect(editButton()).toBeDisabled();
+      await userEvent.click(editButton());
+      expect(timeDialog()).not.toBeInTheDocument();
+
+      await act(async () => next.resolve(makeResponse("b")));
+      expect(editButton()).toBeEnabled();
+    });
+
+    it("keeps the view's keys off the dialog: the arrows do nothing, Escape closes only the dialog", async () => {
+      const { props } = renderView({ onPrev: vi.fn(), onNext: vi.fn() });
+      await loaded("a");
+      await userEvent.click(editButton());
+      expect(timeDialog()).toBeInTheDocument();
+
+      await userEvent.keyboard("{ArrowRight}{ArrowLeft}");
+      expect(props.onPrev).not.toHaveBeenCalled();
+      expect(props.onNext).not.toHaveBeenCalled();
+
+      await userEvent.keyboard("{Escape}");
+      expect(timeDialog()).not.toBeInTheDocument();
+      expect(props.onClose).not.toHaveBeenCalled();
+
+      await userEvent.keyboard("{Escape}");
+      expect(props.onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("closes only the dialog on the back gesture", async () => {
+      const before = depth();
+      const { props } = renderView();
+      await loaded("a");
+      await settle();
+      await userEvent.click(editButton());
+      await settle();
+      expect(depth()).toBe(before + 2);
+
+      await goBack();
+      expect(timeDialog()).not.toBeInTheDocument();
+      expect(props.onClose).not.toHaveBeenCalled();
+      expect(depth()).toBe(before + 1);
+    });
+
+    it("keeps the view as it was when the save fails", async () => {
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockApi.setTakenAt.mockRejectedValue(new ApiError("PATCH failed: 404", 404));
+      const onTimeChanged = vi.fn();
+      renderView({ onTimeChanged });
+      await loaded("a");
+      await userEvent.click(editButton());
+      await saveTime();
+
+      expect(await within(timeDialog()!).findByText("This item is no longer available.")).toBeInTheDocument();
+      expect(onTimeChanged).not.toHaveBeenCalled();
+      expect(mockApi.mediaProvenance).toHaveBeenCalledTimes(1);
+      consoleError.mockRestore();
     });
   });
 

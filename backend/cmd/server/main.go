@@ -306,8 +306,8 @@ func runRetime(ctx context.Context, stdout io.Writer, retime retimeFunc, users [
 	res, err := retime(ctx, userID, func(c handlers.RetimeChange) {
 		fmt.Fprintln(stdout, formatRetimeChange(c))
 	})
-	fmt.Fprintf(stdout, "checked=%d retimed=%d unchanged=%d not_exif=%d mismatched=%d failed=%d\n",
-		res.Checked, res.Retimed, res.Unchanged, res.NotExif, res.Mismatch, res.Failed)
+	fmt.Fprintf(stdout, "checked=%d retimed=%d unchanged=%d not_exif=%d edited=%d mismatched=%d failed=%d\n",
+		res.Checked, res.Retimed, res.Unchanged, res.NotExif, res.Edited, res.Mismatch, res.Failed)
 	if !apply {
 		fmt.Fprintln(stdout, "dry run: nothing written; re-run with --apply")
 	}
@@ -511,6 +511,10 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 			r.Post("/media/known-hashes", h.media.KnownHashes)
 			r.Get("/media/{id}/url", h.media.GetURL)
 			r.Patch("/media/{id}/location", h.media.UpdateLocation)
+			// A capture time changed by hand, like a location set by hand, is the owner's own
+			// correction of their item and can be changed back, so tokens may use these.
+			r.Patch("/media/{id}/taken-at", h.media.SetTakenAt)
+			r.Post("/media/shift-time", h.media.ShiftTimes)
 			r.Patch("/media/{id}/view-settings", h.media.UpdateViewSettings)
 			r.Get("/media/{id}/keyframes", h.media.GetKeyframes)
 			r.Put("/media/{id}/keyframes", h.media.ReplaceKeyframes)

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { formatInstant } from "@/lib/time";
 import {
   bracketKindChip,
   bracketPoints,
@@ -8,6 +9,7 @@ import {
   CLOCK_RULE_KEEPS_TIME,
   confidenceNote,
   contextPointKind,
+  EDIT_KEEPS_TIME,
   formatConfidence,
   formatDistance,
   formatTimeNote,
@@ -30,6 +32,9 @@ import {
   showsAloneEstimate,
   STANDING_LINE,
   stateBadge,
+  timeEditEntered,
+  timeEditInstants,
+  timeEditSentence,
   timeOriginChip,
   VIDEO_TIME_MAY_BE_END,
   warningSentence,
@@ -47,6 +52,7 @@ import type {
   PlacementState,
   ProvenanceResponse,
   ServerCameraZone,
+  TimeEdit,
 } from "@/types";
 
 function bracket(overrides: Partial<Bracket> = {}): Bracket {
@@ -638,6 +644,19 @@ describe("zoneChip", () => {
     expect(chip?.warning).toBe("This time was read as UTC, because CAMERA_TIMEZONE is unset and the server's zone is UTC.");
   });
 
+  // The owner changed the stored time since: the warning is about the file's time only.
+  it("says the file's time was read as UTC once the owner changed the stored time", () => {
+    const chip = zoneChip(
+      evidence({ zone: "camera", camera_zone: "server zone (unset)", camera_zone_utc_fallback: true }),
+      null,
+      serverZone,
+      true
+    );
+    expect(chip?.warning).toBe(
+      "The file's time was read as UTC, because CAMERA_TIMEZONE is unset and the server's zone is UTC."
+    );
+  });
+
   it.each(["gps", "offset"] as const)("gives no UTC warning when the %s rule set the offset", (zone) => {
     expect(zoneChip(evidence({ zone, camera_zone_utc_fallback: true }), null, serverZone)?.warning).toBeNull();
   });
@@ -838,6 +857,17 @@ describe("cameraClock", () => {
     expect(cameraClock(input, null)).toEqual({ text, word });
   });
 
+  // The stored time is the owner's then, not the file's modified date.
+  it("never calls the stored time the file's modified date once the owner changed it", () => {
+    const mtime = evidence({ src: "mtime", zone: null, offset_used_min: null, wall: null });
+    expect(cameraClock(mtime, null, true)).toEqual({ text: "No wall clock in the file.", word: null });
+    // A wall clock in the file is still the file's.
+    expect(cameraClock(evidence({ zone: "camera", offset_used_min: 0 }), null, true)).toEqual({
+      text: "2000:01:01 12:00:00 +00:00",
+      word: "assumed",
+    });
+  });
+
   it.each<[string, FileReread, string, string | null]>([
     ["the GPS clock", reread(rule({ zone_rule: "gps" })), "2000:01:01 12:00:00 +01:00", "measured"],
     ["the offset tag", reread(rule({ zone_rule: "offset", offset_min: 120 })), "2000:01:01 12:00:00 +02:00", "declared"],
@@ -972,15 +1002,66 @@ describe("rereadSentence", () => {
   it("never calls agreement correct", () => {
     expect(rereadSentence({ class: "same", delta_s: 0 }, "photo", null)).not.toMatch(/correct/i);
   });
+
+  it.each([
+    ["same", 0, "Today's rules agree with the stored time."],
+    ["other", -125, "Today's rules differ by 2 min 5 s."],
+  ] as const)("adds that a time set by hand need not match the file (%s)", (cls, delta_s, finding) => {
+    expect(rereadSentence({ class: cls, delta_s }, "photo", null, timeEdit())).toBe(
+      `${finding} You set the stored time by hand, so it need not match the file.`
+    );
+    expect(rereadSentence({ class: cls, delta_s }, "photo", null, timeEdit({ kind: "shift" }))).toBe(
+      `${finding} You shifted the stored time by hand, so it need not match the file.`
+    );
+  });
+
+  // Not an older rule or a changed setting: the owner's own change, said once.
+  it("puts a whole offset down to the owner's change", () => {
+    for (const kind of ["set", "shift"] as const) {
+      expect(rereadSentence({ class: "whole_offset", delta_s: 3600 }, "photo", null, timeEdit({ kind }))).toBe(
+        "Differs by exactly 1 h. Your change explains the difference."
+      );
+    }
+  });
+
+  it.each([
+    ["a modified date", evidence({ src: "mtime", zone: null, offset_used_min: null, wall: null })],
+    ["no time at all", evidence({ src: "none", zone: null, offset_used_min: null, wall: null })],
+    ["no evidence", null],
+  ])("says a file without a time of its own was dated by hand (%s)", (_name, ev) => {
+    expect(rereadSentence({ class: "no_file_time", delta_s: null }, "photo", ev, timeEdit())).toBe(
+      `${photoMessage} The stored time is the one you set by hand.`
+    );
+    expect(rereadSentence({ class: "no_file_time", delta_s: null }, "video", ev, timeEdit({ kind: "shift" }))).toBe(
+      `${videoMessage} The stored time is the one you shifted by hand.`
+    );
+    expect(rereadSentence({ class: "no_file_time", delta_s: null }, "photo", ev, timeEdit())).not.toContain(mtimeNote);
+  });
+
+  it.each(["stored_has_no_time", "unverifiable_transcoded"] as const)(
+    "adds nothing about an edit when the file's time was not compared (%s)",
+    (cls) => {
+      expect(rereadSentence({ class: cls, delta_s: null }, "video", null, timeEdit())).toBe(
+        rereadSentence({ class: cls, delta_s: null }, "video", null)
+      );
+    }
+  );
 });
 
 describe("rereadClockRuleNote", () => {
   const byRule = rule({ zone_rule: "clock_rule", offset_min: 120, zone_name: null, clock_rule: clockRule() });
   const note =
-    "Today's reading uses your rule for Panasonic DC-TZ200 (clock showed UTC+02:00). A stored time moves only when an administrator runs server retime.";
+    "Today's reading uses your rule for Panasonic DC-TZ200 (clock showed UTC+02:00). A stored time moves only when you edit or shift it, or an administrator runs server retime.";
 
   it.each(["whole_offset", "other"] as const)("names today's rule when the reading differs (%s)", (cls) => {
     expect(rereadClockRuleNote({ ...reread(byRule), class: cls })).toBe(note);
+  });
+
+  // server retime never moves a time changed by hand; the card says so once, beside the change.
+  it("names only the rule for a time the owner changed", () => {
+    expect(rereadClockRuleNote({ ...reread(byRule), class: "whole_offset" }, timeEdit())).toBe(
+      "Today's reading uses your rule for Panasonic DC-TZ200 (clock showed UTC+02:00)."
+    );
   });
 
   it.each(["same", "no_file_time", "stored_has_no_time", "unverifiable_transcoded"] as const)(
@@ -1115,5 +1196,110 @@ describe("each format on its own", () => {
     ["2000-01-01T00:01:00Z", null, null],
   ])("pointSide(%s, %s)", (t, takenAt, want) => {
     expect(pointSide(t, takenAt)).toBe(want);
+  });
+});
+
+function timeEdit(overrides: Partial<TimeEdit> = {}): TimeEdit {
+  return {
+    v: 1,
+    kind: "set",
+    at: "2026-11-15T19:00:00Z",
+    from: "2019-03-13T18:28:15Z",
+    original: "2019-03-13T18:28:15Z",
+    delta_s: -3600,
+    wall: "2019-03-13T18:28:15",
+    zone: "Europe/Warsaw",
+    offset_min: 60,
+    ...overrides,
+  };
+}
+
+describe("a time the owner changed", () => {
+  // Every instant names the zone it is shown in, so no expectation depends on the runner's.
+  const at = formatInstant("2026-11-15T19:00:00Z", "Asia/Tokyo");
+
+  describe("timeEditSentence", () => {
+    it.each<[string, Partial<TimeEdit>, string]>([
+      ["a time set by hand, and how far it moved", {}, `You set this time by hand on ${at}. It moved 1 h earlier.`],
+      ["a later one", { delta_s: 5400 }, `You set this time by hand on ${at}. It moved 1 h 30 min later.`],
+      [
+        "a time given to an item that had none",
+        { from: null, original: null, delta_s: null },
+        `You set this time by hand on ${at}. The item had no capture time before.`,
+      ],
+      ["a set without a recorded difference", { delta_s: null }, `You set this time by hand on ${at}.`],
+      // A stored fraction of a second, set to its own whole second.
+      ["a difference that rounds to no second", { delta_s: -0.123 }, `You set this time by hand on ${at}.`],
+      ["a difference under a second", { delta_s: -0.64 }, `You set this time by hand on ${at}. It moved under 1 s earlier.`],
+      [
+        "a shift that rounds to no second",
+        { kind: "shift", delta_s: 0.4, wall: null, zone: null, offset_min: null },
+        `You shifted this time on ${at}.`,
+      ],
+      [
+        "a shift, by every unit",
+        { kind: "shift", delta_s: 93784, wall: null, zone: null, offset_min: null },
+        `You shifted this time 1 d 2 h 3 min 4 s later on ${at}.`,
+      ],
+      [
+        "a shift without a recorded difference",
+        { kind: "shift", delta_s: null, wall: null, zone: null, offset_min: null },
+        `You shifted this time on ${at}.`,
+      ],
+      [
+        "a later change to a time an earlier one gave",
+        { kind: "shift", original: null, delta_s: -7200, wall: null, zone: null, offset_min: null },
+        `You shifted this time 2 h earlier on ${at}. It had no capture time before your first change.`,
+      ],
+    ])("words %s", (_name, overrides, want) => {
+      expect(timeEditSentence(timeEdit(overrides), "Asia/Tokyo")).toBe(want);
+    });
+
+    it("names the zone the change's own time is shown in", () => {
+      expect(timeEditSentence(timeEdit(), "UTC")).toContain(formatInstant("2026-11-15T19:00:00Z", "UTC"));
+    });
+  });
+
+  describe("timeEditEntered", () => {
+    it.each<[string, Partial<TimeEdit>, string | null]>([
+      ["a zone and its offset on that date", {}, "Entered as 2019-03-13 18:28:15 in Europe/Warsaw, UTC+01:00 on that date."],
+      ["a zone without an offset", { offset_min: null }, "Entered as 2019-03-13 18:28:15 in Europe/Warsaw."],
+      ["a fixed offset", { zone: null, offset_min: -210 }, "Entered as 2019-03-13 18:28:15 at UTC-03:30."],
+      ["neither", { zone: null, offset_min: null }, "Entered as 2019-03-13 18:28:15."],
+      ["a shift", { kind: "shift", wall: null, zone: null, offset_min: null }, null],
+      ["a set without its wall clock", { wall: null }, null],
+    ])("words %s", (_name, overrides, want) => {
+      expect(timeEditEntered(timeEdit(overrides))).toBe(want);
+    });
+  });
+
+  describe("timeEditInstants", () => {
+    it("lists the time before this change, and the first stored time only when it differs", () => {
+      expect(timeEditInstants(timeEdit())).toEqual([
+        ["Before your change", "2019-03-13T18:28:15Z"],
+        ["Before your first change", null],
+      ]);
+      expect(timeEditInstants(timeEdit({ from: "2019-03-13T17:28:15Z" }))).toEqual([
+        ["Before your change", "2019-03-13T17:28:15Z"],
+        ["Before your first change", "2019-03-13T18:28:15Z"],
+      ]);
+    });
+
+    it("compares instants, not their spelling", () => {
+      expect(timeEditInstants(timeEdit({ from: "2019-03-13T18:28:15.000Z" }))[1]).toEqual(["Before your first change", null]);
+    });
+
+    it("has nothing before a first time, and nothing without a change", () => {
+      expect(timeEditInstants(timeEdit({ from: null, original: null }))).toEqual([
+        ["Before your change", null],
+        ["Before your first change", null],
+      ]);
+      expect(timeEditInstants(null)).toEqual([]);
+      expect(timeEditInstants(undefined)).toEqual([]);
+    });
+  });
+
+  it("says that server retime keeps the time", () => {
+    expect(EDIT_KEEPS_TIME).toBe("A time you changed by hand stays when an administrator runs server retime.");
   });
 });

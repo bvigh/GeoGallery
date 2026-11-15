@@ -335,6 +335,56 @@ func TestProvenance_ItemFieldsAndEvidence(t *testing.T) {
 	})
 }
 
+// The owner's own change of taken_at reaches the evidence view as stored, beside the capture evidence
+// it leaves alone. An item never changed has none.
+func TestProvenance_TimeEdit(t *testing.T) {
+	f := newProvenanceFixture(t)
+	ctx := context.Background()
+	owner := createUser(t, f.pool, "owner")
+	const evidence = `{"v":1,"by":"ingest","src":"exif_original","camera_zone":"UTC"}`
+	edited := f.item(t, owner, provItem{filename: "edited.jpg", takenAt: provAt, evidence: evidence})
+	untouched := f.item(t, owner, provItem{filename: "untouched.jpg", takenAt: provAt, evidence: evidence})
+
+	rec := do(t, f.router, owner, http.MethodPatch, "/api/media/"+edited+"/taken-at",
+		`{"wall":"2001-02-03T14:30:00","zone":"Europe/Warsaw"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var stored string
+	require.NoError(t, f.pool.QueryRow(ctx, `SELECT time_edit::text FROM media WHERE id = $1`, edited).Scan(&stored))
+
+	got := f.get(t, owner, edited)
+	assert.JSONEq(t, stored, string(got.Time.Edit), "time_edit as the route stored it")
+	var edit timeEdit
+	require.NoError(t, json.Unmarshal(got.Time.Edit, &edit))
+	assert.Equal(t, timeEditSet, edit.Kind)
+	assert.Equal(t, ptr(provAt), edit.From)
+	assert.Equal(t, ptr("Europe/Warsaw"), edit.Zone)
+	require.NotNil(t, got.Item.TakenAt)
+	assert.True(t, got.Item.TakenAt.Equal(mustParseTime("2001-02-03T13:30:00Z")), "the item has the time set")
+	assert.Equal(t, "ingest", got.Time.Recorded)
+	assert.JSONEq(t, evidence, string(got.Time.Evidence), "the evidence still says how the file was read")
+
+	t.Run("a stored value is passed on verbatim", func(t *testing.T) {
+		const value = `{"v":1,"kind":"shift","at":"2026-11-15T19:00:00Z","from":"2001-02-03T12:00:00Z",` +
+			`"original":"2001-02-03T11:00:00Z","delta_s":3600,"wall":null,"zone":null,"offset_min":null,"later":"kept"}`
+		_, err := f.pool.Exec(ctx, `UPDATE media SET time_edit = $2::jsonb WHERE id = $1`, edited, value)
+		require.NoError(t, err)
+
+		assert.JSONEq(t, value, string(f.get(t, owner, edited).Time.Edit))
+	})
+
+	t.Run("an item never changed has none", func(t *testing.T) {
+		rec := do(t, f.router, owner, http.MethodGet, "/api/media/"+untouched+"/provenance", "")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var raw struct {
+			Time map[string]json.RawMessage `json:"time"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+		require.Contains(t, raw.Time, "edit", "the key is always there")
+		assert.JSONEq(t, "null", string(raw.Time["edit"]))
+		assert.JSONEq(t, evidence, string(raw.Time["evidence"]))
+	})
+}
+
 // The item's trip lets the Checks view open it among its neighbours. It is the owner's own trip,
 // and an item in no trip has none.
 func TestProvenance_ItemTrip(t *testing.T) {
@@ -1244,6 +1294,55 @@ func TestCaptureEvidence_NeverInSharedPayloads(t *testing.T) {
 			})
 		}
 	}
+
+	t.Run("positive control: the owner's provenance has it", func(t *testing.T) {
+		rec := do(t, f.router, f.userA, http.MethodGet, "/api/media/"+f.mediaA+"/provenance", "")
+
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), marker)
+	})
+}
+
+// time_edit, like capture_evidence, reaches only its owner's provenance: never the media list or the
+// Game, and an album member's provenance request for the shared item is 404.
+func TestTimeEdit_OnlyInTheOwnersProvenance(t *testing.T) {
+	f := newSharingFixture(t)
+	ctx := context.Background()
+	const marker = "TIME-EDIT-MARKER"
+	tag, err := f.pool.Exec(ctx, `
+		UPDATE media SET time_edit = jsonb_build_object('v', 1, 'kind', 'set', 'zone', $1::text)`, marker)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, tag.RowsAffected())
+
+	guess := `{"media_id":"` + f.mediaA + `","guess_lat":47.5,"guess_lng":19.0,"guess_date":"2024-05-02","max_dist_km":100}`
+	requests := []struct {
+		name, method, path, body string
+	}{
+		{"media list", http.MethodGet, "/api/media", ""},
+		{"media list, shared only", http.MethodGet, "/api/media?owner=shared", ""},
+		{"game round", http.MethodGet, "/api/game/round", ""},
+		{"game guess", http.MethodPost, "/api/game/guess", guess},
+	}
+	for _, user := range []struct{ name, id string }{{"owner", f.userA}, {"album member", f.userB}} {
+		for _, tt := range requests {
+			t.Run(user.name+": "+tt.name, func(t *testing.T) {
+				rec := do(t, f.router, user.id, tt.method, tt.path, tt.body)
+
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), "time_edit")
+				assert.NotContains(t, rec.Body.String(), marker)
+			})
+		}
+	}
+
+	t.Run("an album member's provenance is 404", func(t *testing.T) {
+		require.Equal(t, http.StatusOK, do(t, f.router, f.userB, http.MethodGet, "/api/media/"+f.mediaA+"/url", "").Code,
+			"B can read the shared item, so the 404 comes from the owner check")
+
+		rec := do(t, f.router, f.userB, http.MethodGet, "/api/media/"+f.mediaA+"/provenance", "")
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), marker)
+	})
 
 	t.Run("positive control: the owner's provenance has it", func(t *testing.T) {
 		rec := do(t, f.router, f.userA, http.MethodGet, "/api/media/"+f.mediaA+"/provenance", "")

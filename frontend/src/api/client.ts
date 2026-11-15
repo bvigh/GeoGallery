@@ -16,6 +16,9 @@ import type {
   MediaItem,
   OrientationKeyframe,
   ProvenanceResponse,
+  SetTakenAtResult,
+  ShiftTimesResult,
+  TakenAtZone,
   UploadResponse,
   UserSettings,
   UserSettingsPatch,
@@ -295,22 +298,32 @@ function listCameraClockRules(): Promise<CameraClockRule[]> {
   return getList<CameraClockRule>("/camera-clock-rules");
 }
 
-// A refused rule says why in a short plain-text body: the dialog shows a 400's as it is, and tells
-// the two 409s (an overlap, the rule cap) apart by theirs.
-async function sendClockRule(method: "POST" | "PUT", path: string, input: CameraClockRuleInput): Promise<CameraClockRule> {
-  const res = await request(path, jsonInit(method, input));
+// The plain-text body of a refusal whose status is one of `statuses`, for a route that writes its
+// reasons for the user; null for any other status, or an empty or unreadable body.
+async function refusalReason(res: Response, statuses: number[]): Promise<string | null> {
+  if (!statuses.includes(res.status)) return null;
+  try {
+    return (await res.text()).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// A JSON request to a route that says why it refused a body: a 400's reason (and those of the
+// other `reasonStatuses`) goes into ApiError.reason.
+async function sendWithReason<T>(method: string, path: string, body: unknown, reasonStatuses = [400]): Promise<T> {
+  const res = await request(path, jsonInit(method, body));
   if (!res.ok) {
-    let reason: string | null = null;
-    if (res.status === 400 || res.status === 409) {
-      try {
-        reason = (await res.text()).trim() || null;
-      } catch {
-        reason = null;
-      }
-    }
+    const reason = await refusalReason(res, reasonStatuses);
     throw new ApiError(`${method} ${path} failed: ${res.status}`, res.status, reason);
   }
   return res.json();
+}
+
+// A refused rule says why in a short plain-text body: the dialog shows a 400's as it is, and tells
+// the two 409s (an overlap, the rule cap) apart by theirs.
+function sendClockRule(method: "POST" | "PUT", path: string, input: CameraClockRuleInput): Promise<CameraClockRule> {
+  return sendWithReason<CameraClockRule>(method, path, input, [400, 409]);
 }
 
 function createCameraClockRule(input: CameraClockRuleInput): Promise<CameraClockRule> {
@@ -336,20 +349,25 @@ function getSettings(): Promise<UserSettings> {
 }
 
 // A refused setting says why in a short plain-text body (an unknown zone), kept in ApiError.reason.
-async function updateSettings(change: UserSettingsPatch): Promise<UserSettings> {
-  const res = await request("/me/settings", jsonInit("PATCH", change));
-  if (!res.ok) {
-    let reason: string | null = null;
-    if (res.status === 400) {
-      try {
-        reason = (await res.text()).trim() || null;
-      } catch {
-        reason = null;
-      }
-    }
-    throw new ApiError(`PATCH /me/settings failed: ${res.status}`, res.status, reason);
-  }
-  return res.json();
+function updateSettings(change: UserSettingsPatch): Promise<UserSettings> {
+  return sendWithReason<UserSettings>("PATCH", "/me/settings", change);
+}
+
+// Sets an own item's capture time to a wall clock ("YYYY-MM-DDTHH:MM:SS") read in an IANA zone or
+// at a fixed UTC offset. A refused body (a wall clock the zone skipped, an unknown zone) says why
+// in ApiError.reason; a foreign, shared or deleted item is a 404.
+function setTakenAt(id: string, wall: string, zone: TakenAtZone): Promise<SetTakenAtResult> {
+  const body = "zone" in zone ? { wall, zone: zone.zone } : { wall, utc_offset_min: zone.utcOffsetMin };
+  return sendWithReason<SetTakenAtResult>("PATCH", `/media/${id}/taken-at`, body);
+}
+
+// Moves the capture times of own items (at most 5000) by the same number of seconds, later when
+// positive. One item that is not the caller's own makes the whole request a 404, and nothing moves.
+function shiftTimes(mediaIds: string[], deltaSeconds: number): Promise<ShiftTimesResult> {
+  return sendWithReason<ShiftTimesResult>("POST", "/media/shift-time", {
+    media_ids: mediaIds,
+    delta_seconds: deltaSeconds,
+  });
 }
 
 // Re-matches the caller's whole library.
@@ -423,4 +441,6 @@ export const api = {
   listCameras,
   getSettings,
   updateSettings,
+  setTakenAt,
+  shiftTimes,
 };

@@ -11,7 +11,8 @@ import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
 import { emptyFilters } from "@/lib/filters";
 import { browserTimeZone, formatInstant } from "@/lib/time";
 import { BACK_DEPTH_KEY } from "@/lib/history";
-import type { Album, CurrentUser, MediaItem, Trip } from "../types";
+import { FOLLOWUP_FAILED } from "@/lib/timeEdit";
+import type { Album, CurrentUser, MediaItem, SetTakenAtResult, Trip } from "../types";
 
 vi.mock("../api/client", () => ({
   api: {
@@ -25,6 +26,8 @@ vi.mock("../api/client", () => ({
     addToAlbum: vi.fn(),
     removeFromAlbum: vi.fn(),
     createAlbum: vi.fn(),
+    // The capture time editor.
+    setTakenAt: vi.fn(),
   },
 }));
 
@@ -112,7 +115,8 @@ const mockApi = api as unknown as Record<
   | "mediaAlbums"
   | "addToAlbum"
   | "removeFromAlbum"
-  | "createAlbum",
+  | "createAlbum"
+  | "setTakenAt",
   ReturnType<typeof vi.fn>
 >;
 
@@ -378,6 +382,7 @@ describe("MapPage", () => {
 
     expect(screen.getByRole("button", { name: "Delete media" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Edit GPS location" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit capture time" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Edit default view" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Albums" })).toBeInTheDocument();
     expect(screen.queryByText(/Shared by/)).not.toBeInTheDocument();
@@ -392,9 +397,294 @@ describe("MapPage", () => {
     expect(screen.getByText(label)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete media" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Edit GPS location" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit capture time" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Edit default view" })).not.toBeInTheDocument();
     // The album menu stays, read-only.
     expect(screen.getByRole("button", { name: "Albums" })).toBeInTheDocument();
+  });
+
+  describe("capture time", () => {
+    const dated = { ...makeItem("own"), taken_at: "2024-07-02T10:00:00Z" };
+    const s1Estimated = () => ({ ...makeItem("s1"), gps_source: "interpolated" as const, gps_confidence: 0.6 });
+    const pExif = () => ({ ...dated, id: "p", filename: "photo-p.jpg", gps_source: "exif" as const, gps_confidence: 1 });
+    const timeDialog = () => screen.queryByRole("dialog", { name: "Edit capture time" });
+    const sheet = () => screen.getByRole("region", { name: "Selected media" });
+    const saved = (overrides: Partial<SetTakenAtResult> = {}): SetTakenAtResult => ({
+      taken_at: "2024-07-02T08:00:00Z",
+      trip_id: "t9",
+      followup_failed: false,
+      ...overrides,
+    });
+
+    // The editor starts from the stored time, which there is nothing to save in: a time moves it.
+    async function saveTime() {
+      fireEvent.change(within(timeDialog()!).getByLabelText("Time"), { target: { value: "03:04:05" } });
+      await userEvent.click(within(timeDialog()!).getByRole("button", { name: "Save time" }));
+    }
+
+    it("saves through the card's editor, shows the new time and reloads the media and the trips", async () => {
+      mockApi.setTakenAt.mockResolvedValue(saved());
+      await selectItem(dated);
+      expect(mediaCalls()).toHaveLength(1);
+      expect(mockApi.get).toHaveBeenCalledTimes(1);
+
+      await userEvent.click(screen.getByRole("button", { name: "Edit capture time" }));
+      expect(within(timeDialog()!).getByText("photo-own.jpg")).toBeInTheDocument();
+      serveMedia([{ ...dated, taken_at: "2024-07-02T08:00:00Z" }]);
+      await saveTime();
+
+      expect(mockApi.setTakenAt).toHaveBeenCalledWith("own", expect.stringMatching(/^2024-07-02T03:04:05$/), expect.anything());
+      expect(await within(sheet()).findByText(formatInstant("2024-07-02T08:00:00Z", browserTimeZone()))).toBeInTheDocument();
+      expect(timeDialog()).not.toBeInTheDocument();
+      await waitFor(() => expect(mediaCalls()).toHaveLength(2));
+      // A time change regroups trips, so the filter panel's list is loaded again.
+      expect(mockApi.get).toHaveBeenLastCalledWith("/trips");
+      expect(mockApi.get).toHaveBeenCalledTimes(2);
+      expect(within(sheet()).queryByRole("status")).not.toBeInTheDocument();
+    });
+
+    it("says on the card when the follow-up failed", async () => {
+      mockApi.setTakenAt.mockResolvedValue(saved({ followup_failed: true }));
+      await selectItem(dated);
+      await userEvent.click(screen.getByRole("button", { name: "Edit capture time" }));
+      await saveTime();
+      expect(await within(sheet()).findByRole("status")).toHaveTextContent(FOLLOWUP_FAILED);
+    });
+
+    // Trip detection gave the trip nobody edited a new ID: a filter on the old one would ask for a
+    // trip that no longer exists, and the reload would empty the map.
+    it("moves a ticked trip to the item's new one, and drops ticks of trips gone", async () => {
+      const inTrip = { ...dated, trip_id: "t1" };
+      serveMedia([inTrip]);
+      renderPage();
+      await waitFor(() => expect(panel.props).not.toBeNull());
+      act(() => panel.props!.onChange({ ...emptyFilters, tripIds: ["t1", "t-gone", "unassigned"] }));
+      await waitFor(() => expect(mediaCalls()).toHaveLength(2));
+      await userEvent.click(await screen.findByRole("button", { name: "select own" }));
+
+      mockApi.setTakenAt.mockResolvedValue(saved({ trip_id: "t9" }));
+      const regrouped: Trip = { ...sampleTrips[0], id: "t9" };
+      mockApi.get.mockResolvedValue([regrouped]);
+      serveMedia([{ ...inTrip, trip_id: "t9", taken_at: "2024-07-02T08:00:00Z" }]);
+      await userEvent.click(screen.getByRole("button", { name: "Edit capture time" }));
+      await saveTime();
+
+      await waitFor(() => expect(panel.props!.filters.tripIds).toEqual(["t9", "unassigned"]));
+      expect(panel.props!.trips).toEqual([regrouped]);
+      await waitFor(() => expect(mediaCalls()[mediaCalls().length - 1][0]).toEqual({ trip_id: ["t9", "unassigned"], ...LOCATED }));
+      expect(await screen.findByRole("button", { name: "select own" })).toBeInTheDocument();
+      expect(markerCount()).toBe("1");
+    });
+
+    // Trip detection re-IDed every auto trip, not just the edited item's: another ticked one comes
+    // back with its name and dates, and stays ticked.
+    it("keeps every other ticked auto trip ticked, on its new ID", async () => {
+      const auto = (id: string, start: string, end: string): Trip => ({
+        id,
+        name: `Trip ${start}`,
+        start_date: start,
+        end_date: end,
+        media_count: 3,
+        cover_key: null,
+        user_edited: false,
+      });
+      const inTrip = { ...dated, trip_id: "t1" };
+      const neighbour = { ...makeItem("other"), taken_at: "2024-08-10T09:00:00Z", trip_id: "t2" };
+      mockApi.get.mockResolvedValue([auto("t1", "2024-07-01", "2024-07-03"), auto("t2", "2024-08-10", "2024-08-12")]);
+      serveMedia([inTrip, neighbour]);
+      renderPage();
+      await waitFor(() => expect(panel.props?.trips).toHaveLength(2));
+      act(() => panel.props!.onChange({ ...emptyFilters, tripIds: ["t1", "t2"] }));
+      await waitFor(() => expect(mediaCalls()).toHaveLength(2));
+      await userEvent.click(await screen.findByRole("button", { name: "select own" }));
+
+      mockApi.setTakenAt.mockResolvedValue(saved({ trip_id: "t9" }));
+      const regrouped = [auto("t9", "2024-07-01", "2024-07-03"), auto("t8", "2024-08-10", "2024-08-12")];
+      mockApi.get.mockResolvedValue(regrouped);
+      serveMedia([{ ...inTrip, trip_id: "t9", taken_at: "2024-07-02T08:00:00Z" }, { ...neighbour, trip_id: "t8" }]);
+      await userEvent.click(screen.getByRole("button", { name: "Edit capture time" }));
+      await saveTime();
+
+      await waitFor(() => expect(panel.props!.filters.tripIds).toEqual(["t9", "t8"]));
+      expect(panel.props!.trips).toEqual(regrouped);
+      await waitFor(() => expect(mediaCalls()[mediaCalls().length - 1][0]).toEqual({ trip_id: ["t9", "t8"], ...LOCATED }));
+      expect(await screen.findByRole("button", { name: "select other" })).toBeInTheDocument();
+      expect(markerCount()).toBe("2");
+    });
+
+    it("leaves the filters as they are when no ticked trip is gone", async () => {
+      serveMedia([dated]);
+      renderPage();
+      await waitFor(() => expect(panel.props).not.toBeNull());
+      const filters = { ...emptyFilters, tripIds: ["t1"] };
+      act(() => panel.props!.onChange(filters));
+      await userEvent.click(await screen.findByRole("button", { name: "select own" }));
+
+      mockApi.setTakenAt.mockResolvedValue(saved());
+      await userEvent.click(screen.getByRole("button", { name: "Edit capture time" }));
+      await saveTime();
+      await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
+      await act(async () => {});
+      expect(panel.props!.filters).toBe(filters);
+    });
+
+    // The change cleared the estimate; the reload, which lists located items only, leaves the
+    // item out when the matcher found nothing at the new time.
+    it("drops an estimated location the change cleared", async () => {
+      const estimated = { ...dated, gps_source: "interpolated" as const, gps_confidence: 0.5 };
+      mockApi.setTakenAt.mockResolvedValue(saved());
+      await selectItem(estimated);
+      expect(within(sheet()).getByText(/GPS: interpolated/)).toBeInTheDocument();
+      expect(within(sheet()).getByRole("link", { name: /Open in Street View/ })).toBeInTheDocument();
+
+      const reload = serveLater();
+      await userEvent.click(screen.getByRole("button", { name: "Edit capture time" }));
+      await saveTime();
+      // At once, before the reload answers.
+      expect(within(sheet()).queryByText(/GPS:/)).not.toBeInTheDocument();
+      expect(within(sheet()).queryByRole("link", { name: /Open in Street View/ })).not.toBeInTheDocument();
+
+      await act(async () => reload([[]]));
+      expect(within(sheet()).queryByText(/GPS:/)).not.toBeInTheDocument();
+      expect(within(sheet()).getByText(formatInstant("2024-07-02T08:00:00Z", browserTimeZone()))).toBeInTheDocument();
+    });
+
+    it("shows an estimated location again when the reload has the item placed", async () => {
+      const estimated = { ...dated, gps_source: "interpolated" as const, gps_confidence: 0.5 };
+      mockApi.setTakenAt.mockResolvedValue(saved());
+      await selectItem(estimated);
+      const reload = serveLater();
+      await userEvent.click(screen.getByRole("button", { name: "Edit capture time" }));
+      await saveTime();
+      expect(within(sheet()).queryByText(/GPS:/)).not.toBeInTheDocument();
+
+      await act(async () =>
+        reload([[{ ...estimated, taken_at: "2024-07-02T08:00:00Z", lat: 52.1, lng: 0.2, gps_confidence: 0.7 }]])
+      );
+      expect(within(sheet()).getByText(/GPS: interpolated \(70%\)/)).toBeInTheDocument();
+      expect(within(sheet()).getByRole("link", { name: /Open in Street View/ })).toHaveAttribute(
+        "href",
+        expect.stringContaining("viewpoint=52.1,0.2")
+      );
+    });
+
+    it("keeps the cluster arrows off the editor", async () => {
+      serveMedia([dated, makeItem("b"), makeItem("c")]);
+      renderPage(true);
+      await userEvent.click(await screen.findByRole("button", { name: "select cluster" }));
+      await userEvent.click(screen.getByRole("button", { name: "Edit capture time" }));
+      expect(timeDialog()).toBeInTheDocument();
+
+      fireEvent.keyDown(document.body, { key: "ArrowRight" });
+      expect(screen.getByText("1 / 3")).toBeInTheDocument();
+      expect(within(timeDialog()!).getByText("photo-own.jpg")).toBeInTheDocument();
+
+      await userEvent.keyboard("{Escape}");
+      expect(timeDialog()).not.toBeInTheDocument();
+      await userEvent.keyboard("{ArrowRight}");
+      expect(screen.getByText("2 / 3")).toBeInTheDocument();
+    });
+
+    it("applies a time saved in the evidence view to the card and reloads", async () => {
+      await selectItem({ ...dated, gps_source: "interpolated", gps_confidence: 0.5 });
+      await userEvent.click(screen.getByRole("button", { name: /Why here\?/ }));
+      serveMedia([{ ...dated, taken_at: "2024-07-02T08:00:00Z" }]);
+
+      act(() => evidence.props!.onTimeChanged!("own", saved()));
+      await waitFor(() => expect(mediaCalls()).toHaveLength(2));
+      act(() => evidence.props!.onClose());
+      expect(within(sheet()).getByText(formatInstant("2024-07-02T08:00:00Z", browserTimeZone()))).toBeInTheDocument();
+    });
+
+    // S1 was estimated from P's EXIF point. Moving P moved the point and cleared S1's estimate,
+    // which nothing placed again: the reload, which lists located items only, leaves S1 out.
+    it("drops a cluster peer's estimate the change cleared, on the card and among the peers", async () => {
+      const s1 = { ...makeItem("s1"), taken_at: "2024-07-02T10:00:05Z", gps_source: "interpolated" as const, gps_confidence: 0.6 };
+      const p = { ...dated, id: "p", filename: "photo-p.jpg", gps_source: "exif" as const, gps_confidence: 1 };
+      const s2 = { ...makeItem("s2"), gps_source: "interpolated" as const, gps_confidence: 0.4 };
+      serveMedia([s1, p, s2]);
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: "select cluster" }));
+      expect(within(sheet()).getByText(/GPS: interpolated \(60%\)/)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: /Why here\?/ }));
+
+      serveMedia([{ ...p, taken_at: "2024-07-02T13:00:00Z" }]);
+      act(() => evidence.props!.onTimeChanged!("p", saved({ taken_at: "2024-07-02T13:00:00Z" })));
+      await waitFor(() => expect(mediaCalls()).toHaveLength(2));
+      await waitFor(() => expect(markerCount()).toBe("1"));
+      act(() => evidence.props!.onClose());
+
+      expect(within(sheet()).getByText("photo-s1.jpg")).toBeInTheDocument();
+      expect(within(sheet()).queryByText(/GPS:/)).not.toBeInTheDocument();
+      expect(within(sheet()).queryByRole("link", { name: /Open in Street View/ })).not.toBeInTheDocument();
+      await userEvent.keyboard("{ArrowRight}");
+      expect(within(sheet()).getByText(/GPS: exif/)).toBeInTheDocument();
+      await userEvent.keyboard("{ArrowRight}");
+      expect(within(sheet()).getByText("photo-s2.jpg")).toBeInTheDocument();
+      expect(within(sheet()).queryByText(/GPS:/)).not.toBeInTheDocument();
+      await userEvent.keyboard("{ArrowRight}");
+      expect(within(sheet()).getByText("photo-s1.jpg")).toBeInTheDocument();
+      expect(within(sheet()).queryByText(/GPS:/)).not.toBeInTheDocument();
+      expect(within(sheet()).queryByRole("link", { name: /Open in Street View/ })).not.toBeInTheDocument();
+    });
+
+    // The ticked trip moved to its new ID, and that filter change aborted the time change's own
+    // reload: the run that completes is the one the new filter started.
+    it("drops a cleared estimate in the reload of a retargeted trip filter", async () => {
+      const trip1: Trip = { ...sampleTrips[0], name: "Trip 2024-07-01" };
+      mockApi.get.mockResolvedValue([trip1]);
+      serveMedia([{ ...s1Estimated(), trip_id: "t1" }, { ...pExif(), trip_id: "t1" }]);
+      renderPage();
+      await waitFor(() => expect(panel.props?.trips).toHaveLength(1));
+      act(() => panel.props!.onChange({ ...emptyFilters, tripIds: ["t1"] }));
+      await waitFor(() => expect(mediaCalls()).toHaveLength(2));
+      await userEvent.click(await screen.findByRole("button", { name: "select cluster" }));
+      await userEvent.click(screen.getByRole("button", { name: /Why here\?/ }));
+
+      mockApi.get.mockResolvedValue([{ ...trip1, id: "t9" }]);
+      const reload = serveLater();
+      act(() => evidence.props!.onTimeChanged!("p", saved({ trip_id: "t9" })));
+      await waitFor(() => expect(mediaCalls()).toHaveLength(4));
+      expect(mediaCalls()[3][0]).toEqual({ trip_id: ["t9"], ...LOCATED });
+      await act(async () => reload([[{ ...pExif(), trip_id: "t9", taken_at: "2024-07-02T08:00:00Z" }]]));
+      await waitFor(() => expect(markerCount()).toBe("1"));
+      act(() => evidence.props!.onClose());
+
+      expect(within(sheet()).getByText("photo-s1.jpg")).toBeInTheDocument();
+      expect(within(sheet()).queryByText(/GPS:/)).not.toBeInTheDocument();
+    });
+
+    // Only the reload a time change asked for clears estimates, whether it answers or fails; a
+    // later one (a re-match) leaves a row it no longer lists as it was.
+    it.each([
+      ["answers", () => serveMedia([s1Estimated(), pExif()])],
+      ["fails", () => mockApi.listMedia.mockRejectedValue(new Error("list down"))],
+    ])("clears the estimates of the time change's own reload only, when it %s", async (_name, serveReload) => {
+      serveMedia([s1Estimated(), pExif()]);
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: "select cluster" }));
+      await userEvent.click(screen.getByRole("button", { name: /Why here\?/ }));
+
+      serveReload();
+      act(() => evidence.props!.onTimeChanged!("p", saved()));
+      await waitFor(() => expect(mediaCalls()).toHaveLength(2));
+      await waitFor(() => expect(screen.queryByText("Loading…")).not.toBeInTheDocument());
+      serveMedia([pExif()]);
+      act(() => evidence.props!.onRematched());
+      await waitFor(() => expect(mediaCalls()).toHaveLength(3));
+      await waitFor(() => expect(markerCount()).toBe("1"));
+      act(() => evidence.props!.onClose());
+      expect(within(sheet()).getByText(/GPS: interpolated \(60%\)/)).toBeInTheDocument();
+    });
+
+    it("leaves the card alone for a time saved on another item", async () => {
+      await selectItem({ ...dated, gps_source: "interpolated", gps_confidence: 0.5 });
+      await userEvent.click(screen.getByRole("button", { name: /Why here\?/ }));
+      act(() => evidence.props!.onTimeChanged!("behind", saved()));
+      await waitFor(() => expect(mediaCalls()).toHaveLength(2));
+      act(() => evidence.props!.onClose());
+      expect(within(sheet()).getByText(formatInstant("2024-07-02T10:00:00Z", browserTimeZone()))).toBeInTheDocument();
+    });
   });
 
   describe("album menu in the popup", () => {
@@ -672,6 +962,7 @@ describe("MapPage", () => {
         expect(within(sheet).getByRole("button", { name })).toHaveClass("touch:min-h-11", "touch:min-w-11");
       }
       expect(within(sheet).getByRole("button", { name: "Edit GPS location" })).toHaveClass("touch:min-h-11");
+      expect(within(sheet).getByRole("button", { name: "Edit capture time" })).toHaveClass("touch:min-h-11");
       expect(within(sheet).getByRole("link", { name: /Street View/ })).toHaveClass("touch:min-h-11");
     });
 

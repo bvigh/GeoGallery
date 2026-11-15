@@ -544,11 +544,11 @@ describe("UploadPage", () => {
 
   describe("capture time receipt", () => {
     // Speaks of the files dated in the assumed zone only, allows that the zone may be right, and
-    // says that only server retime moves files already stored.
+    // says that only a shift or server retime moves files already stored.
     const OFF_BY = "If the camera's clock did not show UTC, those times are off by its offset from UTC.";
     const ONLY_RETIME =
-      "A new zone dates new uploads only: these files keep their times until an administrator runs server retime, " +
-      "and uploading them again skips them as duplicates.";
+      "A new zone dates new uploads only: these files keep their times until you shift them (Trips → Shift times…) " +
+      "or an administrator runs server retime, and uploading them again skips them as duplicates.";
     const UTC_WARNING_REST = `${OFF_BY} Set your own camera zone in Settings, or choose a zone for an upload. ${ONLY_RETIME}`;
     const UTC_WARNING = `The assumed camera zone is UTC all year, so the files dated in it were read as UTC. ${UTC_WARNING_REST}`;
     const UNSET_UTC_WARNING =

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { ArrowLeft, ChevronLeft, ChevronRight, ExternalLink, X } from "lucide-react";
 import { api, ApiError } from "@/api/client";
 import { EditLocationModal } from "@/components/EditLocationModal";
+import { EditTimeModal } from "@/components/EditTimeModal";
 import { EvidenceMap } from "@/components/evidence/EvidenceMap";
 import { PlacementCard } from "@/components/evidence/PlacementCard";
 import { PointCard, type PickedPoint } from "@/components/evidence/PointCard";
@@ -10,8 +11,9 @@ import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { ITEM_GONE, leadSentence, NOT_OWNER, REMATCH_FAILED, stateBadge } from "@/lib/evidence";
 import { useCloseOnBack } from "@/lib/history";
 import { galleryRoute, routeUrl } from "@/lib/routes";
+import { timeSavedMessage } from "@/lib/timeEdit";
 import { cn } from "@/lib/utils";
-import type { MediaItem, ProvenanceResponse, ProvenanceTrip } from "@/types";
+import type { MediaItem, ProvenanceResponse, ProvenanceTrip, SetTakenAtResult } from "@/types";
 
 export interface EvidenceViewProps {
   mediaId: string;
@@ -26,6 +28,12 @@ export interface EvidenceViewProps {
   // Opens the item in its trip's gallery, among the photos taken around it. Given by a parent that
   // lists items out of context (the Checks view); without it the view offers no trip.
   onShowInTrip?: (trip: ProvenanceTrip, itemId: string) => void;
+  // An item's capture time was set in the edit dialog: its track point, the estimates near it and
+  // the trips have changed. id is the item on screen, which may be one jumped to.
+  onTimeChanged?: (id: string, result: SetTakenAtResult) => void;
+  // What the parent has to say over this view, such as why a gallery opened from it closed. Shown
+  // beside the view's own notice of a time change, which the parent clears when it steps.
+  notice?: string | null;
 }
 
 const TITLE = "Why here?";
@@ -133,6 +141,8 @@ export function EvidenceView({
   onLocationSaved,
   onRematched,
   onShowInTrip,
+  onTimeChanged,
+  notice = null,
 }: EvidenceViewProps) {
   // The item behind a track point, opened from a chip. One level: Back always returns to mediaId,
   // because the parent's stepping is relative to it.
@@ -154,12 +164,21 @@ export function EvidenceView({
   const [rematchFailed, setRematchFailed] = useState(false);
   // A copy taken when the editor opens, so a late response cannot swap the item under it.
   const [editor, setEditor] = useState<Pick<MediaItem, "id" | "filename" | "lat" | "lng"> | null>(null);
+  // Likewise for the capture time. A shadcn dialog: keyBelongsToDialog keeps this view's keys off it.
+  const [timeEditor, setTimeEditor] = useState<Pick<MediaItem, "id" | "filename" | "taken_at"> | null>(null);
+  // What a time change said when its follow-up failed: every host shows this view over its own
+  // notices, so it says it here, until another item is shown.
+  const [timeNotice, setTimeNotice] = useState<string | null>(null);
+  // The item on screen as last rendered, for a save that answers after a step.
+  const shownRef = useRef(shownId);
+  shownRef.current = shownId;
 
   const [factsFor, setFactsFor] = useState(shownId);
   if (factsFor !== shownId) {
     setFactsFor(shownId);
     setPoint(null);
     setRematchFailed(false);
+    setTimeNotice(null);
   }
 
   const rootRef = useRef<HTMLDivElement>(null);
@@ -266,6 +285,20 @@ export function EvidenceView({
     setEditor(null);
     setReload((n) => n + 1);
     onLocationSaved(id, lat, lng);
+  }
+
+  function openTimeEditor() {
+    if (!response) return;
+    const { id, filename, taken_at } = response.item;
+    setTimeEditor({ id, filename, taken_at });
+  }
+
+  // Also when the dialog was closed while saving: the time has changed all the same.
+  function timeSaved(id: string, result: SetTakenAtResult) {
+    setReload((n) => n + 1);
+    // Not on another item the view has stepped to meanwhile; the host says it there.
+    if (id === shownRef.current) setTimeNotice(timeSavedMessage(result));
+    onTimeChanged?.(id, result);
   }
 
   const state = response?.placement.state;
@@ -375,8 +408,21 @@ export function EvidenceView({
                       <button type="button" onClick={openEditor} disabled={actionsInert} className={actionButton}>
                         {response.placement.state === "manual" ? "Move by hand" : "Place by hand"}
                       </button>
+                      <button type="button" onClick={openTimeEditor} disabled={actionsInert} className={actionButton}>
+                        Edit capture time
+                      </button>
                     </div>
                     {rematchFailed && <p className="text-sm">{REMATCH_FAILED}</p>}
+                    {notice && (
+                      <p role="status" className="text-sm">
+                        {notice}
+                      </p>
+                    )}
+                    {timeNotice && (
+                      <p role="status" className="text-sm">
+                        {timeNotice}
+                      </p>
+                    )}
                   </section>
                 </>
               )}
@@ -390,6 +436,12 @@ export function EvidenceView({
       {editor && (
         <EditLocationModal key={editor.id} item={editor} onClose={() => setEditor(null)} onSaved={locationSaved} />
       )}
+      <EditTimeModal
+        open={timeEditor !== null}
+        item={timeEditor}
+        onClose={() => setTimeEditor(null)}
+        onSaved={(result) => timeEditor && timeSaved(timeEditor.id, result)}
+      />
     </div>
   );
 }

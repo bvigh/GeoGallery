@@ -13,7 +13,7 @@ import {
   makeGroup,
 } from "@/components/checks/checksTestUtils";
 import type { EvidenceViewProps } from "@/components/evidence/EvidenceView";
-import type { MediaGalleryOverlay } from "@/components/MediaGalleryOverlay";
+import type { MediaGalleryOverlay, TimesChangedHint } from "@/components/MediaGalleryOverlay";
 import {
   CHECKS_TIMEOUT,
   COMPARE_BUSY,
@@ -24,19 +24,22 @@ import {
   FILE_COLUMN_NOTES,
   findingText,
   NOTHING_FOUND,
+  REGROUPED_TRIP_CLOSED,
   RESIDUALS_CAPTION,
   TRUNCATED_NOTE,
 } from "@/lib/checks";
 import { BACK_DEPTH_KEY } from "@/lib/history";
 import { formatCount } from "@/lib/numbers";
 import { formatInstant } from "@/lib/time";
-import type { AgreementResponse, ChecksFile, ChecksResponse } from "@/types";
+import { SHIFT_OUTCOME_UNKNOWN } from "@/lib/timeEdit";
+import type { AgreementResponse, ChecksFile, ChecksResponse, SetTakenAtResult, Trip } from "@/types";
 
 vi.mock("@/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/client")>();
   return {
     ApiError: actual.ApiError,
-    api: { checks: vi.fn(), checksAgreement: vi.fn() },
+    // get: the trips, after a time change in a trip's gallery.
+    api: { checks: vi.fn(), checksAgreement: vi.fn(), get: vi.fn() },
   };
 });
 
@@ -66,7 +69,7 @@ vi.mock("@/components/MediaGalleryOverlay", async () => {
   };
 });
 
-const mockApi = api as unknown as Record<"checks" | "checksAgreement", ReturnType<typeof vi.fn>>;
+const mockApi = api as unknown as Record<"checks" | "checksAgreement" | "get", ReturnType<typeof vi.fn>>;
 
 type GalleryProps = ComponentProps<typeof MediaGalleryOverlay>;
 
@@ -141,6 +144,7 @@ const staleGroup = makeGroup({
   media_ids: ["m1", "m2", "m3"],
 });
 const farGroup = makeGroup({ key: "gpx+nmea", label: "gpx+nmea", count: 1, evidence: { max_km: 1.5 }, media_ids: ["m9"] });
+const timeSaved: SetTakenAtResult = { taken_at: "2000-01-01T00:00:00Z", trip_id: "t1", followup_failed: false };
 const withFindings = makeChecks({ checks: makeCheckList({ stale_estimates: [staleGroup], pair_far: [farGroup] }) });
 
 beforeEach(() => {
@@ -661,6 +665,115 @@ describe("ChecksView", () => {
       expect(onClose).toHaveBeenCalledTimes(1);
     });
 
+    describe("after a time change in the trip", () => {
+      function trip(id: string, name: string): Trip {
+        return { id, name, start_date: null, end_date: null, media_count: 3, cover_key: null, user_edited: false };
+      }
+
+      async function changeTime(trips: Trip[], hint: TimesChangedHint) {
+        await openSecondItem();
+        act(() => evidence.props!.onShowInTrip!(trip("t1", "Lakes 2023"), "m2"));
+        mockApi.get.mockResolvedValue(trips);
+        await act(async () => gallery.props!.onTimesChanged!(hint));
+        expect(mockApi.get).toHaveBeenCalledWith("/trips");
+      }
+
+      it("moves the gallery to the item's new trip when its own is gone", async () => {
+        await changeTime([trip("t9", "Lakes 2023, regrouped")], { tripId: "t9", itemId: "m7", notice: "Shifted 2 items 1 h later." });
+        expect(gallery.props).toMatchObject({
+          title: "Lakes 2023, regrouped",
+          params: { trip_id: "t9" },
+          route: { tab: "trips", collectionId: "t9" },
+          inUrl: false,
+        });
+        expect(screen.getByTestId("trip-gallery")).toHaveAttribute("data-item", "m7");
+        expect(screen.queryByTestId("evidence-view")).not.toBeInTheDocument();
+      });
+
+      it("keeps the gallery on a trip still listed, under its name now", async () => {
+        await changeTime([trip("t1", "Lakes, renamed"), trip("t9", "Other")], { tripId: "t9", itemId: "m2" });
+        expect(gallery.props).toMatchObject({ title: "Lakes, renamed", params: { trip_id: "t1" } });
+      });
+
+      it("brings the evidence view back on the finding's item when neither trip is listed, saying why", async () => {
+        await changeTime([trip("t5", "Elsewhere")], { tripId: null, itemId: "m2", notice: null });
+        expect(screen.queryByTestId("trip-gallery")).not.toBeInTheDocument();
+        expect(evidence.props).toMatchObject({ mediaId: "m2", position: "2 / 3", notice: REGROUPED_TRIP_CLOSED });
+      });
+
+      // The gallery said the shift may have been saved; closed, it can no longer say so, and a
+      // second shift from a new opening would move the items twice.
+      it("passes on what the gallery said of a shift that went unanswered", async () => {
+        await changeTime([trip("t5", "Elsewhere")], { tripId: null, itemId: "m2", notice: SHIFT_OUTCOME_UNKNOWN });
+        expect(screen.queryByTestId("trip-gallery")).not.toBeInTheDocument();
+        expect(evidence.props!.notice).toBe(`${REGROUPED_TRIP_CLOSED} ${SHIFT_OUTCOME_UNKNOWN}`);
+      });
+
+      it.each<[string, () => void]>([
+        ["stepping", () => evidence.props!.onNext!()],
+        ["showing the item in its trip again, then closing it", () => {
+          evidence.props!.onShowInTrip!(trip("t5", "Elsewhere"), "m2");
+          gallery.props!.onClose();
+        }],
+      ])("drops the notice on %s", async (_name, action) => {
+        await changeTime([trip("t5", "Elsewhere")], { tripId: null, itemId: "m2", notice: SHIFT_OUTCOME_UNKNOWN });
+        expect(evidence.props!.notice).toContain(SHIFT_OUTCOME_UNKNOWN);
+        act(action);
+        expect(evidence.props!.notice).toBeNull();
+      });
+
+      it("drops the notice with the evidence view, so a finding opened next has none", async () => {
+        await changeTime([trip("t5", "Elsewhere")], { tripId: null, itemId: "m2", notice: SHIFT_OUTCOME_UNKNOWN });
+        act(() => evidence.props!.onClose());
+        await userEvent.click(await screen.findByRole("button", { name: "Open 3 estimates" }));
+        expect(evidence.props).toMatchObject({ mediaId: "m1", notice: null });
+      });
+
+      it("says nothing when the gallery stays or moves, and the user closes it", async () => {
+        await changeTime([trip("t9", "Other")], { tripId: "t9", itemId: "m2", notice: SHIFT_OUTCOME_UNKNOWN });
+        act(() => gallery.props!.onClose());
+        expect(evidence.props).toMatchObject({ mediaId: "m2", notice: null });
+      });
+
+      // The gallery reports a time change as a change of its items too, before the hint.
+      it("runs the checks again once the evidence view closes", async () => {
+        await changeTime([trip("t1", "Lakes 2023")], { tripId: "t1", itemId: "m2" });
+        act(() => gallery.props!.onItemsChanged!());
+        act(() => gallery.props!.onClose());
+        expect(mockApi.checks).toHaveBeenCalledTimes(1);
+
+        act(() => evidence.props!.onClose());
+        await waitFor(() => expect(mockApi.checks).toHaveBeenCalledTimes(2));
+      });
+
+      it("leaves the gallery as it is when the trips cannot be loaded", async () => {
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        await openSecondItem();
+        act(() => evidence.props!.onShowInTrip!(trip("t1", "Lakes 2023"), "m2"));
+        mockApi.get.mockRejectedValue(new Error("offline"));
+        await act(async () => gallery.props!.onTimesChanged!({ tripId: "t9", itemId: "m2" }));
+        expect(gallery.props).toMatchObject({ title: "Lakes 2023", params: { trip_id: "t1" } });
+      });
+
+      // With neither trip listed, the gallery closed by hand has nothing to explain either.
+      it.each([
+        ["the item's new trip listed", [trip("t9", "Other")]],
+        ["neither trip listed", [trip("t5", "Elsewhere")]],
+      ])("leaves a gallery closed meanwhile closed, and says nothing, with %s", async (_name, trips) => {
+        await openSecondItem();
+        act(() => evidence.props!.onShowInTrip!(trip("t1", "Lakes 2023"), "m2"));
+        let answer!: (trips: Trip[]) => void;
+        mockApi.get.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+        const report = gallery.props!.onTimesChanged!;
+        act(() => report({ tripId: "t9", itemId: "m2", notice: SHIFT_OUTCOME_UNKNOWN }));
+        act(() => gallery.props!.onClose());
+
+        await act(async () => answer(trips));
+        expect(screen.queryByTestId("trip-gallery")).not.toBeInTheDocument();
+        expect(evidence.props).toMatchObject({ mediaId: "m2", notice: null });
+      });
+    });
+
     it("closes the trip with the evidence view, and opens a new finding without it", async () => {
       await openSecondItem();
       act(() => evidence.props!.onShowInTrip!(trip, "m2"));
@@ -708,6 +821,7 @@ describe("ChecksView", () => {
     it.each([
       ["a location saved", () => evidence.props!.onLocationSaved("m2", 1, 2)],
       ["a re-match", () => evidence.props!.onRematched()],
+      ["a capture time changed", () => evidence.props!.onTimeChanged!("m2", timeSaved)],
     ])("runs the checks again once it closes after %s", async (_name, change) => {
       mockApi.checks.mockResolvedValue(withFindings);
       renderView();

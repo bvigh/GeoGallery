@@ -197,12 +197,12 @@ func TestList_OwnerFieldsAndTripIDOnlyForOwnRows(t *testing.T) {
 	db := &mockDB{queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
 		capturedSQL = sql
 		// id, filename, media_type, lat, lng, gps_confidence, gps_source, taken_at, storage_key,
-		// trip_id, owner_id, owner_name, initial_yaw, initial_pitch, initial_fov
+		// trip_id, owner_id, owner_name, initial_yaw, initial_pitch, initial_fov, camera_model
 		return &mockRows{rows: [][]any{
 			{"own", "a.jpg", "photo", 47.5, 19.0, 1.0, "exif", takenAt, "media/k1.jpg",
-				"trip-1", testOwnerID, "Me", nil, nil, nil},
+				"trip-1", testOwnerID, "Me", nil, nil, nil, "DC-TZ200"},
 			{"shared", "b.jpg", "photo", nil, nil, nil, nil, nil, "media/k2.jpg",
-				nil, "22222222-2222-4222-8222-222222222222", nil, nil, nil, nil},
+				nil, "22222222-2222-4222-8222-222222222222", nil, nil, nil, nil, nil},
 		}}, nil
 	}}
 
@@ -215,16 +215,16 @@ func TestList_OwnerFieldsAndTripIDOnlyForOwnRows(t *testing.T) {
 	assert.Contains(t, sql, "CASE WHEN m.owner_id = $1 THEN m.trip_id END AS trip_id",
 		"trips are personal: another owner's trip_id is never returned")
 	assert.Contains(t, sql, "m.owner_id, COALESCE(u.display_name, u.email) AS owner_name")
-	assert.Contains(t, sql, "FROM media m JOIN users u ON u.id = m.owner_id WHERE")
+	assert.Contains(t, sql, "m.initial_fov, m.camera_model FROM media m JOIN users u ON u.id = m.owner_id WHERE")
 	assert.JSONEq(t, `[
 		{"id":"own","filename":"a.jpg","media_type":"photo","lat":47.5,"lng":19,"gps_confidence":1,
 		 "gps_source":"exif","taken_at":"2024-05-02T12:00:00Z","storage_key":"media/k1.jpg",
 		 "trip_id":"trip-1","owner_id":"`+testOwnerID+`","owner_name":"Me",
-		 "initial_yaw":null,"initial_pitch":null,"initial_fov":null},
+		 "initial_yaw":null,"initial_pitch":null,"initial_fov":null,"camera_model":"DC-TZ200"},
 		{"id":"shared","filename":"b.jpg","media_type":"photo","lat":null,"lng":null,"gps_confidence":null,
 		 "gps_source":null,"taken_at":null,"storage_key":"media/k2.jpg",
 		 "trip_id":null,"owner_id":"22222222-2222-4222-8222-222222222222","owner_name":null,
-		 "initial_yaw":null,"initial_pitch":null,"initial_fov":null}
+		 "initial_yaw":null,"initial_pitch":null,"initial_fov":null,"camera_model":null}
 	]`, w.Body.String())
 }
 
@@ -485,7 +485,7 @@ func listRow(id string, takenAt *time.Time) []any {
 		at = *takenAt
 	}
 	return []any{id, id + ".jpg", "photo", nil, nil, nil, nil, at, "media/" + id,
-		nil, testOwnerID, nil, nil, nil, nil}
+		nil, testOwnerID, nil, nil, nil, nil, nil}
 }
 
 // Item IDs for mockRows: the cursor carries an ID, so it must be one.
@@ -701,7 +701,7 @@ func TestList_EncodeError_IsLogged(t *testing.T) {
 	db := &mockDB{queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
 		return &mockRows{rows: [][]any{
 			{"id-1", "a.jpg", "photo", nil, nil, nil, nil, takenAt, "media/k1.jpg",
-				nil, testOwnerID, nil, nil, nil, nil},
+				nil, testOwnerID, nil, nil, nil, nil, nil},
 		}}, nil
 	}}
 

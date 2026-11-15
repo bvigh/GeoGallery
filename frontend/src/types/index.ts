@@ -16,6 +16,7 @@ export interface MediaItem {
   initial_pitch?: number;
   initial_fov?: number;
   keyframes?: OrientationKeyframe[];
+  camera_model?: string | null; // the EXIF model; older backends omit it
 }
 
 export interface OrientationKeyframe {
@@ -197,6 +198,42 @@ export interface UserSettings {
 
 // A PATCH body: the settings to change, null returning one to its default.
 export type UserSettingsPatch = Partial<Pick<UserSettings, "camera_timezone">>;
+
+// media.time_edit: the owner's last change of taken_at through PATCH /api/media/{id}/taken-at
+// ("set") or POST /api/media/shift-time ("shift"). capture_evidence still says how the file's own
+// time was read. Every key is always present; instants are RFC 3339 in UTC.
+export interface TimeEdit {
+  v: number;
+  kind: "set" | "shift";
+  at: string; // when the change was made
+  from: string | null; // taken_at before this change; null when the item had none
+  original: string | null; // taken_at before the first change
+  delta_s: number | null; // the new time minus from, in seconds; null when from is null
+  wall: string | null; // set only: the wall clock as entered, "YYYY-MM-DDTHH:MM:SS"
+  zone: string | null; // set only: the IANA zone named
+  offset_min: number | null; // set only: the UTC offset the wall clock was read at
+}
+
+// The zone a wall clock entered by hand is read in: an IANA zone, whose offset on that date
+// applies, or a fixed UTC offset.
+export type TakenAtZone = { zone: string } | { utcOffsetMin: number };
+
+// PATCH /api/media/{id}/taken-at. trip_id is the item's trip after trip detection ran again;
+// followup_failed says the matcher or trip detection failed after the time was saved.
+export interface SetTakenAtResult {
+  taken_at: string;
+  trip_id: string | null;
+  followup_failed: boolean;
+}
+
+// POST /api/media/shift-time. undated: items without a time, left as they were; trips: the trips
+// the shifted items are in after trip detection, most items first.
+export interface ShiftTimesResult {
+  shifted: number;
+  undated: number;
+  trips: { id: string; items: number }[];
+  followup_failed: boolean;
+}
 
 export interface GuessResult {
   actual_lat: number;
@@ -407,6 +444,7 @@ export interface ProvenanceResponse {
     recorded: "ingest" | "backfill" | "retime" | "not_recorded";
     evidence: CaptureEvidence | null; // null when not_recorded
     server_camera_zone: ServerCameraZone;
+    edit?: TimeEdit | null; // null when the owner never changed the time; older backends omit it
   };
   placement: {
     state: PlacementState;

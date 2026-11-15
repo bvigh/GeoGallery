@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -281,23 +280,9 @@ func (h *CameraClockRuleHandler) List(w http.ResponseWriter, r *http.Request) {
 	writeClockRuleJSON(w, http.StatusOK, rules)
 }
 
-// lockClockRuleOwner locks the caller's users row for the rest of tx. Every write that adds a rule
-// version (POST and PUT) takes it first, so one owner's writes run one after the other:
-//   - two POSTs could otherwise both count 99 rules and insert;
-//   - two writes that put rules for one camera into overlapping periods at once could deadlock in
-//     the exclusion constraint, which inserts its index entry before it checks for a conflict,
-//     and one would get 40P01 (a 500) instead of 409.
-//
-// FOR NO KEY UPDATE does not block the FOR KEY SHARE locks that inserts referencing the user take,
-// so uploads go on meanwhile.
-func lockClockRuleOwner(ctx context.Context, tx pgx.Tx, ownerID string) error {
-	_, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, ownerID)
-	return err
-}
-
 // Create stores a new rule: 201 with the rule, 409 when it overlaps another rule for the same
 // camera or the caller already has maxClockRulesPerOwner rules. The count and the insert share a
-// transaction under lockClockRuleOwner, so a second POST counts the first's rule.
+// transaction under lockOwnerRow, so a second POST counts the first's rule.
 func (h *CameraClockRuleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	me := auth.MustUser(r.Context()).ID
 	v, ok := decodeClockRule(w, r)
@@ -314,7 +299,7 @@ func (h *CameraClockRuleHandler) Create(w http.ResponseWriter, r *http.Request) 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := lockClockRuleOwner(ctx, tx, me); err != nil {
+	if err := lockOwnerRow(ctx, tx, me); err != nil {
 		slog.Error("clock rules: create owner lock failed", "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
@@ -355,7 +340,7 @@ func (h *CameraClockRuleHandler) Create(w http.ResponseWriter, r *http.Request) 
 }
 
 // Update replaces a rule with the body: 200 with the rule, 409 when it overlaps another rule for
-// the same camera. The UPDATE runs under lockClockRuleOwner.
+// the same camera. The UPDATE runs under lockOwnerRow.
 //
 // As in the album routes, a malformed ID is 404 first, then the body is checked (400), and only
 // then is the rule looked up, by the UPDATE itself: a foreign or missing ID with a bad body is 400
@@ -381,7 +366,7 @@ func (h *CameraClockRuleHandler) Update(w http.ResponseWriter, r *http.Request) 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := lockClockRuleOwner(ctx, tx, me); err != nil {
+	if err := lockOwnerRow(ctx, tx, me); err != nil {
 		slog.Error("clock rules: update owner lock failed", "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return

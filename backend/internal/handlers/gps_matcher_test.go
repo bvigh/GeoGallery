@@ -470,3 +470,109 @@ func TestBracketingPoints_QueryErrorIsReturned(t *testing.T) {
 		})
 	}
 }
+
+// --- RunGPSMatcherAround: the rows near some instants, through the same per-item loop ---
+
+func TestMergeTimeRanges(t *testing.T) {
+	at := func(hour, minute int) time.Time { return time.Date(2024, 5, 1, hour, minute, 0, 0, time.UTC) }
+	span := func(fromHour, fromMinute, toHour, toMinute int) timeRange {
+		return timeRange{at(fromHour, fromMinute), at(toHour, toMinute)}
+	}
+	const window = time.Hour
+	tests := []struct {
+		name     string
+		instants []time.Time
+		want     []timeRange
+	}{
+		{"none", nil, nil},
+		{"one", []time.Time{at(12, 0)}, []timeRange{span(11, 0, 13, 0)}},
+		{"apart", []time.Time{at(8, 0), at(12, 0)}, []timeRange{span(7, 0, 9, 0), span(11, 0, 13, 0)}},
+		{"overlapping", []time.Time{at(12, 0), at(12, 30)}, []timeRange{span(11, 0, 13, 30)}},
+		{"touching", []time.Time{at(10, 0), at(12, 0)}, []timeRange{span(9, 0, 13, 0)}},
+		{"a second short of touching", []time.Time{at(10, 0), at(12, 0).Add(time.Second)},
+			[]timeRange{span(9, 0, 11, 0), {at(11, 0).Add(time.Second), at(13, 0).Add(time.Second)}}},
+		{"unsorted", []time.Time{at(20, 0), at(8, 0), at(12, 0), at(8, 30)},
+			[]timeRange{span(7, 0, 9, 30), span(11, 0, 13, 0), span(19, 0, 21, 0)}},
+		{"one inside another's window", []time.Time{at(12, 0), at(12, 0), at(12, 10)}, []timeRange{span(11, 0, 13, 10)}},
+		{"a chain", []time.Time{at(8, 0), at(9, 30), at(11, 0)}, []timeRange{span(7, 0, 12, 0)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, mergeTimeRanges(tt.instants, window))
+		})
+	}
+}
+
+func TestRunGPSMatcherAround_NoInstantsRunsNothing(t *testing.T) {
+	db := &mockMatcherDB{queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
+		t.Fatal("no instant, so nothing to list")
+		return nil, nil
+	}}
+	require.NoError(t, RunGPSMatcherAround(context.Background(), db, testOwnerID, time.Hour, nil))
+}
+
+// The listing names the owner literally and takes the merged ranges; the write is RunGPSMatcher's,
+// bound to the row as listed.
+func TestRunGPSMatcherAround_ListsTheOwnersRowsNearTheInstants(t *testing.T) {
+	takenAt := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	around := []time.Time{takenAt.Add(30 * time.Minute), takenAt, takenAt.Add(48 * time.Hour)}
+	run := func(t *testing.T, matcher func(db matcherDB) error) (querySQL string, queryArgs []any, execSQL string, execArgs []any) {
+		db := &mockMatcherDB{
+			queryFn: func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+				querySQL, queryArgs = sql, args
+				return &mockRows{rows: [][]any{{"media-1", takenAt}}}, nil
+			},
+			queryRowFn: func(_ context.Context, sql string, args ...any) pgx.Row {
+				assert.Contains(t, sql, "owner_id = $3")
+				assert.Equal(t, testOwnerID, args[2])
+				return trackPointRow{lat: 47.5, lng: 19.0, recordedAt: takenAt.Add(-10 * time.Minute)}
+			},
+			execFn: func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				execSQL, execArgs = sql, args
+				return pgconn.CommandTag{}, nil
+			},
+		}
+		require.NoError(t, matcher(db))
+		return
+	}
+
+	querySQL, queryArgs, execSQL, execArgs := run(t, func(db matcherDB) error {
+		return RunGPSMatcherAround(context.Background(), db, testOwnerID, time.Hour, around)
+	})
+	assert.Contains(t, querySQL, "FROM unnest($2::timestamptz[], $3::timestamptz[]) AS r(lo, hi)")
+	assert.Contains(t, querySQL, "JOIN media m ON m.owner_id = $1 AND m.taken_at BETWEEN r.lo AND r.hi")
+	assert.Contains(t, querySQL, "WHERE m.gps_source IS NULL OR m.gps_source = 'interpolated'")
+	assert.NotContains(t, querySQL, "album", "never readableMediaCond")
+	assert.Equal(t, []any{
+		testOwnerID,
+		[]time.Time{takenAt.Add(-time.Hour), takenAt.Add(47 * time.Hour)},
+		[]time.Time{takenAt.Add(90 * time.Minute), takenAt.Add(49 * time.Hour)},
+	}, queryArgs)
+
+	_, _, wantSQL, wantArgs := run(t, func(db matcherDB) error {
+		return RunGPSMatcher(context.Background(), db, testOwnerID, time.Hour, true)
+	})
+	assert.Equal(t, wantSQL, execSQL, "the same write as RunGPSMatcher's")
+	assert.Contains(t, execSQL, "WHERE id = $4 AND owner_id = $5 AND taken_at = $6")
+	assert.Contains(t, execSQL, "AND (gps_source IS NULL OR gps_source = 'interpolated')")
+	assert.Equal(t, wantArgs, execArgs)
+	assert.Equal(t, []any{19.0, 47.5, execArgs[2], "media-1", testOwnerID, takenAt}, execArgs)
+}
+
+func TestRunGPSMatcherAround_ListErrorIsReturned(t *testing.T) {
+	boom := errors.New("boom")
+	tests := []struct {
+		name    string
+		queryFn func(context.Context, string, ...any) (pgx.Rows, error)
+	}{
+		{"query", func(context.Context, string, ...any) (pgx.Rows, error) { return nil, boom }},
+		{"rows", func(context.Context, string, ...any) (pgx.Rows, error) { return &mockRows{err: boom}, nil }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := &mockMatcherDB{queryFn: tt.queryFn}
+			err := RunGPSMatcherAround(context.Background(), db, testOwnerID, time.Hour, []time.Time{time.Now()})
+			require.ErrorIs(t, err, boom)
+		})
+	}
+}

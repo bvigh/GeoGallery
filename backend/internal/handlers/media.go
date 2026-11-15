@@ -46,6 +46,9 @@ type MediaHandler struct {
 	runMatcher    func(ctx context.Context, db matcherDB, ownerID string, maxWindow time.Duration, reprocess bool) error
 	tripGapHours  int
 	runTripDetect func(ctx context.Context, db tripDetectDB, ownerID string, gapHours int) error
+
+	// runMatcherAround places only the rows near some instants, after a capture time changed.
+	runMatcherAround func(ctx context.Context, db matcherDB, ownerID string, maxWindow time.Duration, around []time.Time) error
 }
 
 func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Duration, tripGapHours int, cameraZone ingest.CameraZone) *MediaHandler {
@@ -59,6 +62,8 @@ func NewMediaHandler(db *pgxpool.Pool, s *storage.Client, matchWindow time.Durat
 		tripGapHours:  tripGapHours,
 		runMatcher:    RunGPSMatcher,
 		runTripDetect: RunTripDetect,
+
+		runMatcherAround: RunGPSMatcherAround,
 	}
 }
 
@@ -78,6 +83,7 @@ type mediaItem struct {
 	InitialYaw   *float64   `json:"initial_yaw"`
 	InitialPitch *float64   `json:"initial_pitch"`
 	InitialFov   *float64   `json:"initial_fov"`
+	CameraModel  *string    `json:"camera_model"` // the shift dialog groups items by camera
 }
 
 // Page sizes for GET /api/media. The map and the galleries ask for the maximum, to load a large
@@ -95,7 +101,7 @@ const mediaListColumns = `m.id, m.filename, m.media_type,
 	       m.taken_at, m.storage_key,
 	       CASE WHEN m.owner_id = $1 THEN m.trip_id END AS trip_id,
 	       m.owner_id, COALESCE(u.display_name, u.email) AS owner_name,
-	       m.initial_yaw, m.initial_pitch, m.initial_fov`
+	       m.initial_yaw, m.initial_pitch, m.initial_fov, m.camera_model`
 
 // mediaListQuery returns the query for the first n items matching conds (buildMediaFilter's, ANDed)
 // in the list's order, taken_at DESC NULLS LAST, id, that come after the cursor when there is one.
@@ -202,7 +208,7 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&m.ID, &m.Filename, &m.MediaType, &lat, &lng,
 			&m.Confidence, &m.GpsSource, &m.TakenAt, &m.StorageKey, &m.TripID,
 			&m.OwnerID, &m.OwnerName,
-			&m.InitialYaw, &m.InitialPitch, &m.InitialFov); err != nil {
+			&m.InitialYaw, &m.InitialPitch, &m.InitialFov, &m.CameraModel); err != nil {
 			slog.Error("media: list row scan failed", "err", err)
 			continue
 		}

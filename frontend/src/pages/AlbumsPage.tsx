@@ -622,6 +622,8 @@ export function AlbumsPage() {
           // The album owner may remove any item, a member only their own.
           canRemoveFromAlbum={(item) => !!galleryAlbum?.is_owner || item.owner_id === me.id}
           onRemoveFromAlbum={(item) => removeItem(gallery.id, item)}
+          // An album keeps its items, but its dates follow their capture times.
+          onTimesChanged={() => load()}
         />
       )}
     </div>

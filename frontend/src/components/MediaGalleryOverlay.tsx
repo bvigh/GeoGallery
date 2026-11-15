@@ -1,8 +1,19 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, ExternalLink, FolderMinus, Info, MapPin, Rotate3d, Trash2 } from "lucide-react";
+import {
+  CalendarClock,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  ExternalLink,
+  FolderMinus,
+  Info,
+  MapPin,
+  Rotate3d,
+  Trash2,
+} from "lucide-react";
 import { Marker, useMap } from "react-leaflet";
 import L from "leaflet";
-import type { MediaItem } from "@/types";
+import type { MediaItem, SetTakenAtResult, ShiftTimesResult } from "@/types";
 import { api, ApiError } from "@/api/client";
 import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { useVideoKeys } from "@/lib/videoKeys";
@@ -13,8 +24,10 @@ import { cn } from "@/lib/utils";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { AlbumMenu } from "@/components/albums/AlbumMenu";
 import { EditLocationModal } from "@/components/EditLocationModal";
+import { EditTimeModal } from "@/components/EditTimeModal";
 import { GoToDate, PositionField } from "@/components/GalleryJump";
 import { EvidenceView } from "@/components/evidence/EvidenceView";
+import { ShiftTimesDialog } from "@/components/ShiftTimesDialog";
 import { EditViewModal } from "@/components/viewer/EditViewModal";
 import { MiniMapOverlay, type MiniMapSize } from "@/components/map/MiniMapOverlay";
 import { TOP_MARKER_Z_INDEX_OFFSET } from "@/components/map/markers";
@@ -23,6 +36,7 @@ import Video360 from "@/components/viewer/Video360";
 import VideoDecodeNotice from "@/components/viewer/VideoDecodeNotice";
 import { ZoomableImage } from "@/components/viewer/ZoomableImage";
 import { browserTimeZone, formatInstant } from "@/lib/time";
+import { SHIFT_OUTCOME_UNKNOWN, shiftedMessage, shiftInstant, timeSavedMessage } from "@/lib/timeEdit";
 import { useVideoDecodeCheck } from "@/lib/video";
 
 // ── Map helpers ──────────────────────────────────────────────────────────────
@@ -188,9 +202,22 @@ interface Props {
   // gallery opened over a view without a URL (the Checks view): its history entry is taken over by
   // the evidence view it replaced, which would keep showing a URL left there.
   inUrl?: boolean;
-  // Called when an own item's location may have changed: a location saved, or a re-match from the
-  // evidence view. The list itself is fetched again either way.
+  // Called when an own item's location may have changed: a location saved, a re-match from the
+  // evidence view, or a capture time changed. The list itself is fetched again either way.
   onItemsChanged?: () => void;
+  // Called after a capture time changed, here or in the evidence view. Trip detection then ran
+  // again, and gives every trip nobody edited a new ID: the trip this gallery shows may be gone.
+  // The hint says where the change put the items, for the page to move the gallery there.
+  onTimesChanged?: (hint: TimesChangedHint) => void;
+}
+
+// tripId: the edited item's trip, or the trip most of the shifted items are in, after trip
+// detection (null in none); itemId: the gallery's current item; notice: what the gallery says about
+// the change (null when nothing), for a page that closes the gallery to say on.
+export interface TimesChangedHint {
+  tripId: string | null;
+  itemId: string | null;
+  notice?: string | null;
 }
 
 export function MediaGalleryOverlay({
@@ -205,6 +232,7 @@ export function MediaGalleryOverlay({
   initialItemId = null,
   inUrl = true,
   onItemsChanged,
+  onTimesChanged,
 }: Props) {
   const user = useCurrentUser();
   const [items, setItems] = useState<MediaItem[]>([]);
@@ -214,6 +242,9 @@ export function MediaGalleryOverlay({
   const initialItemRef = useRef(initialItemId);
   // The item from the URL is not in the gallery; said until the user moves on.
   const [itemMissing, setItemMissing] = useState(false);
+  // The item that was current is not in the list new params brought (the page moved the gallery
+  // to the trip a time change put most items in); said until the user moves on.
+  const [itemLeft, setItemLeft] = useState(false);
   // The URL (or why it failed) together with the item it belongs to. A separate URL state would
   // still hold the previous item's URL for the commit after a step, and a 360° viewer would
   // build a renderer and load that old texture again before the effect below replaced it.
@@ -224,10 +255,15 @@ export function MediaGalleryOverlay({
   const [busyIds, setBusyIds] = useState<string[]>([]);
   // Set once an item was dropped, so only emptying the list by hand closes the gallery.
   const dropped = useRef(false);
-  // The open editor (location, or the 360° default view and keyframes) and its item. Tied to the
-  // item, so a change of item under the editor (a removal finishing) closes it instead of showing
-  // the next one with the old values, and coming back to the item does not reopen it.
-  const [editing, setEditing] = useState<{ id: string; kind: "location" | "view" } | null>(null);
+  // The open editor (location, capture time, or the 360° default view and keyframes) and its item.
+  // Tied to the item, so a change of item under the editor (a removal finishing) closes it instead
+  // of showing the next one with the old values, and coming back to the item does not reopen it.
+  const [editing, setEditing] = useState<{ id: string; kind: "location" | "time" | "view" } | null>(null);
+  // The shift dialog: the gallery's items, by camera.
+  const [shiftOpen, setShiftOpen] = useState(false);
+  // What a time change said: the shift's result, or that its follow-up failed. Until the user
+  // moves on, like the notices beside it.
+  const [timeNotice, setTimeNotice] = useState<string | null>(null);
   // Not an editor kind: the view steps between items by itself, so it is not tied to one.
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   // The size chosen with the map's buttons; it outlives the map, which unmounts while loading.
@@ -237,6 +273,10 @@ export function MediaGalleryOverlay({
   // Clamped like the layout effect below does, so the commit before it runs keeps the
   // item's menu and modals mounted.
   const currentItem = items[Math.min(currentIndex, items.length - 1)] ?? null;
+  // The last current item, kept while the list is empty or reloading: a list that arrives later
+  // (a refresh, or new params when the page moves the gallery to another trip) opens on it again.
+  const currentIdRef = useRef<string | null>(null);
+  if (currentItem) currentIdRef.current = currentItem.id;
   // Only a URL of the current item: its state, else the cache (a prefetched neighbour shows at
   // once, without a placeholder for the commit before the effect below runs).
   const urlEntry = currentItem && urlState?.id === currentItem.id ? urlState : null;
@@ -248,9 +288,13 @@ export function MediaGalleryOverlay({
   const paramsKey = JSON.stringify(params);
   const paramsRef = useRef(params);
   paramsRef.current = params;
-  // The phone's back gesture closes the gallery instead of leaving the app. Until the list is in,
-  // the URL keeps the item it was opened on.
-  const urlItemId = loading ? initialItemId : (currentItem?.id ?? null);
+  const paramsKeyRef = useRef(paramsKey);
+  paramsKeyRef.current = paramsKey;
+  // Counts refreshes, so a slower answer to an earlier one cannot replace a later list.
+  const refreshSeq = useRef(0);
+  // The phone's back gesture closes the gallery instead of leaving the app. Until the first list is
+  // in, the URL keeps the item it was opened on; while new params load, the current one.
+  const urlItemId = currentItem?.id ?? (loading ? initialItemId : null);
   useCloseOnBack(
     onClose,
     true,
@@ -267,13 +311,19 @@ export function MediaGalleryOverlay({
       .then((data) => {
         if (cancelled) return;
         const sorted = sortByTakenAt(data);
-        const wanted = initialItemRef.current;
+        // The first list opens on the URL's item. A later one, for new params (the page moved the
+        // gallery to the trip a time change put the items in), stays on the current item if it
+        // holds it, and else starts at the first.
+        const fromUrl = initialItemRef.current;
         initialItemRef.current = null;
+        const wanted = fromUrl ?? currentIdRef.current;
         const start = wanted === null ? 0 : sorted.findIndex((m) => m.id === wanted);
         setItems(sorted);
         setCurrentIndex(Math.max(start, 0));
         // Deleted, or taken out of the trip or album since the link was made.
-        if (start < 0) setItemMissing(true);
+        if (fromUrl !== null && start < 0) setItemMissing(true);
+        // Not silently on another item: the one on screen went elsewhere.
+        if (fromUrl === null && wanted !== null && start < 0) setItemLeft(true);
       })
       .catch(console.error)
       .finally(() => {
@@ -355,6 +405,8 @@ export function MediaGalleryOverlay({
   function goTo(index: number) {
     setActionError(null);
     setItemMissing(false);
+    setItemLeft(false);
+    setTimeNotice(null);
     setCurrentIndex(Math.max(0, Math.min(index, items.length - 1)));
   }
   function goPrev() { goTo(currentIndex - 1); }
@@ -383,21 +435,72 @@ export function MediaGalleryOverlay({
     refreshItems();
   }
 
-  // Re-fetch all media so GPS-matched neighbours get their updated coordinates
-  function refreshItems() {
+  // Re-fetch all media so GPS-matched neighbours get their updated coordinates, and a changed
+  // capture time its place in the order. The current item stays current wherever it moved.
+  function refreshItems(afterTimeChange = false) {
     onItemsChanged?.();
+    const seq = ++refreshSeq.current;
+    const key = paramsKeyRef.current;
     api
       .listMedia(paramsRef.current)
       .then((data) => {
+        // A later refresh, or new params, has the list now.
+        if (seq !== refreshSeq.current || key !== paramsKeyRef.current) return;
         const sorted = sortByTakenAt(data);
+        const keep = currentIdRef.current;
+        const index = keep === null ? -1 : sorted.findIndex((m) => m.id === keep);
+        // After a time change, trip detection gives every trip nobody edited a new ID, so this
+        // trip's list comes back without the current item (empty, in fact). The page moves the
+        // gallery to the item's new trip or closes it; until then the list on screen stays, and
+        // with it the evidence view open on the item.
+        if (afterTimeChange && keep !== null && index < 0) return;
         setItems((prev) =>
           sorted.map((fresh) => {
             const existing = prev.find((m) => m.id === fresh.id);
             return existing ? { ...fresh, keyframes: existing.keyframes } : fresh;
           })
         );
+        if (index >= 0) setCurrentIndex(index);
       })
       .catch(console.error);
+  }
+
+  // Shown at once; the refresh then puts the item in its new place.
+  function applyTakenAt(id: string, takenAt: string) {
+    setItems((prev) => prev.map((m) => (m.id === id ? { ...m, taken_at: takenAt } : m)));
+  }
+
+  // A capture time changed, here or in the evidence view: the matcher placed the estimates near
+  // the old and new times again, and trip detection ran.
+  function timesChanged(tripId: string | null, notice: string | null) {
+    setTimeNotice(notice);
+    refreshItems(true);
+    onTimesChanged?.({ tripId, itemId: currentIdRef.current, notice });
+  }
+
+  // The evidence view may have changed the item behind a track point: its trip says nothing of
+  // where the current item is now.
+  function handleTimeSaved(id: string, result: SetTakenAtResult) {
+    applyTakenAt(id, result.taken_at);
+    timesChanged(id === currentIdRef.current ? result.trip_id : null, timeSavedMessage(result));
+  }
+
+  // The trip most shifted items are in is most likely this trip, regrouped, even when the current
+  // item was not among them; if it turns out not to hold the current item, the gallery says so.
+  function handleShifted(result: ShiftTimesResult, deltaSeconds: number, ids: string[]) {
+    const moved = new Set(ids);
+    setItems((prev) =>
+      prev.map((m) => {
+        const at = moved.has(m.id) && m.taken_at !== null ? shiftInstant(m.taken_at, deltaSeconds) : null;
+        return at === null ? m : { ...m, taken_at: at };
+      })
+    );
+    timesChanged(result.trips[0]?.id ?? null, shiftedMessage(result, deltaSeconds));
+  }
+
+  // A shift without an answer may have been saved: refresh as after one, with no trip to follow.
+  function handleShiftOutcomeUnknown() {
+    timesChanged(null, SHIFT_OUTCOME_UNKNOWN);
   }
 
   // The viewer remounts with these once the editor closes.
@@ -490,7 +593,10 @@ export function MediaGalleryOverlay({
   // Only while its item is current; the effect below forgets an editor whose item went away.
   const editorOpen = editing !== null && editing.id === currentItem?.id;
   const editingLocation = editorOpen && editing.kind === "location";
+  const editingTime = editorOpen && editing.kind === "time";
   const editingView = editorOpen && editing.kind === "view";
+  // Shifting needs a capture time to move, and only the owner's items can be moved.
+  const canShift = !loading && items.some((m) => m.owner_id === user.id && m.taken_at !== null);
   const is360 = currentItem?.media_type === "photo_360" || currentItem?.media_type === "video_360";
   // The view editor starts from the item's keyframes, so it waits for them: saving from an empty
   // list would delete the stored ones.
@@ -526,7 +632,8 @@ export function MediaGalleryOverlay({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, currentIndex, items.length, editorOpen, evidenceOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Not under an editor or the evidence view: their keys must not play the item they cover.
+  // Not under an editor or the evidence view: their keys must not play the item they cover. Under
+  // a dialog (the shift dialog, the time editor) keyBelongsToDialog keeps them off as well.
   const videoKeys = useVideoKeys(videoRef, !editorOpen && !evidenceOpen);
 
   function renderMedia() {
@@ -643,14 +750,24 @@ export function MediaGalleryOverlay({
         {/* Title on the left, truncated; the toolbar keeps its size on the right. */}
         <div className="relative z-20 flex shrink-0 items-start gap-2 touch:items-center">
           {/* Empty while a gallery from the URL waits for its trip or album's name. */}
+          {/* Never squeezed to nothing: the toolbar's cap leaves it this much. */}
           {title && (
-            <div className="min-w-0 truncate rounded-full bg-black/50 px-3 py-1 text-sm font-medium text-white">
+            <div className="min-w-[5.5rem] truncate rounded-full bg-black/50 px-3 py-1 text-sm font-medium text-white">
               {title}
               {subtitle && <span className="ml-2 font-normal text-white/60">{subtitle}</span>}
             </div>
           )}
 
-          <div className="pointer-events-auto ml-auto flex shrink-0 items-center gap-2 rounded-xl bg-black/40 px-2 py-1.5 backdrop-blur-sm touch:gap-0 touch:px-0.5 touch:py-0">
+          {/* At most the row less the title's least width and the gap (less a little room without a
+              title): on the narrowest phones a full toolbar (an own located 360° item in a trip or
+              an album, seven buttons) wraps onto a second line instead of running off the screen
+              or squeezing the title to nothing. */}
+          <div
+            className={cn(
+              "pointer-events-auto ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2 rounded-xl bg-black/40 px-2 py-1.5 backdrop-blur-sm touch:gap-0 touch:px-0.5 touch:py-0",
+              title ? "max-w-[calc(100%-6rem)]" : "max-w-[calc(100%-2rem)]"
+            )}
+          >
             {currentItem?.lat !== null && currentItem?.lng !== null && currentItem && (
               <a
                 href={`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${currentItem.lat},${currentItem.lng}`}
@@ -679,6 +796,16 @@ export function MediaGalleryOverlay({
                 title="Edit GPS location"
               >
                 <MapPin className="h-5 w-5" />
+              </button>
+            )}
+            {currentItem && isOwn && (
+              <button
+                className={toolButton}
+                onClick={() => setEditing({ id: currentItem.id, kind: "time" })}
+                aria-label="Edit capture time"
+                title="Edit capture time"
+              >
+                <Clock className="h-5 w-5" />
               </button>
             )}
             {currentItem && isOwn && is360 && (
@@ -725,8 +852,20 @@ export function MediaGalleryOverlay({
 
           {/* Below the header row, so on a phone they get the full width, not the strip left
               of the toolbar. */}
-          {((currentItem && !isOwn) || actionError || itemMissing) && (
+          {((currentItem && !isOwn) || actionError || itemMissing || itemLeft || canShift || timeNotice) && (
             <div className="absolute left-0 top-full mt-1 flex max-w-full flex-col items-start gap-1">
+              {/* A gallery-wide action, so under the title rather than in the item's toolbar, which
+                  has no room for it on a phone. */}
+              {canShift && (
+                <button
+                  type="button"
+                  className="pointer-events-auto flex items-center gap-1.5 rounded-full bg-black/50 px-3 py-1 text-xs text-white/80 hover:bg-black/70 hover:text-white touch:min-h-11"
+                  onClick={() => setShiftOpen(true)}
+                >
+                  <CalendarClock className="h-4 w-4" aria-hidden="true" />
+                  Shift times…
+                </button>
+              )}
               {currentItem && !isOwn && (
                 <div className="max-w-full truncate rounded-full bg-black/50 px-3 py-1 text-xs text-white/80">
                   Shared by {currentItem.owner_name ?? "another user"}
@@ -735,6 +874,16 @@ export function MediaGalleryOverlay({
               {itemMissing && (
                 <div role="status" className="max-w-full rounded-lg bg-black/70 px-3 py-1 text-xs text-white sm:max-w-sm">
                   That item is not in this {route?.tab === "trips" ? "trip" : "album"}.
+                </div>
+              )}
+              {itemLeft && (
+                <div role="status" className="max-w-full rounded-lg bg-black/70 px-3 py-1 text-xs text-white sm:max-w-sm">
+                  The item you were on is no longer in this {route?.tab === "trips" ? "trip" : "album"}.
+                </div>
+              )}
+              {timeNotice && (
+                <div role="status" className="max-w-full rounded-lg bg-black/70 px-3 py-1 text-xs text-white sm:max-w-sm">
+                  {timeNotice}
                 </div>
               )}
               {actionError && (
@@ -863,9 +1012,28 @@ export function MediaGalleryOverlay({
             applyManualLocation(id, lat, lng);
             refreshItems();
           }}
-          onRematched={refreshItems}
+          onRematched={() => refreshItems()}
+          onTimeChanged={handleTimeSaved}
         />
       )}
+
+      {/* Dialogs: keyBelongsToDialog keeps the gallery's keys and the video keys off them, and
+          each owns a history entry above the gallery's, so back closes only the dialog. */}
+      <EditTimeModal
+        open={editingTime && isOwn}
+        item={editingTime ? currentItem : null}
+        onClose={() => setEditing(null)}
+        onSaved={(result) => editing && handleTimeSaved(editing.id, result)}
+      />
+      <ShiftTimesDialog
+        open={shiftOpen}
+        onOpenChange={setShiftOpen}
+        title={title ? `Shift times in "${title}"` : "Shift times"}
+        items={items}
+        currentUserId={user.id}
+        onShifted={handleShifted}
+        onOutcomeUnknown={handleShiftOutcomeUnknown}
+      />
 
       {editingView && currentItem && currentUrl && isOwn && (
         <EditViewModal

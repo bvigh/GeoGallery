@@ -48,24 +48,77 @@ func RunGPSMatcher(ctx context.Context, db matcherDB, ownerID string, maxWindow 
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-
-	type pending struct {
-		id      string
-		takenAt time.Time
+	items, err := collectMatcherItems(rows)
+	if err != nil {
+		return err
 	}
-	var items []pending
+	return matchItems(ctx, db, ownerID, maxWindow, items)
+}
+
+// RunGPSMatcherAround is RunGPSMatcher with reprocess for the rows near some instants only: it
+// places ownerID's dated rows without an EXIF or manual location whose taken_at lies within
+// maxWindow of an instant in around. A track point at time p only ever enters the bracket of a row
+// within maxWindow of p, so after points moved from or to some instants (a capture time changed by
+// hand) these are the only rows whose estimate can change, and the rest of a large library is not
+// read again. Nothing runs without an instant.
+//
+// GPS stays per owner, as in RunGPSMatcher: the literal owner_id filter is deliberate and must never
+// become readableMediaCond.
+func RunGPSMatcherAround(ctx context.Context, db matcherDB, ownerID string, maxWindow time.Duration, around []time.Time) error {
+	ranges := mergeTimeRanges(around, maxWindow)
+	if len(ranges) == 0 {
+		return nil
+	}
+	los := make([]time.Time, len(ranges))
+	his := make([]time.Time, len(ranges))
+	for i, r := range ranges {
+		los[i], his[i] = r.lo, r.hi
+	}
+	// The ranges are disjoint, so the join lists a row once, and each range is one scan of
+	// media_owner_taken_at_idx however large the library is.
+	rows, err := db.Query(ctx, `
+		SELECT m.id, m.taken_at
+		FROM unnest($2::timestamptz[], $3::timestamptz[]) AS r(lo, hi)
+		JOIN media m ON m.owner_id = $1 AND m.taken_at BETWEEN r.lo AND r.hi
+		WHERE m.gps_source IS NULL OR m.gps_source = 'interpolated'
+	`, ownerID, los, his)
+	if err != nil {
+		return err
+	}
+	items, err := collectMatcherItems(rows)
+	if err != nil {
+		return err
+	}
+	return matchItems(ctx, db, ownerID, maxWindow, items)
+}
+
+// matcherItem is a row the matcher listed, with taken_at as it was listed.
+type matcherItem struct {
+	id      string
+	takenAt time.Time
+}
+
+// collectMatcherItems reads the matcher's listing in full, so no rows are held open while each item
+// queries its bracket.
+func collectMatcherItems(rows pgx.Rows) ([]matcherItem, error) {
+	defer rows.Close()
+	var items []matcherItem
 	for rows.Next() {
-		var p pending
+		var p matcherItem
 		if err := rows.Scan(&p.id, &p.takenAt); err != nil {
-			return err
+			return nil, err
 		}
 		items = append(items, p)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
+	return items, nil
+}
 
+// matchItems interpolates a position for each listed item from ownerID's track points and writes
+// it, the per-item loop RunGPSMatcher and RunGPSMatcherAround share.
+func matchItems(ctx context.Context, db matcherDB, ownerID string, maxWindow time.Duration, items []matcherItem) error {
 	for _, item := range items {
 		before, after, err := bracketingPoints(ctx, db, ownerID, item.takenAt, maxWindow, bracketOptions{})
 		if err != nil {
@@ -77,9 +130,10 @@ func RunGPSMatcher(ctx context.Context, db matcherDB, ownerID string, maxWindow 
 			continue
 		}
 
-		// Written only while the row is as listed. `server retime` may have moved taken_at since,
-		// and a position computed at the old time would stay: a later run keeps a location it
-		// cannot recompute. A location set by hand meanwhile must not be overwritten either.
+		// Written only while the row is as listed. `server retime` or a capture time changed by hand
+		// may have moved taken_at since, and a position computed at the old time would stay: a later
+		// run keeps a location it cannot recompute. A location set by hand meanwhile must not be
+		// overwritten either.
 		_, err = db.Exec(ctx, `
 			UPDATE media
 			SET location       = ST_SetSRID(ST_MakePoint($1, $2), 4326),
@@ -93,6 +147,34 @@ func RunGPSMatcher(ctx context.Context, db matcherDB, ownerID string, maxWindow 
 		}
 	}
 	return nil
+}
+
+// timeRange is the closed interval [lo, hi].
+type timeRange struct {
+	lo, hi time.Time
+}
+
+// mergeTimeRanges returns the instants' windows, [t - window, t + window] each, merged where they
+// overlap or touch and ordered by start. Merged, they never select a row twice, and a run of nearby
+// instants (a burst shifted together) becomes one range.
+func mergeTimeRanges(instants []time.Time, window time.Duration) []timeRange {
+	if len(instants) == 0 {
+		return nil
+	}
+	sorted := slices.SortedFunc(slices.Values(instants), func(a, b time.Time) int { return a.Compare(b) })
+	ranges := []timeRange{{sorted[0].Add(-window), sorted[0].Add(window)}}
+	for _, t := range sorted[1:] {
+		lo, hi := t.Add(-window), t.Add(window)
+		last := &ranges[len(ranges)-1]
+		if !lo.After(last.hi) {
+			if hi.After(last.hi) {
+				last.hi = hi
+			}
+			continue
+		}
+		ranges = append(ranges, timeRange{lo, hi})
+	}
+	return ranges
 }
 
 // bracketOptions narrows the track points bracketingPoints may pick. The zero value is what the

@@ -37,7 +37,11 @@ describe("CameraTimeZone", () => {
     render(<CameraTimeZone />);
     expect(screen.getByRole("heading", { name: "Camera time zone" })).toBeInTheDocument();
     expect(screen.getByText(/only when the file does not say its own offset/)).toBeInTheDocument();
-    expect(screen.getByText(/keep their times until an administrator runs/)).toBeInTheDocument();
+    // The owner can move stored times too, and a time changed by hand stays when retime runs.
+    const stored = screen.getByText(/keep their times until you edit or shift them, or an administrator runs/);
+    expect(stored).toHaveTextContent(
+      "apart from files uploaded with a zone of their own and items whose time you changed by hand."
+    );
     expect(await screen.findByText("Your browser is in Europe/Budapest.")).toBeInTheDocument();
   });
 

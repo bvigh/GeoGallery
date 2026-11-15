@@ -85,7 +85,7 @@ func newOwnershipRouter(pool *pgxpool.Pool, store *fakeObjectStore) http.Handler
 		db: pool, pool: pool, storage: store,
 		registrar:   &MediaRegistrar{db: pool, storage: store},
 		matcherPool: pool, matchWindow: time.Hour, runMatcher: RunGPSMatcher,
-		tripGapHours: 24, runTripDetect: RunTripDetect,
+		tripGapHours: 24, runTripDetect: RunTripDetect, runMatcherAround: RunGPSMatcherAround,
 	}
 	trips := NewTripHandler(pool, 24)
 	game := &GameHandler{db: pool, storage: store}
@@ -112,6 +112,8 @@ func newOwnershipRouter(pool *pgxpool.Pool, store *fakeObjectStore) http.Handler
 		r.Post("/media/known-hashes", media.KnownHashes)
 		r.Get("/media/{id}/url", media.GetURL)
 		r.Patch("/media/{id}/location", media.UpdateLocation)
+		r.Patch("/media/{id}/taken-at", media.SetTakenAt)
+		r.Post("/media/shift-time", media.ShiftTimes)
 		r.Patch("/media/{id}/view-settings", media.UpdateViewSettings)
 		r.Get("/media/{id}/keyframes", media.GetKeyframes)
 		r.Put("/media/{id}/keyframes", media.ReplaceKeyframes)
@@ -267,6 +269,8 @@ type mediaSnapshot struct {
 	tripID    *string
 	yaw       *float64
 	keyframes int
+	takenAt   *string // as text, so two snapshots compare equal whatever zone pgx reads a time in
+	timeEdit  *string
 }
 
 func snapshotMedia(t *testing.T, pool *pgxpool.Pool, id string) mediaSnapshot {
@@ -274,8 +278,9 @@ func snapshotMedia(t *testing.T, pool *pgxpool.Pool, id string) mediaSnapshot {
 	var s mediaSnapshot
 	require.NoError(t, pool.QueryRow(context.Background(), `
 		SELECT ST_Y(location::geometry), ST_X(location::geometry), gps_source, trip_id::text, initial_yaw,
-		       (SELECT COUNT(*) FROM video_keyframes WHERE media_id = m.id)
-		FROM media m WHERE id = $1`, id).Scan(&s.lat, &s.lng, &s.gpsSource, &s.tripID, &s.yaw, &s.keyframes))
+		       (SELECT COUNT(*) FROM video_keyframes WHERE media_id = m.id), taken_at::text, time_edit::text
+		FROM media m WHERE id = $1`, id).Scan(&s.lat, &s.lng, &s.gpsSource, &s.tripID, &s.yaw, &s.keyframes,
+		&s.takenAt, &s.timeEdit))
 	return s
 }
 
@@ -289,6 +294,7 @@ func tripName(t *testing.T, pool *pgxpool.Pool, id string) string {
 func TestOwnership_ForeignResourcesAreInvisible(t *testing.T) {
 	f := newOwnershipFixture(t)
 	before := snapshotMedia(t, f.pool, f.mediaA)
+	beforeB := snapshotMedia(t, f.pool, f.mediaB)
 
 	guess := `{"media_id":"` + f.mediaA + `","guess_lat":47.5,"guess_lng":19.0,"guess_date":"2024-05-02","max_dist_km":100}`
 	tests := []struct {
@@ -306,6 +312,12 @@ func TestOwnership_ForeignResourcesAreInvisible(t *testing.T) {
 		{"get keyframes", http.MethodGet, "/api/media/" + f.mediaA + "/keyframes", "", http.StatusOK, "[]", http.StatusOK},
 		{"replace keyframes", http.MethodPut, "/api/media/" + f.mediaA + "/keyframes", `[{"time":1,"yaw":0,"pitch":0,"fov":90}]`, http.StatusNotFound, "", 0},
 		{"delete media", http.MethodDelete, "/api/media/" + f.mediaA, "", http.StatusNotFound, "", 0},
+		{"set capture time", http.MethodPatch, "/api/media/" + f.mediaA + "/taken-at",
+			`{"wall":"2024-05-02T13:00:00","utc_offset_min":0}`, http.StatusNotFound, "", 0},
+		{"shift capture time", http.MethodPost, "/api/media/shift-time",
+			`{"media_ids":["` + f.mediaA + `"],"delta_seconds":3600}`, http.StatusNotFound, "", 0},
+		{"shift own and foreign capture times", http.MethodPost, "/api/media/shift-time",
+			`{"media_ids":["` + f.mediaB + `","` + f.mediaA + `"],"delta_seconds":3600}`, http.StatusNotFound, "", 0},
 		{"rename trip", http.MethodPatch, "/api/trips/" + f.tripA, `{"name":"pwned"}`, http.StatusNotFound, "", 0},
 		{"delete trip", http.MethodDelete, "/api/trips/" + f.tripA, "", http.StatusNotFound, "", 0},
 		{"guess", http.MethodPost, "/api/game/guess", guess, http.StatusNotFound, "", http.StatusOK},
@@ -333,6 +345,9 @@ func TestOwnership_ForeignResourcesAreInvisible(t *testing.T) {
 
 	t.Run("A's resources are unchanged", func(t *testing.T) {
 		assert.Equal(t, before, snapshotMedia(t, f.pool, f.mediaA))
+		assert.Nil(t, before.timeEdit)
+		assert.Equal(t, []string{}, retimeTrackTimes(t, f.pool, f.userA, "manual"), "no point moved or made")
+		assert.Equal(t, beforeB, snapshotMedia(t, f.pool, f.mediaB), "B's own item in the refused shift did not move")
 		assert.Equal(t, 2, before.keyframes)
 		assert.Equal(t, "A trip", tripName(t, f.pool, f.tripA))
 		assert.Empty(t, f.store.deleted)

@@ -5,11 +5,15 @@ import { chipClass, Fact, InstantFacts } from "@/components/evidence/PointCard";
 import {
   cameraClock,
   checkSentence,
+  EDIT_KEEPS_TIME,
   NOT_RECORDED,
   rereadClockRuleNote,
   rereadSentence,
   REREAD_NOT_RECORDED,
   retimeSentence,
+  timeEditEntered,
+  timeEditInstants,
+  timeEditSentence,
   timeOriginChip,
   VIDEO_TIME_MAY_BE_END,
   zoneChip,
@@ -23,10 +27,12 @@ const REREAD_DELAY_MS = 400;
 
 const smallButton = "rounded border border-border px-2 py-1 text-xs hover:bg-muted disabled:opacity-50 touch:min-h-11";
 
+// Keyed by the item and its stored time: the re-read compares the file with that time, so one
+// made before the owner changed it no longer says anything.
 type RereadState =
-  | { id: string; status: "loading" }
-  | { id: string; status: "done"; data: FileReread }
-  | { id: string; status: "failed" };
+  | { key: string; status: "loading" }
+  | { key: string; status: "done"; data: FileReread }
+  | { key: string; status: "failed" };
 
 interface TimeCardProps {
   item: ProvenanceResponse["item"];
@@ -37,32 +43,35 @@ interface TimeCardProps {
 
 export function TimeCard({ item, time, inert = false }: TimeCardProps) {
   const [reread, setReread] = useState<RereadState | null>(null);
-  // The button (or Try again) for one item, counted so that pressing it again runs the effect.
-  const [asked, setAsked] = useState<{ id: string; attempt: number } | null>(null);
+  // The button (or Try again) for one item and time, counted so that pressing it again runs the
+  // effect.
+  const [asked, setAsked] = useState<{ key: string; attempt: number } | null>(null);
 
   const evidence = time.evidence;
+  const edit = time.edit ?? null;
   const automatic = time.recorded === "not_recorded";
-  const askedAttempt = asked?.id === item.id ? asked.attempt : 0;
-  const wanted = automatic || askedAttempt > 0;
-  const current = reread?.id === item.id ? reread : null;
-  const loaded = current?.status === "done";
   const id = item.id;
+  const key = `${id} ${item.taken_at ?? ""}`;
+  const askedAttempt = asked?.key === key ? asked.attempt : 0;
+  const wanted = automatic || askedAttempt > 0;
+  const current = reread?.key === key ? reread : null;
+  const loaded = current?.status === "done";
 
   useEffect(() => {
     if (inert || !wanted || loaded) return;
     const controller = new AbortController();
 
     function start() {
-      setReread({ id, status: "loading" });
+      setReread({ key, status: "loading" });
       api
         .mediaProvenanceFile(id, controller.signal)
         .then((data) => {
-          if (!controller.signal.aborted) setReread({ id, status: "done", data });
+          if (!controller.signal.aborted) setReread({ key, status: "done", data });
         })
         .catch((e) => {
           if (controller.signal.aborted) return;
           console.error("Failed to re-read the file:", e);
-          setReread({ id, status: "failed" });
+          setReread({ key, status: "failed" });
         });
     }
 
@@ -73,23 +82,30 @@ export function TimeCard({ item, time, inert = false }: TimeCardProps) {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [id, inert, wanted, loaded, askedAttempt]);
+  }, [id, key, inert, wanted, loaded, askedAttempt]);
 
   function askReread() {
-    setAsked({ id, attempt: askedAttempt + 1 });
+    setAsked({ key, attempt: askedAttempt + 1 });
   }
 
   const file = current?.status === "done" ? current.data : null;
-  const clock = cameraClock(evidence, file);
+  // After a change by hand, the evidence and the re-read describe the file's own time, not the
+  // stored one: they are labelled so.
+  const edited = edit !== null;
+  const clock = cameraClock(evidence, file, edited);
   const origin = timeOriginChip(evidence, file);
-  const zone = zoneChip(evidence, file, time.server_camera_zone);
+  const zone = zoneChip(evidence, file, time.server_camera_zone, edited);
   const isVideo = item.media_type === "video" || item.media_type === "video_360";
   const duration = item.duration_sec ?? evidence?.duration_s ?? file?.file.video?.duration_s ?? null;
   // Only a container time can be the end of the clip; a modified date cannot.
   const timeFromContainer = evidence ? evidence.src === "container" : file?.rule_today?.source === "container";
   const offsetTag = file?.file.offset_tag ?? evidence?.offset_tag ?? null;
-  const retime = retimeSentence(evidence, item.taken_at);
-  const rereadRuleNote = file ? rereadClockRuleNote(file) : null;
+  const browserZone = browserTimeZone();
+  // server retime never moves a time the owner changed, so it ran before the first change, and
+  // left the time that change started from.
+  const retime = retimeSentence(evidence, edit ? edit.original : item.taken_at);
+  const rereadRuleNote = file ? rereadClockRuleNote(file, edit) : null;
+  const entered = edit ? timeEditEntered(edit) : null;
 
   const checks = (file?.checks ?? []).flatMap((check) => {
     // Decided below, from where the stored time came from, and shown beside the duration.
@@ -100,6 +116,7 @@ export function TimeCard({ item, time, inert = false }: TimeCardProps) {
 
   // Every other instant: UTC and the browser zone, never a camera clock.
   const otherInstants: [label: string, iso: string | null][] = [
+    ...timeEditInstants(edit),
     ["Before re-time", retime ? (evidence?.retimed_from ?? null) : null],
     ["GPS clock", evidence?.gps_utc ?? file?.file.gps_stamp ?? null],
     ["Container time", evidence?.creation_time ?? file?.file.video?.creation_time ?? null],
@@ -113,16 +130,22 @@ export function TimeCard({ item, time, inert = false }: TimeCardProps) {
 
       <dl className="space-y-0.5 text-xs">
         <Fact label="UTC">{item.taken_at ? formatInstant(item.taken_at, "UTC") : NOT_RECORDED}</Fact>
-        <Fact label="Camera">
+        <Fact label={edited ? "Camera clock in the file" : "Camera"}>
           {clock.text}
           {clock.word && <span className="text-muted-foreground"> · {clock.word}</span>}
         </Fact>
         <Fact label="Your browser">
-          {item.taken_at ? formatInstant(item.taken_at, browserTimeZone()) : NOT_RECORDED}
+          {item.taken_at ? formatInstant(item.taken_at, browserZone) : NOT_RECORDED}
         </Fact>
       </dl>
 
-      <div className="flex flex-wrap gap-1">
+      <div className="flex flex-wrap items-center gap-1">
+        {edit && (
+          <>
+            <span className={chipClass}>{edit.kind === "shift" ? "Shifted by hand" : "Set by hand"}</span>
+            <span className="text-xs text-muted-foreground">Read from the file:</span>
+          </>
+        )}
         <span className={chipClass}>{origin.text}</span>
         {zone && <span className={chipClass}>{zone.text}</span>}
       </div>
@@ -139,6 +162,13 @@ export function TimeCard({ item, time, inert = false }: TimeCardProps) {
         </p>
       )}
       {retime && <p className="text-xs">{retime}</p>}
+      {edit && (
+        <div className="space-y-0.5 text-xs">
+          <p>{timeEditSentence(edit, browserZone)}</p>
+          {entered && <p className="text-muted-foreground">{entered}</p>}
+          <p className="text-muted-foreground">{EDIT_KEEPS_TIME}</p>
+        </div>
+      )}
 
       {isVideo && (duration !== null || timeFromContainer) && (
         <p className="text-xs text-muted-foreground">
@@ -162,7 +192,7 @@ export function TimeCard({ item, time, inert = false }: TimeCardProps) {
           </button>
         </div>
       )}
-      {file && <p className="text-xs">{rereadSentence(file, item.media_type, evidence)}</p>}
+      {file && <p className="text-xs">{rereadSentence(file, item.media_type, evidence, edit)}</p>}
       {rereadRuleNote && <p className="text-xs text-muted-foreground">{rereadRuleNote}</p>}
 
       {checks.length > 0 && (

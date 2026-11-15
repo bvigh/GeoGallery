@@ -9,7 +9,8 @@ import type { EvidenceViewProps } from "@/components/evidence/EvidenceView";
 import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
 import { formatInstant } from "@/lib/time";
 import { BACK_DEPTH_KEY } from "@/lib/history";
-import type { Album, CurrentUser, MediaItem } from "@/types";
+import { FOLLOWUP_FAILED, FOLLOWUP_FAILED_SHIFT, SHIFT_OUTCOME_UNKNOWN } from "@/lib/timeEdit";
+import type { Album, CurrentUser, MediaItem, SetTakenAtResult } from "@/types";
 
 vi.mock("@/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/client")>();
@@ -28,6 +29,9 @@ vi.mock("@/api/client", async (importOriginal) => {
       // The view editor.
       updateViewSettings: vi.fn(),
       replaceKeyframes: vi.fn(),
+      // The capture time editor and the shift dialog.
+      setTakenAt: vi.fn(),
+      shiftTimes: vi.fn(),
     },
   };
 });
@@ -150,7 +154,9 @@ const mockApi = api as unknown as Record<
   | "addToAlbum"
   | "removeFromAlbum"
   | "updateViewSettings"
-  | "replaceKeyframes",
+  | "replaceKeyframes"
+  | "setTakenAt"
+  | "shiftTimes",
   ReturnType<typeof vi.fn>
 >;
 
@@ -302,6 +308,7 @@ describe("MediaGalleryOverlay", () => {
     await findPosition("1 / 2");
     expect(screen.getByRole("button", { name: "Delete media" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Edit GPS location" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit capture time" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Albums" })).toBeInTheDocument();
     expect(screen.queryByText(/Shared by/)).not.toBeInTheDocument();
 
@@ -309,6 +316,7 @@ describe("MediaGalleryOverlay", () => {
     expect(await screen.findByText("Shared by Bob")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete media" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Edit GPS location" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit capture time" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Albums" })).toBeInTheDocument();
   });
 
@@ -878,6 +886,7 @@ describe("MediaGalleryOverlay", () => {
       expect(toolbarButtons().map((b) => b.getAttribute("aria-label"))).toEqual([
         "Albums",
         "Edit GPS location",
+        "Edit capture time",
         "Edit default view",
         "Remove from album",
         "Delete media",
@@ -1009,6 +1018,440 @@ describe("MediaGalleryOverlay", () => {
       act(() => evidence.props!.onClose());
       expect(await findPosition("2 / 2")).toBeInTheDocument();
       expect(await screen.findByRole("button", { name: "Marker at 1,2" })).toBeInTheDocument();
+    });
+  });
+
+  describe("capture times", () => {
+    const early = makeItem("early", { taken_at: "2025-06-01T10:00:00Z", camera_model: "DC-TZ200" });
+    const late = makeItem("late", { taken_at: "2025-06-03T10:00:00Z", camera_model: "DC-TZ200" });
+    const bobs = makeItem("bobs", { taken_at: "2025-06-02T10:00:00Z", owner_id: "u-bob", owner_name: "Bob" });
+    const timeDialog = () => screen.queryByRole("dialog", { name: "Edit capture time" });
+    const shiftDialog = () => screen.queryByRole("dialog", { name: /^Shift times/ });
+    const shiftButton = () => screen.queryByRole("button", { name: "Shift times…" });
+    const saved = (taken_at: string, trip_id: string | null = "t-new"): SetTakenAtResult => ({
+      taken_at,
+      trip_id,
+      followup_failed: false,
+    });
+
+    // The editor starts from the stored time, which there is nothing to save in: a date moves it.
+    async function saveTime() {
+      await userEvent.click(screen.getByRole("button", { name: "Edit capture time" }));
+      changeDate();
+      await userEvent.click(within(timeDialog()!).getByRole("button", { name: "Save time" }));
+    }
+
+    function changeDate(date = "2025-06-02") {
+      fireEvent.change(within(timeDialog()!).getByLabelText("Date"), { target: { value: date } });
+    }
+
+    beforeEach(() => {
+      evidence.props = null;
+    });
+
+    it("gives the time editor a 44px target on touch", async () => {
+      mockApi.listMedia.mockResolvedValue([early]);
+      renderOverlay();
+      await findPosition("1 / 1");
+      expect(screen.getByRole("button", { name: "Edit capture time" })).toHaveClass("touch:min-h-11", "touch:min-w-11");
+    });
+
+    // An own located 360° item in a trip has seven buttons, 7 × 44 px: on a 360 px phone the
+    // toolbar would otherwise take all of the row but the title's padding.
+    it("lets a full toolbar wrap rather than run off a narrow phone or squeeze the title out", async () => {
+      mockApi.listMedia.mockResolvedValue([{ ...early, media_type: "photo_360" }]);
+      renderOverlay({ params: { trip_id: "t1" }, route: { tab: "trips", collectionId: "t1" } });
+      await findPosition("1 / 1");
+      const toolbar = screen.getByRole("button", { name: "Close gallery" }).parentElement!;
+      expect(toolbar.querySelectorAll("a, button")).toHaveLength(7);
+      expect(toolbar).toHaveClass("flex-wrap", "justify-end", "max-w-[calc(100%-6rem)]");
+      // The 6rem left: the title's least width and the gap beside it.
+      expect(screen.getByText("Iceland")).toHaveClass("min-w-[5.5rem]", "truncate");
+      expect(toolbar.parentElement).toHaveClass("gap-2");
+    });
+
+    it("gives the toolbar the row while no title is shown", async () => {
+      mockApi.listMedia.mockResolvedValue([early]);
+      renderOverlay({ title: "" });
+      await findPosition("1 / 1");
+      const toolbar = screen.getByRole("button", { name: "Close gallery" }).parentElement!;
+      expect(toolbar).toHaveClass("max-w-[calc(100%-2rem)]");
+    });
+
+    it("saves a time, then stays on the item in its new place in the order", async () => {
+      const onItemsChanged = vi.fn();
+      const onTimesChanged = vi.fn();
+      mockApi.listMedia.mockResolvedValue([early, late]);
+      renderOverlay({ onItemsChanged, onTimesChanged });
+      await findPosition("1 / 2");
+      expect(timeDialog()).not.toBeInTheDocument();
+
+      // Moved past the other item: the list comes back in a new order.
+      const moved = { ...early, taken_at: "2025-06-04T10:00:00Z" };
+      mockApi.setTakenAt.mockResolvedValue(saved(moved.taken_at));
+      mockApi.listMedia.mockResolvedValue([late, moved]);
+      await userEvent.click(screen.getByRole("button", { name: "Edit capture time" }));
+      expect(within(timeDialog()!).getByText("early.jpg")).toBeInTheDocument();
+      changeDate("2025-06-04");
+      await userEvent.click(within(timeDialog()!).getByRole("button", { name: "Save time" }));
+
+      expect(mockApi.setTakenAt).toHaveBeenCalledWith("early", expect.stringMatching(/^2025-06-0/), expect.anything());
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Why here\? early\.jpg/ })).toBeInTheDocument();
+      expect(timeDialog()).not.toBeInTheDocument();
+      expect(mockApi.listMedia).toHaveBeenCalledTimes(2);
+      expect(onItemsChanged).toHaveBeenCalledTimes(1);
+      expect(onTimesChanged).toHaveBeenCalledWith({ tripId: "t-new", itemId: "early", notice: null });
+    });
+
+    it("shows the saved time at once, before the list comes back", async () => {
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      mockApi.listMedia.mockResolvedValue([early, late]);
+      renderOverlay();
+      await findPosition("1 / 2");
+      mockApi.setTakenAt.mockResolvedValue(saved("2025-06-01T08:00:00Z"));
+      mockApi.listMedia.mockReturnValue(new Promise(() => {}));
+      await saveTime();
+      expect(await screen.findByText(formatInstant("2025-06-01T08:00:00Z", zone, { seconds: false }))).toBeInTheDocument();
+    });
+
+    it("says when the save's follow-up failed, until the user moves on", async () => {
+      mockApi.listMedia.mockResolvedValue([early, late]);
+      renderOverlay();
+      await findPosition("1 / 2");
+      mockApi.setTakenAt.mockResolvedValue({ ...saved(early.taken_at!), followup_failed: true });
+      await saveTime();
+      expect(await screen.findByRole("status")).toHaveTextContent(FOLLOWUP_FAILED);
+
+      await userEvent.keyboard("{ArrowRight}");
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    });
+
+    it("keeps the list on screen when its trip was regrouped, then follows the page to the new trip on the same item", async () => {
+      const onTimesChanged = vi.fn();
+      const other = makeItem("other", { taken_at: "2025-05-01T10:00:00Z" });
+      mockApi.listMedia.mockResolvedValue([early, late]);
+      const { rerender, props } = renderOverlay({ params: { trip_id: "t-old" }, onTimesChanged });
+      await findPosition("1 / 2");
+      await userEvent.click(screen.getByRole("button", { name: "Next" }));
+      await findPosition("2 / 2");
+
+      // Trip detection gave every trip nobody edited a new ID: the old one lists nothing.
+      mockApi.setTakenAt.mockResolvedValue(saved("2025-06-03T09:00:00Z"));
+      mockApi.listMedia.mockResolvedValue([]);
+      await saveTime();
+      await waitFor(() => expect(onTimesChanged).toHaveBeenCalledWith({ tripId: "t-new", itemId: "late", notice: null }));
+      await waitFor(() => expect(mockApi.listMedia).toHaveBeenCalledTimes(2));
+      await act(async () => {});
+      expect(getPosition("2 / 2")).toBeInTheDocument();
+      expect(screen.queryByText("No media here")).not.toBeInTheDocument();
+
+      // The page moves the gallery there; the new trip holds the item among others.
+      mockApi.listMedia.mockResolvedValue([other, early, { ...late, taken_at: "2025-06-03T09:00:00Z" }]);
+      rerender(
+        <AuthContext.Provider value={me}>
+          <MediaGalleryOverlay {...props} params={{ trip_id: "t-new" }} />
+        </AuthContext.Provider>
+      );
+      expect(await findPosition("3 / 3")).toBeInTheDocument();
+      expect(mockApi.listMedia).toHaveBeenLastCalledWith({ trip_id: "t-new" });
+      expect(screen.getByRole("button", { name: /Why here\? late\.jpg/ })).toBeInTheDocument();
+      expect(screen.queryByText(/That item is not in this/)).not.toBeInTheDocument();
+    });
+
+    it("starts at the first item when new params do not hold the current one, and says so", async () => {
+      mockApi.listMedia.mockResolvedValue([early, late]);
+      const route = { tab: "trips" as const, collectionId: "t1" };
+      const { rerender, props } = renderOverlay({ params: { trip_id: "t1" }, route });
+      await findPosition("1 / 2");
+      await userEvent.click(screen.getByRole("button", { name: "Next" }));
+      await findPosition("2 / 2");
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+
+      mockApi.listMedia.mockResolvedValue([own, early]);
+      rerender(
+        <AuthContext.Provider value={me}>
+          <MediaGalleryOverlay {...props} params={{ trip_id: "t2" }} route={{ ...route, collectionId: "t2" }} />
+        </AuthContext.Provider>
+      );
+      expect(await findPosition("1 / 2")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Why here\? own\.jpg/ })).toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent("The item you were on is no longer in this trip.");
+
+      // Until the user moves on.
+      await userEvent.click(screen.getByRole("button", { name: "Next" }));
+      await findPosition("2 / 2");
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    });
+
+    it("drops a refresh that answers after the params changed", async () => {
+      mockApi.listMedia.mockResolvedValue([early, late]);
+      const { rerender, props } = renderOverlay({ params: { trip_id: "t1" } });
+      await findPosition("1 / 2");
+      const stale = deferred<MediaItem[]>();
+      mockApi.listMedia.mockReturnValue(stale.promise);
+      mockApi.setTakenAt.mockResolvedValue(saved(early.taken_at!));
+      await saveTime();
+      await waitFor(() => expect(mockApi.listMedia).toHaveBeenCalledTimes(2));
+
+      mockApi.listMedia.mockResolvedValue([early, late, own]);
+      rerender(
+        <AuthContext.Provider value={me}>
+          <MediaGalleryOverlay {...props} params={{ trip_id: "t2" }} />
+        </AuthContext.Provider>
+      );
+      expect(await findPosition("1 / 3")).toBeInTheDocument();
+      await act(async () => stale.resolve([late]));
+      expect(getPosition("1 / 3")).toBeInTheDocument();
+    });
+
+    // Two refreshes in flight (a time change, then a re-match): the later list wins, whichever
+    // answers last.
+    it("keeps the later refresh's list when an earlier one answers after it", async () => {
+      mockApi.listMedia.mockResolvedValue([early, late]);
+      renderOverlay();
+      await findPosition("1 / 2");
+      await userEvent.click(screen.getByRole("button", { name: /Why here\?/ }));
+      const first = deferred<MediaItem[]>();
+      const second = deferred<MediaItem[]>();
+      mockApi.listMedia.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+
+      act(() => evidence.props!.onTimeChanged!("early", saved("2025-06-05T10:00:00Z")));
+      act(() => evidence.props!.onRematched());
+      expect(mockApi.listMedia).toHaveBeenCalledTimes(3);
+
+      const moved = { ...early, taken_at: "2025-06-05T10:00:00Z", lat: 1, lng: 2 };
+      await act(async () => second.resolve([late, moved]));
+      await waitFor(() => expect(evidence.props!.position).toBe("2 / 2"));
+      // The earlier answer still had the old order and position.
+      await act(async () => first.resolve([early, late]));
+      expect(evidence.props!.position).toBe("2 / 2");
+      act(() => evidence.props!.onClose());
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Marker at 1,2" })).toBeInTheDocument();
+    });
+
+    // The evidence view can change the item behind a track point: its trip says nothing of where
+    // the gallery's item went.
+    it("hints at no trip after a time change to an item the gallery is not on", async () => {
+      const onTimesChanged = vi.fn();
+      mockApi.listMedia.mockResolvedValue([early, late]);
+      renderOverlay({ onTimesChanged });
+      await findPosition("1 / 2");
+      await userEvent.click(screen.getByRole("button", { name: /Why here\?/ }));
+      act(() => evidence.props!.onTimeChanged!("behind", saved("2025-06-05T10:00:00Z", "t3")));
+      expect(onTimesChanged).toHaveBeenCalledWith({ tripId: null, itemId: "early", notice: null });
+      await waitFor(() => expect(mockApi.listMedia).toHaveBeenCalledTimes(2));
+    });
+
+    it("refreshes and tells the page after a time change in the evidence view, keeping its item", async () => {
+      const onItemsChanged = vi.fn();
+      const onTimesChanged = vi.fn();
+      mockApi.listMedia.mockResolvedValue([early, late]);
+      renderOverlay({ onItemsChanged, onTimesChanged });
+      await findPosition("1 / 2");
+      await userEvent.click(screen.getByRole("button", { name: /Why here\?/ }));
+      expect(evidence.props!.position).toBe("1 / 2");
+
+      mockApi.listMedia.mockResolvedValue([late, { ...early, taken_at: "2025-06-05T10:00:00Z" }]);
+      act(() => evidence.props!.onTimeChanged!("early", saved("2025-06-05T10:00:00Z", "t3")));
+      expect(onItemsChanged).toHaveBeenCalledTimes(1);
+      expect(onTimesChanged).toHaveBeenCalledWith({ tripId: "t3", itemId: "early", notice: null });
+      await waitFor(() => expect(evidence.props!.position).toBe("2 / 2"));
+      expect(evidence.props!.mediaId).toBe("early");
+    });
+
+    describe("shift", () => {
+      it("is offered from an own dated item on, with a 44px target", async () => {
+        mockApi.listMedia.mockResolvedValue([bobs, makeItem("undated")]);
+        const { unmount } = renderOverlay();
+        await findPosition("1 / 2");
+        expect(shiftButton()).not.toBeInTheDocument();
+        unmount();
+
+        mockApi.listMedia.mockResolvedValue([{ ...bobs, taken_at: "2025-05-01T10:00:00Z" }, early]);
+        renderOverlay();
+        await findPosition("1 / 2");
+        expect(shiftButton()).toHaveClass("touch:min-h-11");
+        // A shared item is current, and the gallery still offers it.
+        expect(screen.getByText("Shared by Bob")).toBeInTheDocument();
+      });
+
+      it("hands the dialog the gallery's items and moves the ticked ones", async () => {
+        const onTimesChanged = vi.fn();
+        mockApi.listMedia.mockResolvedValue([early, bobs, late]);
+        mockApi.shiftTimes.mockResolvedValue({ shifted: 2, undated: 0, trips: [{ id: "t2", items: 2 }], followup_failed: false });
+        renderOverlay({ onTimesChanged });
+        await findPosition("1 / 3");
+
+        await userEvent.click(shiftButton()!);
+        const dialog = shiftDialog()!;
+        expect(dialog).toHaveAccessibleName('Shift times in "Iceland"');
+        expect(within(dialog).getByRole("checkbox", { name: /DC-TZ200/ })).toBeChecked();
+        expect(within(dialog).getByText(/1 item shared by others is left out/)).toBeInTheDocument();
+        await userEvent.type(within(dialog).getByLabelText("Days"), "2");
+        mockApi.listMedia.mockResolvedValue([bobs, { ...early, taken_at: "2025-06-03T10:00:00Z" }, { ...late, taken_at: "2025-06-05T10:00:00Z" }]);
+        await userEvent.click(within(dialog).getByRole("button", { name: "Shift 2 items" }));
+
+        expect(mockApi.shiftTimes).toHaveBeenCalledWith(["early", "late"], 172800);
+        await waitFor(() => expect(onTimesChanged).toHaveBeenCalledWith({ tripId: "t2", itemId: "early", notice: "Shifted 2 items 2 d later." }));
+        expect(await screen.findByText("Shifted 2 items 2 d later.")).toBeInTheDocument();
+        expect(shiftDialog()).not.toBeInTheDocument();
+        // Now after Bob's: the gallery stays on it in its new place.
+        expect(await findPosition("2 / 3")).toBeInTheDocument();
+      });
+
+      it("hints at no trip when the shifted items are in none", async () => {
+        const onTimesChanged = vi.fn();
+        mockApi.listMedia.mockResolvedValue([early]);
+        mockApi.shiftTimes.mockResolvedValue({ shifted: 1, undated: 0, trips: [], followup_failed: true });
+        renderOverlay({ onTimesChanged });
+        await findPosition("1 / 1");
+        await userEvent.click(shiftButton()!);
+        await userEvent.type(within(shiftDialog()!).getByLabelText("Minutes"), "5");
+        await userEvent.click(within(shiftDialog()!).getByRole("button", { name: "Shift 1 item" }));
+        await waitFor(() =>
+          expect(onTimesChanged).toHaveBeenCalledWith({
+            tripId: null,
+            itemId: "early",
+            notice: `Shifted 1 item 5 min later. ${FOLLOWUP_FAILED_SHIFT}`,
+          })
+        );
+        expect(await screen.findByRole("status")).toHaveTextContent(`Shifted 1 item 5 min later. ${FOLLOWUP_FAILED_SHIFT}`);
+      });
+
+      it("shows the shifted times at once, before the list comes back", async () => {
+        const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        mockApi.listMedia.mockResolvedValue([early]);
+        mockApi.shiftTimes.mockResolvedValue({ shifted: 1, undated: 0, trips: [{ id: "t1", items: 1 }], followup_failed: false });
+        renderOverlay();
+        await findPosition("1 / 1");
+        mockApi.listMedia.mockReturnValue(new Promise(() => {}));
+        await userEvent.click(shiftButton()!);
+        await userEvent.type(within(shiftDialog()!).getByLabelText("Hours"), "2");
+        await userEvent.click(within(shiftDialog()!).getByRole("button", { name: "Shift 1 item" }));
+        expect(await screen.findByText(formatInstant("2025-06-01T12:00:00Z", zone, { seconds: false }))).toBeInTheDocument();
+      });
+
+      // The trip most shifted items went to is most likely this one, regrouped; when the current
+      // item, which was not shifted, is not in it, the gallery says so.
+      it("says so when the trip the shift points to does not hold the item the gallery was on", async () => {
+        const onTimesChanged = vi.fn();
+        const phone = makeItem("phone", { taken_at: "2025-06-02T10:00:00Z", camera_model: "SM-S921B" });
+        const route = { tab: "trips" as const, collectionId: "t1" };
+        mockApi.listMedia.mockResolvedValue([early, phone, late]);
+        mockApi.shiftTimes.mockResolvedValue({ shifted: 2, undated: 0, trips: [{ id: "t2", items: 2 }], followup_failed: false });
+        const { rerender, props } = renderOverlay({ params: { trip_id: "t1" }, route, onTimesChanged });
+        await findPosition("1 / 3");
+        await userEvent.click(screen.getByRole("button", { name: "Next" }));
+        await findPosition("2 / 3");
+
+        await userEvent.click(shiftButton()!);
+        await userEvent.click(within(shiftDialog()!).getByRole("checkbox", { name: /DC-TZ200/ }));
+        await userEvent.type(within(shiftDialog()!).getByLabelText("Days"), "30");
+        mockApi.listMedia.mockResolvedValue([]);
+        await userEvent.click(within(shiftDialog()!).getByRole("button", { name: "Shift 2 items" }));
+        await waitFor(() => expect(onTimesChanged).toHaveBeenCalledWith({ tripId: "t2", itemId: "phone", notice: "Shifted 2 items 30 d later." }));
+
+        mockApi.listMedia.mockResolvedValue([
+          { ...early, taken_at: "2025-07-01T10:00:00Z" },
+          { ...late, taken_at: "2025-07-03T10:00:00Z" },
+        ]);
+        rerender(
+          <AuthContext.Provider value={me}>
+            <MediaGalleryOverlay {...props} params={{ trip_id: "t2" }} route={{ ...route, collectionId: "t2" }} />
+          </AuthContext.Provider>
+        );
+        expect(await screen.findByText("The item you were on is no longer in this trip.")).toBeInTheDocument();
+        expect(getPosition("1 / 2")).toBeInTheDocument();
+      });
+
+      // A gateway's 504 after the commit: the shift may have been saved.
+      it("refreshes and tells the page, with no trip to follow, when the shift's answer did not come", async () => {
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        const onItemsChanged = vi.fn();
+        const onTimesChanged = vi.fn();
+        mockApi.listMedia.mockResolvedValue([early, late]);
+        mockApi.shiftTimes.mockRejectedValue(new ApiError("POST failed: 504", 504));
+        renderOverlay({ onItemsChanged, onTimesChanged });
+        await findPosition("1 / 2");
+        await userEvent.click(shiftButton()!);
+        await userEvent.type(within(shiftDialog()!).getByLabelText("Hours"), "1");
+        await userEvent.click(within(shiftDialog()!).getByRole("button", { name: "Shift 2 items" }));
+
+        // The page may close the gallery, so the hint carries what the gallery says.
+        await waitFor(() =>
+          expect(onTimesChanged).toHaveBeenCalledWith({ tripId: null, itemId: "early", notice: SHIFT_OUTCOME_UNKNOWN })
+        );
+        expect(onItemsChanged).toHaveBeenCalledTimes(1);
+        await waitFor(() => expect(mockApi.listMedia).toHaveBeenCalledTimes(2));
+        // The dialog stays, with Apply off; the gallery behind it says the same.
+        expect(within(shiftDialog()!).getByRole("button", { name: "Shift 2 items" })).toBeDisabled();
+        expect(screen.getAllByText(SHIFT_OUTCOME_UNKNOWN)).toHaveLength(2);
+      });
+    });
+
+    describe("keys under the dialogs", () => {
+      const clip = makeItem("clip", { media_type: "video", taken_at: "2025-06-01T10:00:00Z" });
+
+      async function renderClip() {
+        mockApi.listMedia.mockResolvedValue([clip, late]);
+        const view = renderOverlay();
+        await waitFor(() => expect(view.container.querySelector("video")).toHaveAttribute("src"));
+        return { ...view, video: view.container.querySelector("video")! };
+      }
+
+      it.each([
+        ["the time editor", "Edit capture time", "Edit capture time"],
+        ["the shift dialog", "Shift times…", 'Shift times in "Iceland"'],
+      ])("leaves the gallery and the video alone under %s, and Escape closes only it", async (_name, opener, dialogName) => {
+        const { play, pause } = stubMediaPlayback();
+        const { props, video } = await renderClip();
+        await userEvent.click(screen.getByRole("button", { name: opener }));
+        expect(screen.getByRole("dialog", { name: dialogName })).toBeInTheDocument();
+
+        fireEvent.keyDown(document.body, { code: "Space", key: " " });
+        fireEvent.keyDown(document.body, { key: "m" });
+        fireEvent.keyDown(document.body, { key: "ArrowRight" });
+        expect(play).not.toHaveBeenCalled();
+        expect(video.muted).toBe(false);
+        expect(getPosition("1 / 2")).toBeInTheDocument();
+
+        await userEvent.keyboard("{Escape}");
+        expect(screen.queryByRole("dialog", { name: dialogName })).not.toBeInTheDocument();
+        expect(props.onClose).not.toHaveBeenCalled();
+
+        // Back in the gallery, its keys and the video's work again.
+        fireEvent.keyDown(document.body, { code: "Space", key: " " });
+        expect(play).toHaveBeenCalledOnce();
+        play.mockRestore();
+        pause.mockRestore();
+      });
+
+      it.each([
+        ["the time editor", "Edit capture time", "Edit capture time"],
+        ["the shift dialog", "Shift times…", 'Shift times in "Iceland"'],
+      ])("closes %s on the back gesture without closing the gallery", async (_name, opener, dialogName) => {
+        await settleHistory();
+        mockApi.listMedia.mockResolvedValue([early, late]);
+        const { props } = renderOverlay();
+        await findPosition("1 / 2");
+        const depth = () => (window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY] as number;
+        await waitFor(() => expect(depth()).toBe(1));
+        await userEvent.click(screen.getByRole("button", { name: opener }));
+        await waitFor(() => expect(depth()).toBe(2));
+
+        await act(async () => {
+          const popped = new Promise((resolve) => window.addEventListener("popstate", resolve, { once: true }));
+          window.history.back();
+          await popped;
+        });
+
+        expect(screen.queryByRole("dialog", { name: dialogName })).not.toBeInTheDocument();
+        expect(props.onClose).not.toHaveBeenCalled();
+        expect(depth()).toBe(1);
+      });
     });
   });
 
@@ -1549,6 +1992,33 @@ describe("MediaGalleryOverlay", () => {
       await settleHistory();
       expect(location()).toBe("/albums");
       expect(depth()).toBeUndefined();
+    });
+
+    it("follows new params on the same entry, the URL naming the current item while they load", async () => {
+      await settleHistory();
+      window.history.replaceState(null, "", "/trips");
+      const trip = { tab: "trips" as const, collectionId: "t-old" };
+      const { rerender, props, unmount } = renderOverlay({ params: { trip_id: "t-old" }, route: trip });
+      expect(await findPosition("1 / 2")).toBeInTheDocument();
+      await waitFor(() => expect(location()).toBe("/trips/t-old?item=own"));
+      const entries = window.history.length;
+
+      const list = deferred<MediaItem[]>();
+      mockApi.listMedia.mockReturnValue(list.promise);
+      rerender(
+        <AuthContext.Provider value={me}>
+          <MediaGalleryOverlay {...props} params={{ trip_id: "t-new" }} route={{ tab: "trips", collectionId: "t-new" }} />
+        </AuthContext.Provider>
+      );
+      await waitFor(() => expect(location()).toBe("/trips/t-new?item=own"));
+      await act(async () => list.resolve([makeItem("first", { taken_at: "2025-01-01T00:00:00Z" }), own]));
+      expect(await findPosition("2 / 2")).toBeInTheDocument();
+      await settleHistory();
+      expect(location()).toBe("/trips/t-new?item=own");
+      expect(window.history.length).toBe(entries);
+      expect((window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY]).toBe(1);
+      unmount();
+      await settleHistory();
     });
 
     it("names no item while the gallery is empty", async () => {
