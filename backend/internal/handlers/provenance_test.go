@@ -193,7 +193,7 @@ func TestProvenanceTimeFacts(t *testing.T) {
 			if tt.evidence != "" {
 				evidence = []byte(tt.evidence)
 			}
-			got := timeFacts(evidence, tt.zone)
+			got := timeFacts(timeRecords{evidence: evidence}, tt.zone)
 
 			assert.Equal(t, tt.wantRecorded, got.Recorded)
 			if tt.wantEvidence {
@@ -208,6 +208,45 @@ func TestProvenanceTimeFacts(t *testing.T) {
 			assert.Equal(t, tt.wantFallback, got.ServerCameraZone.UTCFallback)
 			assert.Equal(t, tt.wantOffset, got.ServerCameraZone.OffsetNowMin)
 			assert.Equal(t, tt.zone.Source(), got.ServerCameraZone.From)
+			assert.Nil(t, got.Edit, "no time_edit, no edit")
+		})
+	}
+}
+
+// The owner's own change of taken_at is passed on as stored, beside the evidence it does not change,
+// and is null on the wire when there is none.
+func TestProvenanceTimeFacts_Edit(t *testing.T) {
+	const evidence = `{"v":1,"by":"ingest","src":"exif_original"}`
+	const set = `{"v":1,"kind":"set","at":"2026-11-15T19:00:00Z","from":"2019-03-13T18:28:15Z",` +
+		`"original":"2019-03-13T18:28:15Z","delta_s":-3600,"wall":"2019-03-13T18:28:15","zone":"Europe/Warsaw","offset_min":60}`
+	const shift = `{"v":1,"kind":"shift","at":"2026-11-15T19:00:00Z","from":null,"original":null,` +
+		`"delta_s":null,"wall":null,"zone":null,"offset_min":null}`
+
+	tests := []struct {
+		name     string
+		records  timeRecords
+		wantEdit string
+	}{
+		{"never edited", timeRecords{evidence: []byte(evidence)}, "null"},
+		{"set by hand", timeRecords{evidence: []byte(evidence), edit: []byte(set)}, set},
+		{"shifted, without evidence", timeRecords{edit: []byte(shift)}, shift},
+		{"an empty value is none", timeRecords{edit: []byte{}}, "null"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := timeFacts(tt.records, ingest.CameraZone{})
+
+			wire, err := json.Marshal(got)
+			require.NoError(t, err)
+			var raw map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(wire, &raw))
+			assert.JSONEq(t, tt.wantEdit, string(raw["edit"]))
+			if tt.records.evidence != nil {
+				assert.Equal(t, "ingest", got.Recorded, "an edit leaves the evidence as recorded")
+				assert.JSONEq(t, evidence, string(got.Evidence))
+			} else {
+				assert.Equal(t, "not_recorded", got.Recorded)
+			}
 		})
 	}
 }

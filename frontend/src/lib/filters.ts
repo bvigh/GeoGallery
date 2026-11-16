@@ -30,3 +30,42 @@ export function activeFilterCount(filters: FilterState): number {
     filters.owner !== "all",
   ].filter(Boolean).length;
 }
+
+/** What a trip is known by across trip detection, which gives every trip nobody edited a new ID. */
+type TripKey = { id: string; name: string; start_date: string | null; end_date: string | null };
+
+/**
+ * The ticked trips after a time change, which ran trip detection: every trip nobody edited has a
+ * new ID. The edited item's old trip, if ticked, takes its new one along (when listed). Any other
+ * ticked trip no longer listed becomes the listed trip with the name and dates it had in `before`,
+ * as an auto trip the change did not touch comes back ("Trip " + its first day); the old trip too,
+ * for the item's neighbours it kept. A tick that matches nothing is dropped, so the panel never
+ * holds a tick it cannot show or untick. "unassigned" always stays, and no trip is ticked twice.
+ * Returns the same array when nothing changes.
+ */
+export function retargetTripIds(
+  tripIds: string[],
+  oldTripId: string | null,
+  newTripId: string | null,
+  before: TripKey[],
+  listed: TripKey[]
+): string[] {
+  const known = new Set(listed.map((t) => t.id));
+  const next: string[] = [];
+  const tick = (id: string | null | undefined) => {
+    if (id != null && !next.includes(id)) next.push(id);
+  };
+  for (const id of tripIds) {
+    if (oldTripId !== null && id === oldTripId && newTripId !== null && known.has(newTripId)) tick(newTripId);
+    if (id === "unassigned" || known.has(id)) {
+      tick(id);
+      continue;
+    }
+    const was = before.find((t) => t.id === id);
+    if (!was) continue;
+    tick(
+      listed.find((t) => t.name === was.name && t.start_date === was.start_date && t.end_date === was.end_date)?.id
+    );
+  }
+  return next.length === tripIds.length && next.every((id, i) => id === tripIds[i]) ? tripIds : next;
+}

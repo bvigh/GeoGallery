@@ -691,4 +691,111 @@ describe("api client", () => {
       expect(text).not.toHaveBeenCalled();
     });
   });
+
+  describe("capture times", () => {
+    const setResult = { taken_at: "2019-03-13T17:28:15Z", trip_id: "t1", followup_failed: false };
+    const shiftResult = { shifted: 2, undated: 1, trips: [{ id: "t1", items: 2 }], followup_failed: false };
+
+    it.each([
+      {
+        name: "setTakenAt() with an IANA zone",
+        call: () => api.setTakenAt("m1", "2019-03-13T18:28:15", { zone: "Europe/Warsaw" }),
+        reply: response(200, setResult),
+        url: "/api/media/m1/taken-at",
+        method: "PATCH",
+        body: { wall: "2019-03-13T18:28:15", zone: "Europe/Warsaw" },
+        want: setResult,
+      },
+      {
+        name: "setTakenAt() with a fixed offset",
+        call: () => api.setTakenAt("m1", "2019-03-13T19:28:15", { utcOffsetMin: 120 }),
+        reply: response(200, setResult),
+        url: "/api/media/m1/taken-at",
+        method: "PATCH",
+        body: { wall: "2019-03-13T19:28:15", utc_offset_min: 120 },
+        want: setResult,
+      },
+      {
+        name: "setTakenAt() with a negative offset",
+        call: () => api.setTakenAt("m1", "2019-03-13T13:58:15", { utcOffsetMin: -210 }),
+        reply: response(200, setResult),
+        url: "/api/media/m1/taken-at",
+        method: "PATCH",
+        body: { wall: "2019-03-13T13:58:15", utc_offset_min: -210 },
+        want: setResult,
+      },
+      {
+        name: "shiftTimes()",
+        call: () => api.shiftTimes(["m1", "m2", "m3"], -3600),
+        reply: response(200, shiftResult),
+        url: "/api/media/shift-time",
+        method: "POST",
+        body: { media_ids: ["m1", "m2", "m3"], delta_seconds: -3600 },
+        want: shiftResult,
+      },
+    ])("$name", async ({ call, reply, url, method, body, want }) => {
+      fetchMock.mockResolvedValue(reply);
+      await expect(call()).resolves.toEqual(want);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [gotUrl, init] = fetchMock.mock.calls[0];
+      expect(gotUrl).toBe(url);
+      expect(init.method).toBe(method);
+      expect(init.headers).toEqual({ "Content-Type": "application/json" });
+      expect(JSON.parse(init.body)).toEqual(body);
+    });
+
+    it.each([
+      {
+        name: "setTakenAt()",
+        call: () => api.setTakenAt("m1", "2025-03-30T02:30:00", { zone: "Europe/Warsaw" }),
+        message: "PATCH /media/m1/taken-at failed: 400",
+        reason: "2025-03-30T02:30:00 does not exist in Europe/Warsaw: the clocks skipped it",
+      },
+      {
+        name: "shiftTimes()",
+        call: () => api.shiftTimes(["m1"], 400_000_000_000),
+        message: "POST /media/shift-time failed: 400",
+        reason: "delta_seconds is too large",
+      },
+    ])("$name carries the reason of a 400", async ({ call, message, reason }) => {
+      fetchMock.mockResolvedValue({ ...response(400), text: async () => reason + "\n" });
+      const error = await call().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status: 400, message, reason });
+    });
+
+    it("has no reason for a 400 with an empty or unreadable body", async () => {
+      fetchMock.mockResolvedValueOnce({ ...response(400), text: async () => " \n" });
+      await expect(api.shiftTimes(["m1"], 60)).rejects.toMatchObject({ status: 400, reason: null });
+      fetchMock.mockResolvedValueOnce({ ...response(400), text: async () => { throw new Error("gone"); } });
+      await expect(api.setTakenAt("m1", "2019-03-13T18:28:15", { utcOffsetMin: 0 })).rejects.toMatchObject({
+        status: 400,
+        reason: null,
+      });
+    });
+
+    it.each([
+      { name: "setTakenAt() on a foreign item", call: () => api.setTakenAt("m9", "2019-03-13T18:28:15", { zone: "UTC" }), status: 404, message: "PATCH /media/m9/taken-at failed: 404" },
+      { name: "shiftTimes() with a foreign item", call: () => api.shiftTimes(["m1", "m9"], 60), status: 404, message: "POST /media/shift-time failed: 404" },
+      { name: "setTakenAt() on a server error", call: () => api.setTakenAt("m1", "2019-03-13T18:28:15", { zone: "UTC" }), status: 500, message: "PATCH /media/m1/taken-at failed: 500" },
+      { name: "shiftTimes() on a body too large", call: () => api.shiftTimes(["m1"], 60), status: 413, message: "POST /media/shift-time failed: 413" },
+    ])("rejects $name with the status and no reason", async ({ call, status, message }) => {
+      const text = vi.fn(async () => "not for the user");
+      fetchMock.mockResolvedValue({ ...response(status), text });
+      const error = await call().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status, message, reason: null });
+      expect(text).not.toHaveBeenCalled();
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { name: "setTakenAt()", call: () => api.setTakenAt("m1", "2019-03-13T18:28:15", { zone: "UTC" }) },
+      { name: "shiftTimes()", call: () => api.shiftTimes(["m1"], 60) },
+    ])("$name redirects to login on 401", async ({ call }) => {
+      fetchMock.mockResolvedValue(response(401));
+      await expect(call()).rejects.toMatchObject({ status: 401 });
+      expect(assign).toHaveBeenCalledWith("/api/auth/login?return_to=" + encodeURIComponent("/trips?x=1"));
+    });
+  });
 });

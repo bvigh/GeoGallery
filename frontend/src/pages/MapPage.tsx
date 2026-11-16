@@ -3,9 +3,9 @@ import { ChevronLeft, ChevronRight, ExternalLink, Trash2, X } from "lucide-react
 import { MediaMap } from "../components/map/MediaMap";
 import { FilterPanel } from "../components/map/FilterPanel";
 import { EditLocationModal } from "../components/EditLocationModal";
-import type { Album, FilterState, MediaItem, Trip } from "../types";
+import type { Album, FilterState, MediaItem, SetTakenAtResult, Trip } from "../types";
 import { api } from "../api/client";
-import { activeFilterCount, emptyFilters, filterParams } from "@/lib/filters";
+import { activeFilterCount, emptyFilters, filterParams, retargetTripIds } from "@/lib/filters";
 import { browserTimeZone, formatInstant } from "@/lib/time";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { AlbumMenu } from "@/components/albums/AlbumMenu";
@@ -19,6 +19,8 @@ import { useVideoKeys } from "@/lib/videoKeys";
 import { ZoomableImage } from "@/components/viewer/ZoomableImage";
 import { EditViewModal } from "@/components/viewer/EditViewModal";
 import { EvidenceView } from "@/components/evidence/EvidenceView";
+import { EditTimeModal } from "@/components/EditTimeModal";
+import { timeSavedMessage } from "@/lib/timeEdit";
 
 // A row as the reloaded list has it, so the card cannot contradict the map and the evidence view.
 // The keyframes are not in the list: they load per item.
@@ -235,6 +237,9 @@ export function MapPage({ active = true }: { active?: boolean }) {
   const [clusterIndex, setClusterIndex] = useState(0);
   const [editingView, setEditingView] = useState(false);
   const [editingLocation, setEditingLocation] = useState(false);
+  const [editingTime, setEditingTime] = useState(false);
+  // Said on the card of the item whose time change's follow-up failed.
+  const [timeNotice, setTimeNotice] = useState<{ id: string; text: string } | null>(null);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   // Bumped to refetch the media list under the same filters.
   const [mediaReload, setMediaReload] = useState(0);
@@ -244,6 +249,9 @@ export function MapPage({ active = true }: { active?: boolean }) {
   // The filter params of the list on the map.
   const shownQuery = useRef<string | null>(null);
   const pendingId = useRef<string | null>(null);
+  // Set by a time change until a reload completes: the change cleared the estimates near the
+  // item's old time, and the matcher placed again only those its new times bracket.
+  const timeChangeReload = useRef(false);
 
   useEffect(() => {
     if (active && !wasActive.current) setRevisit((n) => n + 1);
@@ -281,12 +289,22 @@ export function MapPage({ active = true }: { active?: boolean }) {
         if (list.signal.aborted) return;
         if (inBackground) setItems(loaded);
         const rows = new Map(loaded.map((row) => [row.id, row]));
-        setSelected((prev) => (prev ? withFreshRow(prev, rows) : prev));
-        setClusterPeers((prev) => prev.map((peer) => withFreshRow(peer, rows)));
+        // After a time change, an estimate on the card or among its peers that the list, which
+        // holds located items only, left out was cleared and not placed again. Any other row left
+        // out stays as it was: it may only have left the filters.
+        const cleared = timeChangeReload.current;
+        timeChangeReload.current = false;
+        const fresh = (item: MediaItem): MediaItem =>
+          rows.has(item.id) || !cleared || item.gps_source !== "interpolated"
+            ? withFreshRow(item, rows)
+            : { ...item, lat: null, lng: null, gps_source: null, gps_confidence: null };
+        setSelected((prev) => (prev ? fresh(prev) : prev));
+        setClusterPeers((prev) => prev.map(fresh));
         setLoadingMedia(false);
       })
       .catch((e) => {
         if (list.signal.aborted) return;
+        timeChangeReload.current = false;
         setListError(e.message);
         setLoadingMedia(false);
       });
@@ -294,8 +312,20 @@ export function MapPage({ active = true }: { active?: boolean }) {
     return () => list.abort();
   }, [filters, mediaReload, revisit]);
 
+  // The filter panel's trips; the list, or null when it could not be loaded.
+  function loadTrips(): Promise<Trip[] | null> {
+    return api
+      .get<Trip[]>("/trips")
+      .then((data) => {
+        const list = data ?? [];
+        setTrips(list);
+        return list;
+      })
+      .catch(() => null);
+  }
+
   useEffect(() => {
-    api.get<Trip[]>("/trips").then(setTrips).catch(() => {});
+    void loadTrips();
     // The filter panel then just lists no albums.
     api.listAlbums().then(setAlbums).catch((e) => console.error("Failed to load albums:", e));
   }, [revisit]);
@@ -385,6 +415,41 @@ export function MapPage({ active = true }: { active?: boolean }) {
     setUrlError(null);
     fetchUrl(newItem);
     loadKeyframes(newItem);
+  }
+
+  // From the card's editor or the evidence view, which may show the item behind a track point.
+  function handleTimeSaved(id: string, result: SetTakenAtResult) {
+    const before =
+      items.find((i) => i.id === id) ?? (selected?.id === id ? selected : undefined) ?? clusterPeers.find((i) => i.id === id);
+    const updated: Partial<MediaItem> = { taken_at: result.taken_at };
+    // The change cleared an estimated location, and the matcher places it again only where the
+    // new time has a bracket. The reload brings the row back if it did (withFreshRow); the list
+    // holds located items only, so a row it leaves out keeps none.
+    if (before?.gps_source === "interpolated") {
+      Object.assign(updated, { lat: null, lng: null, gps_source: null, gps_confidence: null });
+    }
+    const apply = (i: MediaItem) => (i.id === id ? { ...i, ...updated } : i);
+    setItems((prev) => prev.map(apply));
+    setSelected((prev) => (prev ? apply(prev) : prev));
+    setClusterPeers((prev) => prev.map(apply));
+    const notice = timeSavedMessage(result);
+    setTimeNotice(notice === null ? null : { id, text: notice });
+    // Its track point moved, so the matcher placed estimates near both times again; and trip
+    // detection gave every trip nobody edited a new ID, which the filter panel lists. A ticked trip
+    // follows the item to its new one, every other ticked auto trip moves to the listed trip with
+    // its name and dates, and only ticks that match nothing are dropped, or the reload would ask
+    // for trips that no longer exist and empty the map.
+    timeChangeReload.current = true;
+    setMediaReload((n) => n + 1);
+    const oldTripId = before?.trip_id ?? null;
+    const tripsBefore = trips;
+    void loadTrips().then((fresh) => {
+      if (fresh === null) return;
+      setFilters((prev) => {
+        const tripIds = retargetTripIds(prev.tripIds, oldTripId, result.trip_id, tripsBefore, fresh);
+        return tripIds === prev.tripIds ? prev : { ...prev, tripIds };
+      });
+    });
   }
 
   function handleEvidenceLocationSaved(id: string, lat: number, lng: number) {
@@ -527,6 +592,21 @@ export function MapPage({ active = true }: { active?: boolean }) {
               </button>
             )}
 
+            {isOwn && (
+              <button
+                className={`mt-1 w-full rounded border border-border px-2 py-1 text-xs hover:bg-muted ${touchRow}`}
+                onClick={() => setEditingTime(true)}
+              >
+                Edit capture time
+              </button>
+            )}
+
+            {timeNotice?.id === selected.id && (
+              <p role="status" className="mt-1 text-xs text-amber-700 dark:text-amber-500">
+                {timeNotice.text}
+              </p>
+            )}
+
             <AlbumMenu
               item={selected}
               isOwn={isOwn}
@@ -628,8 +708,17 @@ export function MapPage({ active = true }: { active?: boolean }) {
           position={ownPeers.length > 1 ? `${ownPeerIndex + 1} / ${ownPeers.length}` : undefined}
           onLocationSaved={handleEvidenceLocationSaved}
           onRematched={() => setMediaReload((n) => n + 1)}
+          onTimeChanged={handleTimeSaved}
         />
       )}
+
+      {/* A dialog: keyBelongsToDialog keeps the cluster's arrow keys off it. */}
+      <EditTimeModal
+        open={editingTime && isOwn}
+        item={selected}
+        onClose={() => setEditingTime(false)}
+        onSaved={(result) => selected && handleTimeSaved(selected.id, result)}
+      />
 
       {editingView && selected && mediaUrl && isOwn && (
         <EditViewModal

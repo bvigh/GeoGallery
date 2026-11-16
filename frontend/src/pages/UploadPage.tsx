@@ -191,7 +191,8 @@ function captureTimesLine({
 // The warning when files were dated in a camera zone that is UTC all year and that the upload did not
 // choose (the backend never warns about a zone chosen for the upload). It speaks of those files only,
 // and allows that the zone may be right (Iceland keeps UTC all year). A new zone dates new uploads
-// only, and these files would be skipped as duplicates if sent again: only server retime moves them.
+// only, and these files would be skipped as duplicates if sent again: only a shift by the owner or
+// server retime moves them.
 function assumedUtcWarning(cameraZone: string, from: CameraZoneFrom | undefined): string {
   const mine = from === "user";
   const read = mine
@@ -205,7 +206,8 @@ function assumedUtcWarning(cameraZone: string, from: CameraZoneFrom | undefined)
   return (
     `${read}, so the files dated in it were read as UTC. If the camera's clock did not show UTC, those times ` +
     `are off by its offset from UTC. ${set} A new zone dates new uploads only: these files keep their times ` +
-    "until an administrator runs server retime, and uploading them again skips them as duplicates."
+    "until you shift them (Trips → Shift times…) or an administrator runs server retime, and uploading them " +
+    "again skips them as duplicates."
   );
 }
 

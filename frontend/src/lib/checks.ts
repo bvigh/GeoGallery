@@ -20,6 +20,9 @@ export const COMPARE_NOTE =
 const LEFT_OUT = 'Files marked "not reached" were left out.';
 export const TRUNCATED_NOTE = `The time limit stopped the comparison before every file was done. ${LEFT_OUT}`;
 export const COMPARE_BUSY = "The server is busy with other comparisons. Try again in a minute.";
+// Said by the evidence view when a time change in the trip's gallery opened from it regrouped the
+// trip and left the gallery nowhere to go.
+export const REGROUPED_TRIP_CLOSED = "The time change regrouped this trip, so its gallery closed.";
 
 // The comparison's median distance: the larger, the further the file is from the other formats.
 export const DISTANCE_COLUMN = "Distance to other formats";

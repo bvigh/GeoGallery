@@ -157,12 +157,20 @@ func TestSharing_MemberCannotWriteSharedMedia(t *testing.T) {
 		{"update view settings", http.MethodPatch, "/api/media/" + f.mediaA + "/view-settings", `{"initial_yaw":45}`},
 		{"replace keyframes", http.MethodPut, "/api/media/" + f.mediaA + "/keyframes", `[{"time":1,"yaw":0,"pitch":0,"fov":90}]`},
 		{"delete media", http.MethodDelete, "/api/media/" + f.mediaA, ""},
+		{"set capture time", http.MethodPatch, "/api/media/" + f.mediaA + "/taken-at",
+			`{"wall":"2024-05-02T13:00:00","zone":"Europe/Budapest"}`},
+		{"shift capture time", http.MethodPost, "/api/media/shift-time",
+			`{"media_ids":["` + f.mediaA + `"],"delta_seconds":-3600}`},
+		{"shift own and shared capture times", http.MethodPost, "/api/media/shift-time",
+			`{"media_ids":["` + f.mediaB + `","` + f.mediaA + `"],"delta_seconds":-3600}`},
 	}
+	beforeB := snapshotMedia(t, f.pool, f.mediaB)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := do(t, f.router, f.userB, tt.method, tt.path, tt.body)
 			assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 			assert.Equal(t, before, snapshotMedia(t, f.pool, f.mediaA))
+			assert.Equal(t, beforeB, snapshotMedia(t, f.pool, f.mediaB), "B's own item in a refused shift stays put")
 		})
 	}
 

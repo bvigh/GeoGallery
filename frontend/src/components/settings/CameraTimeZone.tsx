@@ -79,9 +79,9 @@ export function CameraTimeZone() {
           trusted for. An upload can choose another zone for its files on the Upload page.
         </p>
         <p>
-          A new zone dates new uploads and scans. Items already in your library keep their times until an
-          administrator runs <code className="text-xs">server retime</code>, which then reads them in this zone,
-          apart from files uploaded with a zone of their own.
+          A new zone dates new uploads and scans. Items already in your library keep their times until you edit or
+          shift them, or an administrator runs <code className="text-xs">server retime</code>, which then reads them
+          in this zone, apart from files uploaded with a zone of their own and items whose time you changed by hand.
         </p>
       </div>
       {settings === null && !loadFailed && <p className="text-sm text-muted-foreground">Loading your settings…</p>}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -155,7 +156,8 @@ func retimeSnapshot(t *testing.T, pool *pgxpool.Pool) string {
 		`SELECT id::text || ' ' || coalesce(taken_at::text, '-') || ' ' || coalesce(gps_source, '-') || ' ' ||
 		        coalesce(ST_AsText(location::geometry), '-') || ' ' || coalesce(gps_confidence::text, '-') ||
 		        ' trip=' || (trip_id IS NOT NULL)::text || ' model=' || coalesce(camera_model, '-') ||
-		        ' evidence=' || coalesce(capture_evidence::text, '-') FROM media ORDER BY id`,
+		        ' evidence=' || coalesce(capture_evidence::text, '-') || ' edit=' || coalesce(time_edit::text, '-')
+		 FROM media ORDER BY id`,
 		`SELECT owner_id::text || ' ' || source || ' ' || recorded_at::text || ' ' || ST_AsText(location::geometry)
 		 FROM gps_tracks ORDER BY owner_id, source, recorded_at`,
 		`SELECT count(*)::text FROM trips`,
@@ -1052,5 +1054,158 @@ func TestRunRetime_Integration_CameraZoneSetting(t *testing.T) {
 		_, err = RunRetime(ctx, deps, alice, true, func(RetimeChange) {})
 		assert.ErrorContains(t, err, `unknown time zone "Gone/Zone"`)
 		assert.Len(t, store.readKeys(), reads)
+	})
+}
+
+// A capture time the owner set or shifted is theirs. Retime leaves the row alone before reading its
+// object, even when the stored time is the EXIF wall clock at another offset, which it would move on
+// an unedited row. Such a row is counted as edited, in a dry run too, and its neighbours still move.
+func TestRunRetime_Integration_EditedRowsAreLeftAlone(t *testing.T) {
+	pool := testdb.New(t)
+	l := seedRetimeLibrary(t, pool)
+	ctx := context.Background()
+	deps := retimeDeps(t, pool, l.store)
+	router := newOwnershipRouter(pool, &fakeObjectStore{})
+
+	// Stored as UTC like the rest of alice's library, then set by hand through the route to the EXIF
+	// wall clock at +01:00 (14:00Z), where Warsaw's summer time would put it at 13:00Z. Its EXIF point
+	// moves with it.
+	setByHand := insertRetimeRow(t, pool, l.store, retimeRow{owner: l.alice, name: "set-by-hand.jpg",
+		object:  exiftest.JPEG(exiftest.Photo{DateTimeOriginal: "2018:10:24 15:00:00", GPS: &exiftest.GPS{Lat: 47.7, Lng: 19.2}}),
+		takenAt: "2018-10-24T15:00:00Z", gpsSource: "exif", lat: 47.7, lng: 19.2})
+	insertTrack(t, pool, l.alice, "exif", "2018-10-24T15:00:00Z", 47.7, 19.2)
+	rec := do(t, router, l.alice, http.MethodPatch, "/api/media/"+setByHand+"/taken-at",
+		`{"wall":"2018-10-24T15:00:00","utc_offset_min":60}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.True(t, retimeUTC(t, "2018-10-24T14:00:00Z").Equal(readRetimedMedia(t, pool, setByHand).takenAt))
+
+	// Shifted an hour earlier, which left it at the EXIF wall clock read as UTC.
+	shifted := insertRetimeRow(t, pool, l.store, retimeRow{owner: l.alice, name: "shifted.jpg",
+		object: exiftest.JPEG(exiftest.Photo{DateTimeOriginal: "2018:10:26 16:00:00"}), takenAt: "2018-10-26T16:00:00Z"})
+	const shiftEdit = `{"v":1,"kind":"shift","at":"2026-11-15T19:00:00Z","from":"2018-10-26T17:00:00Z",` +
+		`"original":"2018-10-26T17:00:00Z","delta_s":-3600,"wall":null,"zone":null,"offset_min":null}`
+	_, err := pool.Exec(ctx, `UPDATE media SET time_edit = $2::jsonb WHERE id = $1`, shifted, shiftEdit)
+	require.NoError(t, err)
+
+	editedKeys := []string{retimeKey(l.alice, "set-by-hand.jpg"), retimeKey(l.alice, "shifted.jpg")}
+	want := RetimeResult{Checked: 11, Retimed: 5, Unchanged: 1, NotExif: 2, Edited: 2, Mismatch: 1}
+
+	t.Run("a dry run counts them", func(t *testing.T) {
+		before := retimeSnapshot(t, pool)
+		var ids []string
+		res, err := RunRetime(ctx, deps, l.alice, false, func(c RetimeChange) { ids = append(ids, c.MediaID) })
+		require.NoError(t, err)
+		assert.Equal(t, want, res)
+		assert.Equal(t, []string{l.interpolated, l.manual, l.exifGPS, l.noTrack, l.abroad}, ids)
+		for _, key := range editedKeys {
+			assert.NotContains(t, l.store.readKeys(), key, "an edited row's object is never read")
+		}
+		assert.Equal(t, before, retimeSnapshot(t, pool))
+	})
+
+	editedBefore := map[string]retimedMedia{setByHand: readRetimedMedia(t, pool, setByHand), shifted: readRetimedMedia(t, pool, shifted)}
+	var setEdit string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT time_edit::text FROM media WHERE id = $1`, setByHand).Scan(&setEdit))
+
+	res, err := RunRetime(ctx, deps, l.alice, true, func(RetimeChange) {})
+	require.NoError(t, err)
+	assert.Equal(t, want, res)
+	for _, key := range editedKeys {
+		assert.NotContains(t, l.store.readKeys(), key, "an edited row's object is never read")
+	}
+	for id, was := range editedBefore {
+		got := readRetimedMedia(t, pool, id)
+		assert.True(t, was.takenAt.Equal(got.takenAt), "taken_at stays where its owner put it: %s", id)
+		assert.Equal(t, was.evidence, got.evidence, "no retime evidence: %s", id)
+	}
+	var gotEdit string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT time_edit::text FROM media WHERE id = $1`, setByHand).Scan(&gotEdit))
+	assert.JSONEq(t, setEdit, gotEdit)
+	assert.Equal(t, []string{"2018-10-23T10:10:00Z", "2018-10-24T14:00:00Z", "2023-05-01T09:00:00Z"},
+		retimeTrackTimes(t, pool, l.alice, "exif"), "the edited photo's point stays at its time, the unedited one's moves")
+	assert.True(t, retimeUTC(t, "2018-10-23T09:50:53Z").Equal(readRetimedMedia(t, pool, l.interpolated).takenAt),
+		"an unedited neighbour is still retimed")
+
+	t.Run("positive control: without time_edit the same rows would move", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `UPDATE media SET time_edit = NULL WHERE id = ANY($1)`, []string{setByHand, shifted})
+		require.NoError(t, err)
+
+		var changes []RetimeChange
+		res, err := RunRetime(ctx, deps, l.alice, false, collectRetime(&changes))
+		require.NoError(t, err)
+		assert.Equal(t, RetimeResult{Checked: 11, Retimed: 2, Unchanged: 6, NotExif: 2, Mismatch: 1}, res)
+		require.Len(t, changes, 2)
+		assert.Equal(t, setByHand, changes[0].MediaID)
+		assert.True(t, retimeUTC(t, "2018-10-24T13:00:00Z").Equal(changes[0].New))
+		assert.Equal(t, shifted, changes[1].MediaID)
+		assert.True(t, retimeUTC(t, "2018-10-26T14:00:00Z").Equal(changes[1].New))
+	})
+}
+
+// An edit made between the listing and the update is the owner's too: applyRetime's lock finds the
+// row changed and writes nothing, even when the edits left taken_at where it was listed. A re-run
+// counts the row as edited and does not read it.
+func TestRunRetime_Integration_EditAfterListingIsNotOverwritten(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	alice := createUser(t, pool, "alice")
+	store := newRetimeHeads()
+	deps := retimeDeps(t, pool, store)
+	const name = "P1011841.JPG"
+	id := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: name,
+		object:  exiftest.JPEG(exiftest.Photo{DateTimeOriginal: "2018:10:23 11:50:53", GPS: &exiftest.GPS{Lat: 47.6, Lng: 19.1}}),
+		takenAt: "2018-10-23T11:50:53Z", gpsSource: "exif", lat: 47.6, lng: 19.1})
+	insertTrack(t, pool, alice, "exif", "2018-10-23T11:50:53Z", 47.6, 19.1)
+	const edit = `{"v":1,"kind":"set","at":"2026-11-15T19:00:00Z","from":"2018-10-23T10:50:53Z",` +
+		`"original":"2018-10-23T11:50:53Z","delta_s":3600,"wall":"2018-10-23T11:50:53","zone":null,"offset_min":0}`
+	setEdit := func(t *testing.T, value *string) {
+		t.Helper()
+		_, err := pool.Exec(ctx, `UPDATE media SET time_edit = $2::jsonb WHERE id = $1`, id, value)
+		require.NoError(t, err)
+	}
+
+	t.Run("applyRetime", func(t *testing.T) {
+		items, err := retimeCandidates(ctx, pool, alice)
+		require.NoError(t, err)
+		require.Len(t, items, 1)
+		require.False(t, items[0].edited)
+		exifData, found, err := rereadExifTime(ctx, store, items[0], deps.cameraZone)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.True(t, retimeUTC(t, "2018-10-23T09:50:53Z").Equal(*exifData.TakenAt), "an unedited row would move")
+
+		setEdit(t, ptr(edit))
+		before := retimeSnapshot(t, pool)
+		change := RetimeChange{MediaID: id, Filename: name, Old: items[0].takenAt, New: *exifData.TakenAt,
+			Zone: exifData.TakenAtZone, GPSSource: items[0].gpsSource}
+		err = applyRetime(ctx, pool, alice, change, exifData, deps.cameraZone, deps.matchWindow)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "the row changed since it was read")
+		assert.Equal(t, before, retimeSnapshot(t, pool), "nothing written")
+	})
+
+	t.Run("RunRetime fails the row, and a re-run counts it as edited", func(t *testing.T) {
+		setEdit(t, nil)
+		logs := captureLogs(t)
+		// The owner's edit lands while retime reads the object, after the listing.
+		store.onRead = func(string) { setEdit(t, ptr(edit)) }
+
+		res, err := RunRetime(ctx, deps, alice, true, func(RetimeChange) { t.Error("nothing is retimed") })
+		require.NoError(t, err)
+		assert.Equal(t, RetimeResult{Checked: 1, Failed: 1}, res)
+		assert.Contains(t, logs.String(), "retime: update failed")
+		assert.Contains(t, logs.String(), "the row changed since it was read")
+		m := readRetimedMedia(t, pool, id)
+		assert.True(t, retimeUTC(t, "2018-10-23T11:50:53Z").Equal(m.takenAt))
+		assert.Nil(t, m.evidence)
+		assert.Equal(t, []string{"2018-10-23T11:50:53Z"}, retimeTrackTimes(t, pool, alice, "exif"))
+
+		store.onRead = nil
+		reads := len(store.readKeys())
+		res, err = RunRetime(ctx, deps, alice, true, func(RetimeChange) { t.Error("nothing is retimed") })
+		require.NoError(t, err)
+		assert.Equal(t, RetimeResult{Checked: 1, Edited: 1}, res)
+		assert.Len(t, store.readKeys(), reads, "the re-run reads nothing")
+		assert.True(t, retimeUTC(t, "2018-10-23T11:50:53Z").Equal(readRetimedMedia(t, pool, id).takenAt))
 	})
 }

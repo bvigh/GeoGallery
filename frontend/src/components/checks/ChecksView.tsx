@@ -5,12 +5,13 @@ import { Findings } from "@/components/checks/Findings";
 import { FormatResiduals } from "@/components/checks/FormatResiduals";
 import { TrackFiles } from "@/components/checks/TrackFiles";
 import { EvidenceView } from "@/components/evidence/EvidenceView";
-import { MediaGalleryOverlay } from "@/components/MediaGalleryOverlay";
+import { MediaGalleryOverlay, type TimesChangedHint } from "@/components/MediaGalleryOverlay";
 import {
   CHECKS_TIMEOUT,
   madeProgress,
   mergeComparison,
   NO_COMPARISON,
+  REGROUPED_TRIP_CLOSED,
   type AgreementState,
   type Comparison,
 } from "@/lib/checks";
@@ -18,7 +19,7 @@ import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { useCloseOnBack } from "@/lib/history";
 import { browserTimeZone, formatDuration, formatInstant } from "@/lib/time";
 import { cn } from "@/lib/utils";
-import type { AgreementResponse, ChecksResponse, ProvenanceTrip } from "@/types";
+import type { AgreementResponse, ChecksResponse, ProvenanceTrip, Trip } from "@/types";
 
 const TITLE = "Checks";
 
@@ -90,8 +91,8 @@ interface CompareRun {
 }
 
 // The library-wide checks (docs/gps-debugging.md, Step 2), full screen over the Trips page. Nothing
-// here writes: a finding opens its items in the evidence view, which places them by hand or
-// re-matches through the existing routes.
+// here writes: a finding opens its items in the evidence view, which places them by hand, edits
+// their capture times or re-matches through the existing routes.
 export function ChecksView({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<ChecksResponse | null>(null);
   const [failure, setFailure] = useState<"timeout" | "failed" | null>(null);
@@ -105,6 +106,12 @@ export function ChecksView({ onClose }: { onClose: () => void }) {
   // which comes back on the same item when the gallery closes: both change in one commit, so the
   // gallery takes over the evidence view's history entry and gives it back (useCloseOnBack).
   const [tripView, setTripView] = useState<TripView | null>(null);
+  // As last rendered, for followTimeChange, which decides after an await what to say as well.
+  const tripViewRef = useRef(tripView);
+  tripViewRef.current = tripView;
+  // Why the trip's gallery closed by itself, said by the evidence view that comes back in its
+  // place: a time change's own notice (a shift that may have been saved) would go with the gallery.
+  const [returnNotice, setReturnNotice] = useState<string | null>(null);
   // A location saved or a re-match run in the evidence view: the checks are out of date once it
   // closes. A ref, not the state: the evidence view reports a re-match when the matcher answers,
   // through the callback of the render that started it, which can be after it closed.
@@ -222,15 +229,18 @@ export function ChecksView({ onClose }: { onClose: () => void }) {
   function openFinding(ids: string[]) {
     findingOpen.current = true;
     findingChanged.current = false;
+    setReturnNotice(null);
     setFinding({ ids, index: 0 });
   }
 
   function stepFinding(delta: number) {
+    setReturnNotice(null);
     setFinding((open) => open && { ...open, index: (open.index + delta + open.ids.length) % open.ids.length });
   }
 
   function closeFinding() {
     findingOpen.current = false;
+    setReturnNotice(null);
     setFinding(null);
     setTripView(null);
     if (findingChanged.current) {
@@ -248,7 +258,37 @@ export function ChecksView({ onClose }: { onClose: () => void }) {
   }
 
   function showInTrip(trip: ProvenanceTrip, itemId: string) {
+    setReturnNotice(null);
     setTripView({ trip, itemId });
+  }
+
+  // A time change in the trip's gallery ran trip detection, which gives every trip nobody edited a
+  // new ID. As on the Trips page: a trip still listed keeps the gallery, one that is gone moves it
+  // to the trip the change put the item in, and with neither the evidence view comes back, saying
+  // why, with what the gallery said of the change.
+  async function followTimeChange(from: string, hint: TimesChangedHint) {
+    let trips: Trip[];
+    try {
+      trips = (await api.get<Trip[]>("/trips")) ?? [];
+    } catch (e) {
+      console.error("Failed to reload the trips:", e);
+      return;
+    }
+    const open = tripViewRef.current;
+    // Closed, or showing another trip, by now.
+    if (open === null || open.trip.id !== from) return;
+    const still = trips.find((t) => t.id === from);
+    if (still) {
+      setTripView({ ...open, trip: { id: still.id, name: still.name } });
+      return;
+    }
+    const next = hint.tripId === null ? undefined : trips.find((t) => t.id === hint.tripId);
+    if (next) {
+      setTripView({ trip: { id: next.id, name: next.name }, itemId: hint.itemId ?? open.itemId });
+      return;
+    }
+    setTripView(null);
+    setReturnNotice(REGROUPED_TRIP_CLOSED + (hint.notice ? ` ${hint.notice}` : ""));
   }
 
   const steps = finding !== null && finding.ids.length > 1;
@@ -322,8 +362,10 @@ export function ChecksView({ onClose }: { onClose: () => void }) {
           inUrl={false}
           initialItemId={tripView.itemId}
           onClose={() => setTripView(null)}
+          // A time change is reported here too, before onTimesChanged.
           onItemsChanged={markFindingChanged}
           onMediaDeleted={markFindingChanged}
+          onTimesChanged={(hint) => void followTimeChange(tripView.trip.id, hint)}
         />
       )}
       {finding && !tripView && (
@@ -336,7 +378,9 @@ export function ChecksView({ onClose }: { onClose: () => void }) {
           position={steps ? `${finding.index + 1} / ${finding.ids.length}` : undefined}
           onLocationSaved={markFindingChanged}
           onRematched={markFindingChanged}
+          onTimeChanged={markFindingChanged}
           onShowInTrip={showInTrip}
+          notice={returnNotice}
         />
       )}
     </div>

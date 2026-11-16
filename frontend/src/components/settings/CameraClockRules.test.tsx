@@ -94,7 +94,7 @@ describe("CameraClockRules", () => {
       expect(screen.getByRole("heading", { name: "Camera clocks" })).toBeInTheDocument();
       expect(screen.getByText(/stayed on summer time all year/)).toBeInTheDocument();
       expect(screen.getByText(/New uploads and scans from that camera are then read at that offset/)).toBeInTheDocument();
-      expect(screen.getByText(/keep their times until an administrator runs/)).toBeInTheDocument();
+      expect(screen.getByText(/keep their times until you edit or shift them, or an administrator runs/)).toBeInTheDocument();
       expect(await screen.findByText("No clock rules yet.")).toBeInTheDocument();
     });
 

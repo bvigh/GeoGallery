@@ -281,6 +281,20 @@ describe("AlbumsPage", () => {
     expect(mockApi.listAlbums).toHaveBeenCalledTimes(2);
   });
 
+  it("reloads the albums after a time change in the gallery, whose dates follow it, and keeps the gallery", async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: owned.name }));
+    expect(mockApi.listAlbums).toHaveBeenCalledTimes(1);
+
+    mockApi.listAlbums.mockResolvedValue([{ ...owned, start_date: "2024-01-01T00:00:00Z" }, shared]);
+    await act(async () => gallery.props!.onTimesChanged!({ tripId: "t1", itemId: "m1" }));
+    expect(mockApi.listAlbums).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("gallery")).toHaveAttribute("data-title", owned.name);
+    expect(JSON.parse(screen.getByTestId("gallery").getAttribute("data-params")!)).toEqual({ album_id: owned.id });
+    const from = new Date("2024-01-01T00:00:00Z").toLocaleDateString();
+    expect(within(card(owned.name)).getByText((text) => text.startsWith(`${from} –`))).toBeInTheDocument();
+  });
+
   describe("last viewed album", () => {
     it("marks the album whose gallery closed last and scrolls it into view once", async () => {
       renderPage();

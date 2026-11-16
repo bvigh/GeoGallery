@@ -382,7 +382,7 @@ export function CameraClockRules() {
         <p>
           New uploads and scans from that camera are then read at that offset, wherever their time comes from the
           camera's EXIF clock. A photo's own GPS clock still comes first. Items already in your library keep their
-          times until an administrator runs <code className="text-xs">server retime</code>.
+          times until you edit or shift them, or an administrator runs <code className="text-xs">server retime</code>.
         </p>
       </div>
       {error && <p className="mb-2 text-sm text-red-500">{error}</p>}

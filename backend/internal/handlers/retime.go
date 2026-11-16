@@ -51,6 +51,7 @@ type RetimeResult struct {
 	Retimed   int // taken_at moved (in a dry run: would move)
 	Unchanged int // already what ingest computes today, within retimeTolerance
 	NotExif   int // no EXIF capture time to read: taken_at came from the video container or the file time
+	Edited    int // the owner set or shifted taken_at (time_edit): left alone, its object never read
 	Mismatch  int // an EXIF time the stored taken_at is not, at any offset: left alone, logged
 	Failed    int // object unreadable or the update failed: logged
 }
@@ -75,6 +76,12 @@ const maxUTCOffset = 14 * time.Hour
 // The camera zone is the one the owner's uploads get today (their setting, loaded once, else the
 // server's), except for an item whose upload or scan named a zone of its own: that zone stays with
 // its files (storedItemCameraZone).
+//
+// A row whose owner changed its capture time (time_edit, written by PATCH /api/media/{id}/taken-at
+// and POST /api/media/shift-time) is left alone and counted as edited, before its object is read: the
+// owner's own time outranks any reading of the file, even one that is the EXIF wall clock at another
+// offset. An edit made after the listing makes that row fail, as any change of it since does
+// (applyRetime); a re-run counts it as edited.
 //
 // Only rows dated from EXIF change. A photo is read from the same mediaHeadSize bytes ingest read; a
 // video only when a camera rule dates some videos from their EXIF (otherwise nothing is read for it),
@@ -128,6 +135,10 @@ func RunRetime(ctx context.Context, deps RetimeDeps, ownerID string, apply bool,
 			break
 		}
 		res.Checked++
+		if m.edited {
+			res.Edited++
+			continue
+		}
 		zone, err := storedItemCameraZone(ownerZone, m.zoneFrom, m.zoneName)
 		if err != nil {
 			slog.Error("retime: camera zone failed", "id", m.id, "filename", m.filename, "err", err)
@@ -202,14 +213,17 @@ type retimeCandidate struct {
 	takenAt                                        time.Time
 	// zoneFrom and zoneName are capture_evidence's camera_zone_from and camera_zone, "" when absent.
 	zoneFrom, zoneName string
+	edited             bool // the owner set or shifted taken_at: time_edit is not NULL
 }
 
 // retimeCandidates lists ownerID's media with a taken_at (a row without one has no EXIF time), read
-// up front so no connection is held while objects are fetched.
+// up front so no connection is held while objects are fetched. Rows the owner edited are listed too,
+// so that they are counted.
 func retimeCandidates(ctx context.Context, pool *pgxpool.Pool, ownerID string) ([]retimeCandidate, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT id::text, filename, storage_key, media_type, taken_at, coalesce(gps_source, ''),
-		       coalesce(capture_evidence->>'camera_zone_from', ''), coalesce(capture_evidence->>'camera_zone', '')
+		       coalesce(capture_evidence->>'camera_zone_from', ''), coalesce(capture_evidence->>'camera_zone', ''),
+		       time_edit IS NOT NULL
 		FROM media
 		WHERE owner_id = $1 AND taken_at IS NOT NULL
 		ORDER BY taken_at, id`, ownerID)
@@ -218,7 +232,8 @@ func retimeCandidates(ctx context.Context, pool *pgxpool.Pool, ownerID string) (
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (retimeCandidate, error) {
 		var c retimeCandidate
-		err := row.Scan(&c.id, &c.filename, &c.storageKey, &c.mediaType, &c.takenAt, &c.gpsSource, &c.zoneFrom, &c.zoneName)
+		err := row.Scan(&c.id, &c.filename, &c.storageKey, &c.mediaType, &c.takenAt, &c.gpsSource, &c.zoneFrom, &c.zoneName,
+			&c.edited)
 		return c, err
 	})
 }
@@ -284,13 +299,15 @@ func applyRetime(ctx context.Context, pool *pgxpool.Pool, ownerID string, c Reti
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// The row must still be as it was listed: at the same taken_at, and not edited by its owner since.
+	// The owner's time outranks this reading even when edits brought taken_at back to the listed value.
 	var gpsSource string
 	var lat, lng *float64
 	var oldEvidence []byte
 	err = tx.QueryRow(ctx, `
 		SELECT coalesce(gps_source, ''), ST_Y(location::geometry), ST_X(location::geometry), capture_evidence
 		FROM media
-		WHERE id = $1 AND owner_id = $2 AND taken_at = $3
+		WHERE id = $1 AND owner_id = $2 AND taken_at = $3 AND time_edit IS NULL
 		FOR UPDATE`, c.MediaID, ownerID, c.Old).Scan(&gpsSource, &lat, &lng, &oldEvidence)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errors.New("the row changed since it was read; re-run to pick it up")

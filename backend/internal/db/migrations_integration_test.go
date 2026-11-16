@@ -692,3 +692,53 @@ func TestMigration000013_UserCameraTimezone(t *testing.T) {
 	})
 	assertUserCameraTimezone()
 }
+
+// Migration 14 adds media.time_edit, the owner's own correction of taken_at: NULL for every existing
+// row, and a JSON object when set.
+func TestMigration000014_MediaTimeEdit(t *testing.T) {
+	dsn := testdb.NewEmpty(t)
+	m := newMigrator(t, dsn)
+	migrateTo(t, m, 6)
+	seedLegacyData(t, dsn)
+	migrateTo(t, m, 13)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.False(t, columnExists(ctx, t, conn, "media", "time_edit"))
+	})
+
+	migrateTo(t, m, 14)
+	assertTimeEdit := func() {
+		withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+			assert.True(t, columnExists(ctx, t, conn, "media", "time_edit"))
+			assert.True(t, constraintExists(ctx, t, conn, "media", "media_time_edit_object"))
+			var total, edited int
+			require.NoError(t, conn.QueryRow(ctx,
+				`SELECT COUNT(*), COUNT(time_edit) FROM media`).Scan(&total, &edited))
+			assert.Equal(t, 1, total, "the legacy media row survives")
+			assert.Zero(t, edited, "existing rows stay NULL")
+
+			_, err := conn.Exec(ctx, `UPDATE media SET time_edit = '{"v": 1, "kind": "set"}'`)
+			require.NoError(t, err, "an object is accepted")
+			for _, bad := range []string{`[]`, `"set"`, `1`, `null`} {
+				_, err := conn.Exec(ctx, `UPDATE media SET time_edit = $1::jsonb`, bad)
+				var pgErr *pgconn.PgError
+				require.True(t, errors.As(err, &pgErr), "%s: %v", bad, err)
+				assert.Equal(t, "media_time_edit_object", pgErr.ConstraintName, bad)
+			}
+			_, err = conn.Exec(ctx, `UPDATE media SET time_edit = NULL`)
+			require.NoError(t, err, "SQL NULL is accepted")
+		})
+	}
+	assertTimeEdit()
+
+	migrateTo(t, m, 13)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.False(t, columnExists(ctx, t, conn, "media", "time_edit"))
+		assert.False(t, constraintExists(ctx, t, conn, "media", "media_time_edit_object"))
+		var n int
+		require.NoError(t, conn.QueryRow(ctx, `SELECT COUNT(*) FROM media`).Scan(&n))
+		assert.Equal(t, 1, n, "the down migration keeps the media rows")
+	})
+
+	migrateTo(t, m, 14)
+	assertTimeEdit()
+}

@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ListChecks, X } from "lucide-react";
-import type { Album, Trip } from "../types";
+import type { Album, MediaItem, ShiftTimesResult, Trip } from "../types";
 import { api, ApiError } from "../api/client";
-import { MediaGalleryOverlay } from "@/components/MediaGalleryOverlay";
+import { MediaGalleryOverlay, type TimesChangedHint } from "@/components/MediaGalleryOverlay";
+import { ShiftTimesDialog } from "@/components/ShiftTimesDialog";
 import { AlbumPickerDialog } from "@/components/albums/AlbumPickerDialog";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { ChecksView } from "@/components/checks/ChecksView";
 import { useHistoryChange } from "@/lib/history";
 import { LAST_VIEWED_CLASS, useLastViewed, useRevealLastViewed } from "@/lib/lastViewed";
 import { currentRoute } from "@/lib/routes";
+import { shiftedMessage } from "@/lib/timeEdit";
 
 const byStartDateDesc = (a: Trip, b: Trip): number => {
   if (a.start_date === null && b.start_date === null) return 0;
@@ -49,7 +51,21 @@ function addErrorMessage(trip: Trip, album: Album, err: unknown): string {
     : text;
 }
 
-const TRIP_GONE = "That trip is not available. Trips you have not edited get new links after each upload.";
+const TRIP_GONE =
+  "That trip is not available. Trips you have not edited get new links after each upload or time change.";
+const TRIP_REGROUPED =
+  "The time change regrouped that trip, so its gallery closed. Its items are in the trips listed here.";
+const SHIFT_LOAD_FAILED = "Could not load the trip's items. Close this and try again.";
+const SHIFT_OUTCOME_RELOADED =
+  "The server did not answer a shift in time, and it may have been saved. The trips are loaded again: check the items' times before shifting again.";
+
+// The items a trip's shift dialog works on, for the trip they were loaded for: a list left over
+// from another trip must never reach the dialog, which takes its ticks from the first list.
+interface ShiftLoad {
+  tripId: string;
+  items: MediaItem[] | null;
+  error: string | null;
+}
 
 // The open gallery. Opened from the URL, its trip is known only once the list has loaded, and
 // itemId is the item to open on.
@@ -76,6 +92,8 @@ export function TripsPage() {
   const [editStartDate, setEditStartDate] = useState("");
   const [editEndDate, setEditEndDate] = useState("");
   const [pickerTrip, setPickerTrip] = useState<Trip | null>(null);
+  const [shiftTrip, setShiftTrip] = useState<Trip | null>(null);
+  const [shiftLoad, setShiftLoad] = useState<ShiftLoad | null>(null);
   // Mounted only once asked for: the checks take seconds on the server, so no visit runs them.
   const [checksOpen, setChecksOpen] = useState(false);
   const [notices, setNotices] = useState<Notice[]>([]);
@@ -83,6 +101,9 @@ export function TripsPage() {
   const [lastViewed, rememberViewed] = useLastViewed(me.id, "trips");
   const lastViewedCard = useRef<HTMLElement>(null);
   useRevealLastViewed(lastViewedCard, tripsLoaded && gallery === null);
+  // The open gallery as last rendered, for a time change's follow-up, which answers later.
+  const galleryRef = useRef(gallery);
+  galleryRef.current = gallery;
 
   useEffect(() => {
     api
@@ -93,6 +114,37 @@ export function TripsPage() {
       })
       .catch(console.error);
   }, []);
+
+  // The list again, after anything that changes trips. null when it could not be loaded.
+  const reloadTrips = useCallback(async (): Promise<Trip[] | null> => {
+    try {
+      const data = (await api.get<Trip[]>("/trips")) ?? [];
+      setTrips(data);
+      return data;
+    } catch (e) {
+      console.error(e);
+      return null;
+    }
+  }, []);
+
+  // The shift dialog's items, loaded when it opens; closing it aborts the list in flight.
+  useEffect(() => {
+    if (shiftTrip === null) return;
+    const tripId = shiftTrip.id;
+    const controller = new AbortController();
+    setShiftLoad({ tripId, items: null, error: null });
+    api
+      .listMedia({ trip_id: tripId }, { signal: controller.signal })
+      .then((items) => {
+        if (!controller.signal.aborted) setShiftLoad({ tripId, items, error: null });
+      })
+      .catch((e) => {
+        if (controller.signal.aborted) return;
+        console.error("Failed to load the trip's items:", e);
+        setShiftLoad({ tripId, items: null, error: SHIFT_LOAD_FAILED });
+      });
+    return () => controller.abort();
+  }, [shiftTrip]);
 
   const notify = useCallback((kind: Notice["kind"], text: string): number => {
     const id = nextNoticeId.current++;
@@ -115,7 +167,11 @@ export function TripsPage() {
 
   // Back or forward onto a gallery's entry while none is open (forward after back): open it again
   // on the URL's item. It takes that entry over, as this runs before history is brought in line.
+  // A gallery already open stays: back from a view over it (the evidence view) can land on an
+  // entry still showing the trip it showed before a time change moved it to another, until the
+  // history module writes the gallery's URL there again.
   useHistoryChange(() => {
+    if (galleryRef.current !== null) return;
     const next = galleryFromUrl();
     if (next === null) return;
     const trip = trips.find((t) => t.id === next.id) ?? null;
@@ -154,6 +210,41 @@ export function TripsPage() {
   };
 
   const dismissNotice = (id: number) => setNotices((prev) => prev.filter((n) => n.id !== id));
+
+  // Trip detection ran, so the list changes: trips nobody edited get new IDs.
+  const handleShifted = (result: ShiftTimesResult, deltaSeconds: number) => {
+    notify(result.followup_failed ? "error" : "success", shiftedMessage(result, deltaSeconds));
+    void reloadTrips();
+  };
+
+  // A shift failed without an answer and may have been saved, so the trips may have changed too.
+  const handleShiftOutcomeUnknown = () => {
+    notify("error", SHIFT_OUTCOME_RELOADED);
+    void reloadTrips();
+  };
+
+  // A time change in the gallery ran trip detection, which gives every trip nobody edited a new
+  // ID. A trip still listed (a named one keeps its ID and its media) keeps its gallery; one that is
+  // gone moves the gallery to the trip the change put the item in, on the same entry and item, or
+  // closes it and says why.
+  const followTimeChange = async (from: string, hint: TimesChangedHint) => {
+    const fresh = await reloadTrips();
+    const open = galleryRef.current;
+    // Closed, or showing another trip, by now.
+    if (fresh === null || open === null || open.id !== from) return;
+    const still = fresh.find((t) => t.id === from);
+    if (still) {
+      setGallery({ ...open, trip: still });
+      return;
+    }
+    const next = hint.tripId === null ? undefined : fresh.find((t) => t.id === hint.tripId);
+    if (next) {
+      setGallery({ id: next.id, trip: next, itemId: hint.itemId });
+      return;
+    }
+    setGallery(null);
+    notify("error", TRIP_REGROUPED);
+  };
 
   const saveUpdate = (id: string) => {
     setTrips((prev) =>
@@ -250,10 +341,11 @@ export function TripsPage() {
                 </div>
               </div>
             ) : (
-              // A long name takes the whole line and pushes the actions below it.
+              // A long name takes the whole line and pushes the actions below it. On a narrow phone
+              // the actions of a named trip (four of them) wrap rather than overflow the card.
               <div className="flex flex-wrap items-center justify-between gap-x-2">
                 <h2 className="min-w-0 font-medium [overflow-wrap:anywhere]">{trip.name}</h2>
-                <div className="ml-auto flex shrink-0 gap-2 touch:gap-0">
+                <div className="ml-auto flex max-w-full shrink-0 flex-wrap justify-end gap-2 touch:gap-0">
                   <button
                     className={TEXT_BUTTON_CLASS}
                     onClick={(e) => {
@@ -262,6 +354,16 @@ export function TripsPage() {
                     }}
                   >
                     Add to album…
+                  </button>
+                  <button
+                    className={TEXT_BUTTON_CLASS}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShiftLoad(null);
+                      setShiftTrip(trip);
+                    }}
+                  >
+                    Shift times…
                   </button>
                   <button
                     className={TEXT_BUTTON_CLASS}
@@ -308,6 +410,16 @@ export function TripsPage() {
         defaultName={pickerTrip?.name ?? ""}
         onPick={(album) => pickerTrip && addTripToAlbum(pickerTrip, album)}
       />
+      <ShiftTimesDialog
+        open={shiftTrip !== null}
+        onOpenChange={(open) => !open && setShiftTrip(null)}
+        title={`Shift times in "${shiftTrip?.name ?? ""}"`}
+        items={shiftLoad !== null && shiftLoad.tripId === shiftTrip?.id ? shiftLoad.items : null}
+        loadError={shiftLoad !== null && shiftLoad.tripId === shiftTrip?.id ? shiftLoad.error : null}
+        currentUserId={me.id}
+        onShifted={handleShifted}
+        onOutcomeUnknown={handleShiftOutcomeUnknown}
+      />
       {notices.length > 0 && (
         <div className="fixed bottom-4 left-1/2 z-[900] flex w-[min(28rem,calc(100%-2rem))] -translate-x-1/2 flex-col gap-2">
           {notices.map((n) => (
@@ -344,12 +456,20 @@ export function TripsPage() {
             rememberViewed(gallery.id);
             setGallery(null);
           }}
-          onMediaDeleted={() => {
-            api.get<Trip[]>("/trips").then((data) => setTrips(data ?? [])).catch(console.error);
+          onMediaDeleted={() => void reloadTrips()}
+          onTimesChanged={(hint) => void followTimeChange(gallery.id, hint)}
+        />
+      )}
+      {/* A time changed there ran trip detection, which gives trips nobody edited new IDs: the
+          cards would open galleries of trips that are gone. */}
+      {checksOpen && (
+        <ChecksView
+          onClose={() => {
+            setChecksOpen(false);
+            void reloadTrips();
           }}
         />
       )}
-      {checksOpen && <ChecksView onClose={() => setChecksOpen(false)} />}
     </div>
   );
 }
