@@ -434,8 +434,10 @@ func TestChallenge_EachPlayerGuessesEachRoundOnce(t *testing.T) {
 
 	t.Run("a finished player sees every round's answer and the guesses made so far", func(t *testing.T) {
 		total := first.TotalScore + scoreGuess(rounds[3].answer, 50, 20, "", maxDistKm).TotalScore
+		// Off every item of the fixture, which lie on lat = lng + 31: a guess on an item's own
+		// position would tie with Alice's exact one below, and a tie is ordered by user ID.
 		for _, pos := range []int{2, 3, 5} {
-			total += f.mustGuess(t, f.bob, c.ID, pos, 48, 17, "").TotalScore
+			total += f.mustGuess(t, f.bob, c.ID, pos, 48, 18, "").TotalScore
 		}
 		d := f.get(t, f.bob, c.ID)
 		assert.True(t, d.Finished)
@@ -505,6 +507,7 @@ func TestChallenge_EachPlayerGuessesEachRoundOnce(t *testing.T) {
 				assert.Equal(t, f.alice, res.Guesses[0].UserID, "Alice guessed the exact place")
 				assert.InDelta(t, 5000, res.Guesses[0].TotalScore, 1e-6)
 				assert.Equal(t, f.bob, res.Guesses[1].UserID)
+				assert.Less(t, res.Guesses[1].TotalScore, 5000.0, "Bob was off in every round")
 			}
 			assert.InDelta(t, 25000, d.Members[0].Score, 1e-6)
 		}
@@ -784,4 +787,29 @@ func TestChallenge_DisabledPlayerStaysInTheStandings(t *testing.T) {
 	require.Len(t, d.Members, 2)
 	assert.Equal(t, f.bob, d.Members[1].UserID)
 	assert.Equal(t, 1, d.Members[1].Played)
+}
+
+// Guesses with the same score come in a fixed order, by user ID, so a round's list never reorders
+// between two requests.
+func TestChallenge_TiedGuessesKeepAFixedOrder(t *testing.T) {
+	f := newChallengeFixture(t)
+	c := f.create(t, f.alice, "", f.withBob("Ties"))
+	for pos := 1; pos <= 5; pos++ {
+		f.mustGuess(t, f.alice, c.ID, pos, 10, 10, "")
+		f.mustGuess(t, f.bob, c.ID, pos, 10, 10, "")
+	}
+	lower, higher := f.alice, f.bob
+	if higher < lower {
+		lower, higher = higher, lower
+	}
+	for _, user := range []string{f.alice, f.bob} {
+		d := f.get(t, user, c.ID)
+		require.Len(t, d.Results, 5)
+		for _, res := range d.Results {
+			require.Len(t, res.Guesses, 2)
+			assert.InDelta(t, res.Guesses[0].TotalScore, res.Guesses[1].TotalScore, 1e-9)
+			assert.Equal(t, lower, res.Guesses[0].UserID)
+			assert.Equal(t, higher, res.Guesses[1].UserID)
+		}
+	}
 }
