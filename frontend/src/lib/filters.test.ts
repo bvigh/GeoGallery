@@ -41,6 +41,14 @@ describe("filterParams", () => {
   ])("$label", ({ filters, want }) => {
     expect(filterParams(filters)).toEqual(want);
   });
+
+  // The filter panel's "Select all" can tick hundreds of collections: every one is sent, in order,
+  // with no cap or batching here (frontend/nginx.conf sizes the request line for them).
+  it("sends every ticked collection, however many", () => {
+    const tripIds = Array.from({ length: 1000 }, (_, i) => `t${i}`);
+    const albumIds = Array.from({ length: 1000 }, (_, i) => `a${i}`);
+    expect(filterParams(f({ tripIds, albumIds }))).toEqual({ trip_id: tripIds, album_id: albumIds });
+  });
 });
 
 describe("activeFilterCount", () => {

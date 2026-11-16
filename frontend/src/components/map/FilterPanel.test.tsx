@@ -1,5 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { describe, it, expect, vi } from "vitest";
 import { FilterPanel } from "@/components/map/FilterPanel";
 import { activeFilterCount, emptyFilters } from "@/lib/filters";
@@ -341,6 +342,205 @@ describe("FilterPanel", () => {
       await openPanel();
       await openPanel();
       expect(screen.getByRole("searchbox", { name: "Search collections" })).toHaveValue("");
+    });
+  });
+
+  describe("select all and clear", () => {
+    // Eight collections, so the search field is there.
+    const trips: Trip[] = [
+      { ...sampleTrips[0], id: "s1", name: "Iceland ring road", start_date: "2024-07-01", end_date: "2024-07-14" },
+      { ...sampleTrips[0], id: "s2", name: "Iceland winter", start_date: "2025-02-01", end_date: "2025-02-05" },
+      { ...sampleTrips[0], id: "s3", name: "Tokyo", start_date: "2024-12-20", end_date: null },
+      { ...sampleTrips[0], id: "s4", name: "Rome", start_date: "2023-05-01", end_date: "2023-05-04" },
+    ];
+    const albums: Album[] = [
+      album({ id: "b1", name: "Iceland highlights" }),
+      album({ id: "b2", name: "Iceland", owner_id: "u-bob", owner_name: "Bob", is_owner: false }),
+      album({ id: "b3", name: "Family" }),
+      album({ id: "b4", name: "Dogs", owner_id: "u-bob", owner_name: "Bob", is_owner: false }),
+    ];
+    // Every other filter set, so a test can see them kept.
+    const others = { fromDate: "2024-01-01", toDate: "2025-12-31", mediaTypes: ["photo" as const], owner: "mine" as const };
+
+    function renderSet(overrides: Partial<FilterState> = {}, onChange = vi.fn()) {
+      return renderPanel(overrides, 0, onChange, trips, albums);
+    }
+
+    // The panel as a page holds it: each change comes back as the new filters.
+    function Stateful({ initial, onChange }: { initial: FilterState; onChange: (f: FilterState) => void }) {
+      const [filters, setFilters] = useState(initial);
+      return (
+        <FilterPanel
+          trips={trips}
+          albums={albums}
+          filters={filters}
+          onChange={(next) => {
+            onChange(next);
+            setFilters(next);
+          }}
+          activeCount={activeFilterCount(filters)}
+        />
+      );
+    }
+
+    function renderStateful(overrides: Partial<FilterState> = {}) {
+      const onChange = vi.fn();
+      render(<Stateful initial={{ ...emptyFilters, ...overrides }} onChange={onChange} />);
+      return { onChange };
+    }
+
+    const search = () => screen.getByRole("searchbox", { name: "Search collections" });
+    const selectAll = () => screen.queryByRole("button", { name: /^Select / });
+    const clear = () => screen.queryByRole("button", { name: /^Clear \d+ selected$/ });
+
+    it.each([
+      { label: "without a query", query: "" },
+      { label: "with a query of spaces", query: "   " },
+    ])("offers no Select all $label", async ({ query }) => {
+      renderSet();
+      await openPanel();
+      if (query) await userEvent.type(search(), query);
+      expect(selectAll()).not.toBeInTheDocument();
+    });
+
+    it("counts every match, ticked or not, and ticks the rest with the earlier ticks kept", async () => {
+      const { onChange } = renderSet({ ...others, tripIds: ["unassigned", "s1"], albumIds: ["b3"] });
+      await openPanel();
+      await userEvent.type(search(), "iceland");
+      const button = selectAll()!;
+      expect(button).toHaveAccessibleName("Select all 4 matches");
+      expect(button).toHaveAttribute("type", "button");
+
+      await userEvent.click(button);
+      expect(onChange).toHaveBeenCalledTimes(1);
+      expect(onChange).toHaveBeenCalledWith({
+        ...others,
+        tripIds: ["unassigned", "s1", "s2"],
+        albumIds: ["b3", "b1", "b2"],
+      });
+    });
+
+    it("never ticks Unassigned, though the query matches it", async () => {
+      const { onChange } = renderSet();
+      await openPanel();
+      // "d" is in Unassigned, Iceland, the road and the dogs.
+      await userEvent.type(search(), "d");
+      expect(screen.getByLabelText("Unassigned")).not.toBeChecked();
+      await userEvent.click(selectAll()!);
+      expect(onChange).toHaveBeenCalledWith({ ...emptyFilters, tripIds: ["s1", "s2"], albumIds: ["b1", "b2", "b4"] });
+    });
+
+    it("offers no Select all when only Unassigned matches", async () => {
+      renderSet();
+      await openPanel();
+      await userEvent.type(search(), "assigned");
+      expect(screen.getByLabelText("Unassigned")).toBeInTheDocument();
+      expect(selectAll()).not.toBeInTheDocument();
+    });
+
+    it("offers no Select all once every match is ticked", async () => {
+      renderSet({ tripIds: ["s3"] });
+      await openPanel();
+      await userEvent.type(search(), "tokyo");
+      expect(selectAll()).not.toBeInTheDocument();
+      await userEvent.clear(search());
+      await userEvent.type(search(), "rome");
+      expect(selectAll()).toHaveAccessibleName("Select the 1 match");
+    });
+
+    it("ticks one search's matches after another's, and hides itself once they are ticked", async () => {
+      const { onChange } = renderStateful();
+      await openPanel();
+      await userEvent.type(search(), "iceland");
+      await userEvent.click(selectAll()!);
+      expect(selectAll()).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Iceland winter")).toBeChecked();
+      expect(screen.getByLabelText("Iceland by Bob")).toBeChecked();
+
+      await userEvent.clear(search());
+      await userEvent.type(search(), "bob");
+      // Bob's Iceland is ticked already; his dogs are not.
+      expect(selectAll()).toHaveAccessibleName("Select all 2 matches");
+      await userEvent.click(selectAll()!);
+      expect(onChange).toHaveBeenLastCalledWith({ ...emptyFilters, tripIds: ["s1", "s2"], albumIds: ["b1", "b2", "b4"] });
+      expect(clear()).toHaveAccessibleName("Clear 5 selected");
+    });
+
+    it("Clear unticks every trip and album and keeps every other filter", async () => {
+      const { onChange } = renderSet({ ...others, tripIds: ["unassigned", "s1"], albumIds: ["b3"] });
+      await openPanel();
+      const button = clear()!;
+      expect(button).toHaveAccessibleName("Clear 3 selected");
+      expect(button).toHaveAttribute("type", "button");
+
+      await userEvent.click(button);
+      expect(onChange).toHaveBeenCalledTimes(1);
+      expect(onChange).toHaveBeenCalledWith({ ...others, tripIds: [], albumIds: [] });
+    });
+
+    it("offers Clear only while a collection is ticked, search field or not", async () => {
+      const { unmount } = renderSet({ ...others });
+      await openPanel();
+      expect(clear()).not.toBeInTheDocument();
+      unmount();
+
+      // Four collections: no search field, and Clear all the same.
+      renderPanel({ albumIds: ["a2"] });
+      await openPanel();
+      expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+      expect(clear()).toHaveAccessibleName("Clear 1 selected");
+    });
+
+    it("keeps the search and the other filters after Clear", async () => {
+      const { onChange } = renderStateful({ ...others, albumIds: ["b4"] });
+      await openPanel();
+      await userEvent.type(search(), "iceland");
+      await userEvent.click(clear()!);
+      expect(onChange).toHaveBeenLastCalledWith({ ...others, tripIds: [], albumIds: [] });
+      expect(clear()).not.toBeInTheDocument();
+      expect(search()).toHaveValue("iceland");
+      expect(screen.queryByLabelText("Dogs by Bob")).not.toBeInTheDocument();
+      expect(selectAll()).toHaveAccessibleName("Select all 4 matches");
+    });
+
+    it.each([
+      { label: "Select all", query: "iceland", button: selectAll, filters: {} },
+      { label: "Clear", query: "", button: clear, filters: { tripIds: ["s4"] } },
+    ])("leaves the focus on the collections after $label, not on the page", async ({ query, button, filters }) => {
+      renderStateful(filters);
+      await openPanel();
+      if (query) await userEvent.type(search(), query);
+      await userEvent.click(button()!);
+      expect(button()).not.toBeInTheDocument();
+      const section = screen.getByRole("group", { name: "Collections" });
+      expect(section).toHaveFocus();
+      await userEvent.tab();
+      expect(search()).toHaveFocus();
+    });
+
+    it("forgets a query whose field is gone", async () => {
+      const onChange = vi.fn();
+      const { rerender } = renderSet({}, onChange);
+      await openPanel();
+      await userEvent.type(search(), "d");
+      expect(selectAll()).toBeInTheDocument();
+
+      // The New challenge dialog narrows the albums to those every player is in.
+      rerender(
+        <FilterPanel trips={trips} albums={[albums[0], albums[2]]} filters={emptyFilters} onChange={onChange} activeCount={0} />
+      );
+      expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+      expect(selectAll()).not.toBeInTheDocument();
+      // "d" is not in Family.
+      expect(screen.getByLabelText("Family")).toBeInTheDocument();
+    });
+
+    it("gives both a finger-sized row", async () => {
+      renderSet({ tripIds: ["s1"] });
+      await openPanel();
+      await userEvent.type(search(), "iceland");
+      expect(selectAll()).toHaveClass("touch:min-h-11");
+      expect(clear()).toHaveClass("touch:min-h-11");
     });
   });
 
