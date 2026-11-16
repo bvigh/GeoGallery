@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import type { Album, FilterState, MediaItem, Trip } from "@/types";
 import { emptyFilters } from "@/lib/filters";
 import { matchesSearch, SEARCH_MIN_ITEMS } from "@/lib/search";
@@ -21,9 +21,9 @@ interface Props {
   activeCount: number;
 }
 
-function SectionTitle({ children }: { children: ReactNode }) {
+function SectionTitle({ id, children }: { id?: string; children: ReactNode }) {
   return (
-    <p className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+    <p id={id} className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">
       {children}
     </p>
   );
@@ -58,23 +58,60 @@ function toggle<T>(list: T[], value: T): T[] {
   return list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
 }
 
+// What "Select all" says: how many collections the query matches, ticked or not.
+function selectAllLabel(matches: number): string {
+  return matches === 1 ? "Select the 1 match" : `Select all ${matches} matches`;
+}
+
 // Trips and albums are one filter: the backend matches media in any ticked collection.
 // Ticked collections stay listed while searching, so they can always be unticked.
 // Trips spanning more than one year sit under collapsible year headers, only the newest
 // open by default. A search opens every year with a visible trip and hides the others,
 // without touching the user's own choices, which come back when the query is cleared.
+//
+// Two actions sit under the search field. "Select all" ticks every trip and album the query
+// matches, keeping the ticks there were. It needs a query: ticking every collection would
+// filter out nothing but the media in none, which is surprising. It never ticks Unassigned,
+// which would turn "media in these trips" into "media in no trip" as well. "Clear" unticks
+// every trip and album and leaves the other filters as they are, unlike "Reset filters".
 function Collections({ trips, albums, filters, onChange }: Pick<Props, "trips" | "albums" | "filters" | "onChange">) {
-  const [query, setQuery] = useState("");
+  const [typed, setTyped] = useState("");
   const [expandedByUser, setExpandedByUser] = useState<ReadonlyMap<string, boolean>>(new Map());
+  const titleId = useId();
+  const sectionRef = useRef<HTMLDivElement>(null);
+  const searchShown = trips.length + albums.length >= SEARCH_MIN_ITEMS;
+  // A query only counts while its field is there to show it: the New challenge dialog can narrow
+  // the albums below the field's threshold.
+  const query = searchShown ? typed : "";
   const searching = query.trim() !== "";
-  const tripVisible = (t: Trip) =>
-    filters.tripIds.includes(t.id) || matchesSearch(query, t.name, t.start_date, t.end_date);
+  const tripMatches = (t: Trip) => matchesSearch(query, t.name, t.start_date, t.end_date);
+  const albumMatches = (a: Album) => matchesSearch(query, a.name, a.owner_name);
+  const tripVisible = (t: Trip) => filters.tripIds.includes(t.id) || tripMatches(t);
   const visibleTrips = trips.filter(tripVisible);
   const yearGroups = groupTripsByYear(trips);
   const showUnassigned = filters.tripIds.includes("unassigned") || matchesSearch(query, "Unassigned");
-  const visibleAlbums = albums.filter(
-    (a) => filters.albumIds.includes(a.id) || matchesSearch(query, a.name, a.owner_name)
-  );
+  const visibleAlbums = albums.filter((a) => filters.albumIds.includes(a.id) || albumMatches(a));
+  const matchingTrips = searching ? trips.filter(tripMatches) : [];
+  const matchingAlbums = searching ? albums.filter(albumMatches) : [];
+  const tripsToTick = matchingTrips.filter((t) => !filters.tripIds.includes(t.id)).map((t) => t.id);
+  const albumsToTick = matchingAlbums.filter((a) => !filters.albumIds.includes(a.id)).map((a) => a.id);
+  const canSelectAll = tripsToTick.length + albumsToTick.length > 0;
+  const ticked = filters.tripIds.length + filters.albumIds.length;
+  // Both buttons are gone once clicked: the focus waits on the section, and the next Tab goes
+  // on from its top, instead of falling to the page.
+  const keepFocus = () => sectionRef.current?.focus({ preventScroll: true });
+  const selectAll = () => {
+    keepFocus();
+    onChange({
+      ...filters,
+      tripIds: [...filters.tripIds, ...tripsToTick],
+      albumIds: [...filters.albumIds, ...albumsToTick],
+    });
+  };
+  const clear = () => {
+    keepFocus();
+    onChange({ ...filters, tripIds: [], albumIds: [] });
+  };
   const tripsShown = trips.length > 0 && (showUnassigned || visibleTrips.length > 0);
   const tripCheckbox = (trip: Trip) => (
     <Checkbox
@@ -86,10 +123,22 @@ function Collections({ trips, albums, filters, onChange }: Pick<Props, "trips" |
   );
 
   return (
-    <div>
-      <SectionTitle>Collections</SectionTitle>
-      {trips.length + albums.length >= SEARCH_MIN_ITEMS && (
-        <SearchInput value={query} onChange={setQuery} label="Search collections" className="mb-2" />
+    <div ref={sectionRef} role="group" aria-labelledby={titleId} tabIndex={-1}>
+      <SectionTitle id={titleId}>Collections</SectionTitle>
+      {searchShown && <SearchInput value={typed} onChange={setTyped} label="Search collections" className="mb-2" />}
+      {(canSelectAll || ticked > 0) && (
+        <div className="mb-2 flex flex-wrap gap-x-4 text-xs">
+          {canSelectAll && (
+            <button type="button" onClick={selectAll} className="text-primary hover:underline touch:min-h-11">
+              {selectAllLabel(matchingTrips.length + matchingAlbums.length)}
+            </button>
+          )}
+          {ticked > 0 && (
+            <button type="button" onClick={clear} className="text-primary hover:underline touch:min-h-11">
+              Clear {ticked} selected
+            </button>
+          )}
+        </div>
       )}
       {/* On touch and on short screens the whole panel scrolls instead: a finger on a list nested
           in a scrolling panel would scroll only the list. */}
