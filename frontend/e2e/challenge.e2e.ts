@@ -144,6 +144,26 @@ test("alice makes a challenge for herself and bob, both play it once and compare
     await expect(bobView.locator(".leaflet-popup")).toContainText(/km away · [\d,]+ pts/);
     await expect(bobView.getByRole("list", { name: "Guesses of round 1" }).getByRole("listitem")).toHaveCount(2);
 
+    // The round's photo full size, over the results: the photo alone, loaded from its URL. Escape
+    // closes it and leaves the challenge open, and so does back.
+    const thumbnail = bobView.getByRole("button", { name: "Open round 1's photo full size" });
+    await thumbnail.click();
+    const fullSize = bob.getByRole("dialog", { name: "Round 1's photo" });
+    const photo = fullSize.getByRole("img", { name: "Round 1's photo" });
+    await expect(photo).toBeVisible();
+    await expect.poll(() => photo.evaluate((img: HTMLImageElement) => (img.complete ? img.naturalWidth : 0))).toBeGreaterThan(0);
+    await expect(fullSize.locator(".leaflet-container, .leaflet-marker-icon")).toHaveCount(0);
+    await bob.keyboard.press("Escape");
+    await expect(fullSize).toHaveCount(0);
+    await expect(bobView).toBeVisible();
+    await expect(thumbnail).toBeFocused();
+    await thumbnail.click();
+    await expect(photo).toBeVisible();
+    await bob.goBack();
+    await expect(fullSize).toHaveCount(0);
+    await expect(bobView).toBeVisible();
+    await expect(bob).toHaveURL(new RegExp(`/game/${challengeId}$`));
+
     // The map has a size of its own, on a desktop and on a phone: Leaflet's container takes its
     // height from its parent, so a parent without one would leave it 0 px tall.
     const resultsMap = bobView.locator(".leaflet-container");

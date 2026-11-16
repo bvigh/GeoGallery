@@ -2,13 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { MapContainer, Marker, Polyline, Popup, TileLayer, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Maximize2 } from "lucide-react";
 import { actualIcon, GUESS_LINE } from "@/components/game/gameMarkers";
 import { TOP_MARKER_Z_INDEX_OFFSET } from "@/components/map/markers";
 import {
   formatPoints,
   guessDateNote,
   guessSummary,
+  itemKind,
   memberInitials,
   memberLabel,
   pinColors,
@@ -136,15 +137,29 @@ export function Scoreboard({
   );
 }
 
-// The item of a round, small, beside its map: a reminder of which one it was.
-function RoundPreview({ result }: { result: ChallengeRoundResult }) {
+// The item of a round, small, beside its map: a reminder of which one it was, and the button that
+// opens it full size. In CORS mode, like the Map card's preview: the full-size 360° viewers load
+// the same URL as a CORS request, and a no-CORS copy in the browser's cache would fail it.
+function RoundPreview({ result, onOpen }: { result: ChallengeRoundResult; onOpen: (result: ChallengeRoundResult) => void }) {
   if (!result.url || !result.media_type) return null;
-  const className = "h-full w-full rounded-md bg-black object-cover";
-  return result.media_type.startsWith("video") ? (
-    // The first frame only: no controls, so it is not a player and takes no keys.
-    <video src={result.url} preload="metadata" muted playsInline aria-label={`Round ${result.number}'s video`} className={className} />
-  ) : (
-    <img src={result.url} alt={`Round ${result.number}'s photo`} loading="lazy" className={className} />
+  const className = "h-full w-full bg-black object-cover";
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(result)}
+      aria-label={`Open round ${result.number}'s ${itemKind(result.media_type)} full size`}
+      className="relative block h-full w-full cursor-zoom-in overflow-hidden rounded-md touch:min-h-11 touch:min-w-11"
+    >
+      {result.media_type.startsWith("video") ? (
+        // The first frame only: no controls, so it is not a player and takes no keys.
+        <video src={result.url} crossOrigin="anonymous" preload="metadata" muted playsInline className={className} />
+      ) : (
+        <img src={result.url} crossOrigin="anonymous" alt="" loading="lazy" className={className} />
+      )}
+      <span className="pointer-events-none absolute bottom-1.5 right-1.5 rounded-full bg-black/60 p-1 text-white">
+        <Maximize2 className="h-4 w-4" aria-hidden="true" />
+      </span>
+    </button>
   );
 }
 
@@ -152,12 +167,14 @@ interface Props {
   results: ChallengeRoundResult[];
   members: ChallengeMember[];
   meId: string;
+  // Opens a round's item full size; only a round the viewer can read has one.
+  onOpenItem: (result: ChallengeRoundResult) => void;
 }
 
 // What a finished player sees of the rounds: one round at a time, the map with the actual location
 // and every player's guess (a pin with their initials, joined to the location by a dashed line;
 // a click says how far off it was), and the same guesses as a list, best first.
-export function ChallengeResults({ results, members, meId }: Props) {
+export function ChallengeResults({ results, members, meId, onOpenItem }: Props) {
   const [index, setIndex] = useState(0);
   const initials = useMemo(() => memberInitials(members), [members]);
   const icons = useMemo(() => {
@@ -233,7 +250,7 @@ export function ChallengeResults({ results, members, meId }: Props) {
         <>
           <div className="grid gap-3 sm:grid-cols-[10rem_1fr]">
             <div className="h-28">
-              <RoundPreview result={result} />
+              <RoundPreview result={result} onOpen={onOpenItem} />
             </div>
             {/* The height is the wrapper's: index.css makes every Leaflet container fill its parent,
                 which beats a height class on the map itself and would leave it 0 px tall here. */}

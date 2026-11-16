@@ -4,47 +4,23 @@ import { api, ApiError } from "@/api/client";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { CopyField } from "@/components/CopyField";
 import { ChallengeResults, Scoreboard } from "@/components/game/ChallengeResults";
+import { RoundItemView } from "@/components/game/RoundItemView";
 import { RoundPlay, type Guess } from "@/components/game/RoundPlay";
 import { RoundResult } from "@/components/game/RoundResult";
-import { ALREADY_GUESSED, CHALLENGE_GONE, playersLabel, ROUND_GONE } from "@/lib/challenge";
+import {
+  ALREADY_GUESSED,
+  CHALLENGE_GONE,
+  FRESH_URLS_MS,
+  playersLabel,
+  ROUND_GONE,
+  roundItemState,
+  type RoundItemState,
+} from "@/lib/challenge";
 import { keyBelongsToDialog } from "@/lib/dialogKeys";
+import { isTextField, keepTabInside } from "@/lib/focusTrap";
 import { useCloseOnBack } from "@/lib/history";
 import { challengeRoute, routeUrl } from "@/lib/routes";
-import type { Challenge, GuessResult } from "@/types";
-
-const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-// As in the Checks view: the page behind the view is covered but still in the tab order.
-function keepTabInside(e: KeyboardEvent, root: HTMLElement | null) {
-  if (!root) return;
-  const items = root.querySelectorAll<HTMLElement>(FOCUSABLE);
-  const first = items[0];
-  const last = items[items.length - 1];
-  const active = document.activeElement;
-  if (!first || !last) {
-    e.preventDefault();
-  } else if (!root.contains(active)) {
-    e.preventDefault();
-    first.focus();
-  } else if (e.shiftKey && (active === first || active === root)) {
-    e.preventDefault();
-    last.focus();
-  } else if (!e.shiftKey && active === last) {
-    e.preventDefault();
-    first.focus();
-  }
-}
-
-function isTextField(target: EventTarget | null): boolean {
-  const element = target as HTMLElement | null;
-  return (
-    element?.tagName === "INPUT" ||
-    element?.tagName === "TEXTAREA" ||
-    element?.tagName === "SELECT" ||
-    element?.isContentEditable === true
-  );
-}
+import type { Challenge, ChallengeRoundResult, GuessResult } from "@/types";
 
 // The guess just scored, shown until the player moves on.
 interface Scored {
@@ -55,6 +31,18 @@ interface Scored {
 }
 
 type Phase = "overview" | "playing" | "scored";
+
+// A round's item full size over the results (RoundItemView): which round, as the results showed it
+// when the view opened, and what the view shows.
+interface ItemRound {
+  position: number;
+  number: number;
+  mediaType: string | null;
+}
+interface ItemView {
+  round: ItemRound;
+  state: RoundItemState;
+}
 
 interface Props {
   challengeId: string;
@@ -84,8 +72,15 @@ export function ChallengeView({ challengeId, onClose }: Props) {
   // The latest load, and its request: an older load that answers late is dropped.
   const loadId = useRef(0);
   const controller = useRef<AbortController | null>(null);
+  // When the challenge on screen came (Date.now()): its media URLs are signed for 15 minutes.
+  const loadedAt = useRef(0);
+  const [itemView, setItemView] = useState<ItemView | null>(null);
+  // Counts the item views opened and closed: a fetch for one that has closed answers into nothing.
+  const itemOpenings = useRef(0);
 
-  const load = useCallback(async (): Promise<Challenge | null> => {
+  // What a load came to: the challenge, a failure (said on screen), or null when a later load, the
+  // view's closing or the challenge's 404 took over.
+  const load = useCallback(async (): Promise<Challenge | "failed" | null> => {
     const id = ++loadId.current;
     controller.current?.abort();
     const abort = new AbortController();
@@ -95,6 +90,7 @@ export function ChallengeView({ challengeId, onClose }: Props) {
       const next = await api.getChallenge(challengeId, abort.signal);
       if (id !== loadId.current || abort.signal.aborted) return null;
       setChallenge(next);
+      loadedAt.current = Date.now();
       setLoadFailed(false);
       return next;
     } catch (e) {
@@ -105,7 +101,7 @@ export function ChallengeView({ challengeId, onClose }: Props) {
       }
       console.error("Failed to load the challenge:", e);
       setLoadFailed(true);
-      return null;
+      return "failed";
     } finally {
       if (id === loadId.current) setLoading(false);
     }
@@ -127,9 +123,13 @@ export function ChallengeView({ challengeId, onClose }: Props) {
 
   useCloseOnBack(() => onClose(), true, routeUrl(challengeRoute(challengeId)));
 
+  const itemOpen = itemView !== null;
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (keyBelongsToDialog(e)) return;
+      // A round's item full size covers the view and handles every key itself, Tab included.
+      if (itemOpen) return;
       if (e.key === "Tab") {
         keepTabInside(e, rootRef.current);
         return;
@@ -139,7 +139,38 @@ export function ChallengeView({ challengeId, onClose }: Props) {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [itemOpen]);
+
+  // The challenge fetched again for a round's item: fresh URLs, and the round as the server has it
+  // now. The item view says Loading meanwhile, then shows the item, or why it cannot.
+  const fetchItem = async (round: ItemRound) => {
+    const opening = ++itemOpenings.current;
+    setItemView({ round, state: { status: "loading" } });
+    const next = await load();
+    if (opening !== itemOpenings.current || next === null) return;
+    setItemView({
+      round,
+      state: next === "failed" ? { status: "failed" } : roundItemState(next.results, round.position),
+    });
+  };
+
+  // Opens a round's item full size. Its URL came with the challenge, signed for 15 minutes: while
+  // the challenge is younger than FRESH_URLS_MS the view shows it at once, after that it fetches
+  // the challenge again first.
+  const openItem = (result: ChallengeRoundResult) => {
+    const round = { position: result.position, number: result.number, mediaType: result.media_type };
+    if (Date.now() - loadedAt.current < FRESH_URLS_MS) {
+      itemOpenings.current++;
+      setItemView({ round, state: { status: "shown", result } });
+      return;
+    }
+    void fetchItem(round);
+  };
+
+  const closeItem = () => {
+    itemOpenings.current++;
+    setItemView(null);
+  };
 
   // The screen changes under the focused button (Play, Submit, Next round): the focus moves to the
   // view rather than fall to <body>, where Tab would start behind it.
@@ -269,12 +300,24 @@ export function ChallengeView({ challengeId, onClose }: Props) {
                   busy={loading}
                   onPlay={play}
                   onRetry={() => void load()}
+                  onOpenItem={openItem}
                 />
               )}
             </div>
           </div>
         )}
       </div>
+
+      {itemView && (
+        <RoundItemView
+          number={itemView.round.number}
+          mediaType={itemView.round.mediaType}
+          state={itemView.state}
+          onRetry={() => void fetchItem(itemView.round)}
+          onClose={closeItem}
+          returnFocus={() => rootRef.current?.focus()}
+        />
+      )}
     </div>
   );
 }
@@ -286,6 +329,7 @@ function Overview({
   busy,
   onPlay,
   onRetry,
+  onOpenItem,
 }: {
   challenge: Challenge;
   meId: string;
@@ -295,6 +339,7 @@ function Overview({
   busy: boolean;
   onPlay: () => void;
   onRetry: () => void;
+  onOpenItem: (result: ChallengeRoundResult) => void;
 }) {
   const { round, results } = challenge;
   const link = window.location.origin + routeUrl(challengeRoute(challenge.id));
@@ -348,7 +393,7 @@ function Overview({
 
       {results && (
         <section aria-label="Rounds" className="space-y-2">
-          <ChallengeResults results={results} members={challenge.members} meId={meId} />
+          <ChallengeResults results={results} members={challenge.members} meId={meId} onOpenItem={onOpenItem} />
         </section>
       )}
 

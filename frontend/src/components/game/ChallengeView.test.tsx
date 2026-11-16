@@ -8,9 +8,17 @@ import type { ChallengeResults } from "@/components/game/ChallengeResults";
 import { ChallengeView } from "@/components/game/ChallengeView";
 import type { RoundPlay } from "@/components/game/RoundPlay";
 import type { RoundResult } from "@/components/game/RoundResult";
-import { ALREADY_GUESSED, CHALLENGE_GONE, ROUND_GONE } from "@/lib/challenge";
+import {
+  ALREADY_GUESSED,
+  CHALLENGE_GONE,
+  FRESH_URLS_MS,
+  ITEM_DELETED,
+  ITEM_NOT_SHARED,
+  RESULTS_HIDDEN,
+  ROUND_GONE,
+} from "@/lib/challenge";
 import { BACK_DEPTH_KEY } from "@/lib/history";
-import type { Challenge, ChallengeRound, CurrentUser, GuessResult } from "@/types";
+import type { Challenge, ChallengeRound, ChallengeRoundResult, CurrentUser, GuessResult } from "@/types";
 
 vi.mock("@/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/client")>();
@@ -59,13 +67,25 @@ vi.mock("@/components/game/RoundResult", () => ({
   },
 }));
 
+// The results' own screen is ChallengeResults.test.tsx's. Here: a thumbnail button per round that
+// has an item to open, as ChallengeResults gives one.
 vi.mock("@/components/game/ChallengeResults", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/components/game/ChallengeResults")>();
   return {
     ...actual,
     ChallengeResults: (props: ResultsProps) => {
       stubs.results = props;
-      return <div data-testid="results" />;
+      return (
+        <div data-testid="results">
+          {props.results
+            .filter((r) => r.url)
+            .map((r) => (
+              <button key={r.position} onClick={() => props.onOpenItem(r)}>
+                Open round {r.number}
+              </button>
+            ))}
+        </div>
+      );
     },
   };
 });
@@ -110,25 +130,31 @@ function challenge(extra: Partial<Challenge> = {}): Challenge {
   };
 }
 
+function result(position: number, extra: Partial<ChallengeRoundResult> = {}): ChallengeRoundResult {
+  return {
+    position,
+    number: position,
+    available: true,
+    media_id: `m${position}`,
+    media_type: "photo",
+    url: `https://s3.example/m${position}`,
+    initial_yaw: null,
+    initial_pitch: null,
+    initial_fov: null,
+    actual_lat: 47.5,
+    actual_lng: 19,
+    actual_date: null,
+    guesses: [],
+    ...extra,
+  };
+}
+
 const finished = challenge({
   played: 5,
   score: 18000,
   finished: true,
   round: null,
-  results: [
-    {
-      position: 1,
-      number: 1,
-      available: true,
-      media_id: "m1",
-      media_type: "photo",
-      url: "https://s3.example/m1",
-      actual_lat: 47.5,
-      actual_lng: 19,
-      actual_date: null,
-      guesses: [],
-    },
-  ],
+  results: [result(1)],
 });
 
 const scored: GuessResult = {
@@ -154,6 +180,14 @@ function deferred<T>() {
 
 // How many fullscreen views hold a history entry (useCloseOnBack).
 const depth = () => ((window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY] as number) ?? 0;
+
+// The clock moved on by `ms`, still running: the challenge on screen grows old. Undone by
+// vi.restoreAllMocks().
+const realNow = Date.now.bind(Date);
+function advanceClock(ms: number) {
+  const offset = Date.now() - realNow() + ms;
+  vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+}
 
 // jsdom traverses history in setTimeout(0) steps; this lets every pending step land.
 async function settle() {
@@ -534,6 +568,210 @@ describe("ChallengeView", () => {
       await openOverview();
       const classes = screen.getByRole("button", { name: "Close" }).className.split(" ");
       expect(classes).toEqual(expect.arrayContaining(["touch:min-h-11", "touch:min-w-11"]));
+    });
+  });
+
+  // RoundItemView itself (every media type, its keys and focus) is RoundItemView.test.tsx's. Here:
+  // how the challenge view opens it, keeps its own keys off it, and fetches fresh URLs for it.
+  describe("a round's item full size", () => {
+    const two = challenge({
+      played: 5,
+      score: 18000,
+      finished: true,
+      round: null,
+      results: [result(1), result(2)],
+    });
+    const fresh = {
+      ...two,
+      results: [result(1, { url: "https://s3.example/m1?fresh" }), result(2, { url: "https://s3.example/m2?fresh" })],
+    };
+
+    async function openResults(onClose = vi.fn()) {
+      mockApi.getChallenge.mockResolvedValue(two);
+      return openOverview(onClose);
+    }
+
+    const itemView = (name = "Round 1's photo") => screen.getByRole("dialog", { name });
+    const noItemView = () => screen.queryByRole("dialog", { name: /^Round \d's/ });
+
+    it("opens over the challenge on the URL in hand, and its Close button closes it alone", async () => {
+      const { onClose } = await openResults();
+      await userEvent.click(screen.getByRole("button", { name: "Open round 2" }));
+
+      const view = itemView("Round 2's photo");
+      expect(within(view).getByRole("img", { name: "Round 2's photo" })).toHaveAttribute("src", "https://s3.example/m2");
+      expect(mockApi.getChallenge).toHaveBeenCalledTimes(1);
+      // Above the challenge view's z-[1000], and nothing over the item but its title and Close.
+      expect(view.className.split(" ")).toContain("z-[1100]");
+      expect(within(view).getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+        "Close full-size view",
+      ]);
+
+      await userEvent.click(within(view).getByRole("button", { name: "Close full-size view" }));
+      expect(noItemView()).toBeNull();
+      expect(screen.getByRole("dialog", { name: "Family five" })).toBeInTheDocument();
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it("closes alone on Escape: the next Escape closes the challenge", async () => {
+      const { onClose } = await openResults();
+      await userEvent.click(screen.getByRole("button", { name: "Open round 1" }));
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(noItemView()).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("takes the focus, keeps Tab inside it and gives the focus back to the thumbnail", async () => {
+      await openResults();
+      const thumbnail = screen.getByRole("button", { name: "Open round 1" });
+      await userEvent.click(thumbnail);
+      const view = itemView();
+      expect(document.activeElement).toBe(view);
+
+      // From <body>, Tab comes into the item view, never to the challenge's own buttons behind it.
+      const close = within(view).getByRole("button", { name: "Close full-size view" });
+      view.blur();
+      fireEvent.keyDown(window, { key: "Tab" });
+      expect(document.activeElement).toBe(close);
+      fireEvent.keyDown(close, { key: "Tab" });
+      expect(document.activeElement).toBe(close);
+      fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+      expect(document.activeElement).toBe(close);
+
+      fireEvent.keyDown(close, { key: "Escape" });
+      expect(noItemView()).toBeNull();
+      expect(document.activeElement).toBe(thumbnail);
+    });
+
+    it("has a history entry of its own on the challenge's URL: back closes it and leaves the challenge open", async () => {
+      const { onClose } = await openResults();
+      await settle();
+      expect(depth()).toBe(1);
+      await userEvent.click(screen.getByRole("button", { name: "Open round 1" }));
+      await settle();
+      expect(depth()).toBe(2);
+      expect(window.location.pathname).toBe(`/game/${ID}`);
+
+      await act(async () => {
+        const popped = new Promise((resolve) => window.addEventListener("popstate", resolve, { once: true }));
+        window.history.back();
+        await popped;
+      });
+      await settle();
+      expect(noItemView()).toBeNull();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(depth()).toBe(1);
+      expect(window.location.pathname).toBe(`/game/${ID}`);
+
+      // Closed by its button, it takes its entry away again.
+      await userEvent.click(screen.getByRole("button", { name: "Open round 1" }));
+      await settle();
+      expect(depth()).toBe(2);
+      await userEvent.click(screen.getByRole("button", { name: "Close full-size view" }));
+      await settle();
+      expect(depth()).toBe(1);
+      expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it("uses the URL in hand while the challenge is younger than the URLs' margin", async () => {
+      await openResults();
+      advanceClock(FRESH_URLS_MS - 1000);
+      await userEvent.click(screen.getByRole("button", { name: "Open round 1" }));
+      expect(within(itemView()).getByRole("img")).toHaveAttribute("src", "https://s3.example/m1");
+      expect(mockApi.getChallenge).toHaveBeenCalledTimes(1);
+    });
+
+    it("fetches an older challenge again first, and shows the fresh URL", async () => {
+      await openResults();
+      advanceClock(FRESH_URLS_MS);
+      const pending = deferred<Challenge>();
+      mockApi.getChallenge.mockReturnValue(pending.promise);
+      await userEvent.click(screen.getByRole("button", { name: "Open round 2" }));
+
+      const view = itemView("Round 2's photo");
+      expect(within(view).getByText("Loading…")).toBeInTheDocument();
+      expect(within(view).queryByRole("img")).toBeNull();
+      expect(mockApi.getChallenge).toHaveBeenCalledTimes(2);
+
+      await act(async () => pending.resolve(fresh));
+      expect(within(view).getByRole("img", { name: "Round 2's photo" })).toHaveAttribute(
+        "src",
+        "https://s3.example/m2?fresh",
+      );
+      // The thumbnails behind get the fresh URLs too, and the next opening uses them as they are.
+      expect(stubs.results!.results).toEqual(fresh.results);
+      await userEvent.click(within(view).getByRole("button", { name: "Close full-size view" }));
+      await userEvent.click(screen.getByRole("button", { name: "Open round 1" }));
+      expect(within(itemView()).getByRole("img")).toHaveAttribute("src", "https://s3.example/m1?fresh");
+      expect(mockApi.getChallenge).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      {
+        what: "no longer shared",
+        next: { ...two, results: [result(1), result(2, { available: false, media_id: null, media_type: null, url: null })] },
+        reason: ITEM_NOT_SHARED,
+      },
+      { what: "deleted", next: { ...two, item_count: 1, results: [result(1)] }, reason: ITEM_DELETED },
+      {
+        what: "hidden again for a round to play",
+        next: { ...two, finished: false, played: 4, round: roundAt(3), results: null },
+        reason: RESULTS_HIDDEN,
+      },
+    ])("says why once the fresh challenge no longer shows the round: $what", async ({ next, reason }) => {
+      await openResults();
+      advanceClock(FRESH_URLS_MS);
+      mockApi.getChallenge.mockResolvedValue(next);
+      await userEvent.click(screen.getByRole("button", { name: "Open round 2" }));
+
+      const view = itemView("Round 2's photo");
+      expect(await within(view).findByRole("status")).toHaveTextContent(reason);
+      expect(within(view).queryByRole("img")).toBeNull();
+
+      // Its thumbnail went with the fresh results: the focus goes back to the challenge view.
+      await userEvent.click(within(view).getByRole("button", { name: "Close full-size view" }));
+      expect(document.activeElement).toBe(screen.getByRole("dialog", { name: "Family five" }));
+    });
+
+    it("says so when the fetch fails, and tries again", async () => {
+      await openResults();
+      advanceClock(FRESH_URLS_MS);
+      mockApi.getChallenge.mockRejectedValueOnce(new ApiError("GET failed: 502", 502));
+      await userEvent.click(screen.getByRole("button", { name: "Open round 1" }));
+
+      const view = itemView();
+      expect(await within(view).findByRole("alert")).toHaveTextContent("Could not load the photo.");
+      mockApi.getChallenge.mockResolvedValue(fresh);
+      await userEvent.click(within(view).getByRole("button", { name: "Try again" }));
+      expect(await within(view).findByRole("img")).toHaveAttribute("src", "https://s3.example/m1?fresh");
+      expect(mockApi.getChallenge).toHaveBeenCalledTimes(3);
+      expect(document.activeElement).toBe(view);
+    });
+
+    it("closes the challenge with the reason when the fetch finds it gone", async () => {
+      const { onClose } = await openResults();
+      advanceClock(FRESH_URLS_MS);
+      mockApi.getChallenge.mockRejectedValue(new ApiError("GET failed: 404", 404));
+      await userEvent.click(screen.getByRole("button", { name: "Open round 1" }));
+      await waitFor(() => expect(onClose).toHaveBeenCalledWith(CHALLENGE_GONE));
+    });
+
+    it("opens nothing for a fetch that answers after the view was closed", async () => {
+      await openResults();
+      advanceClock(FRESH_URLS_MS);
+      const pending = deferred<Challenge>();
+      mockApi.getChallenge.mockReturnValue(pending.promise);
+      await userEvent.click(screen.getByRole("button", { name: "Open round 1" }));
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(noItemView()).toBeNull();
+
+      await act(async () => pending.resolve(fresh));
+      expect(noItemView()).toBeNull();
+      expect(stubs.results!.results).toEqual(fresh.results);
+      expect(screen.getByRole("dialog", { name: "Family five" })).toBeInTheDocument();
     });
   });
 });

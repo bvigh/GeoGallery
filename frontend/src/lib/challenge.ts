@@ -1,8 +1,16 @@
 // The pure parts of the Game's challenges: how a player is named and drawn, how the players rank,
-// which albums a new challenge offers, and every sentence the challenge views say.
+// which albums a new challenge offers, what a round's full-size view shows, and every sentence the
+// challenge views say.
 
 import { formatCount } from "@/lib/numbers";
-import type { Album, ChallengeGuess, ChallengeMember, ChallengeSummary, FilterState } from "@/types";
+import type {
+  Album,
+  ChallengeGuess,
+  ChallengeMember,
+  ChallengeRoundResult,
+  ChallengeSummary,
+  FilterState,
+} from "@/types";
 
 // The backend's challengeItemCount: a challenge is made of this many rounds.
 export const CHALLENGE_ROUNDS = 5;
@@ -12,6 +20,11 @@ export const MAX_OTHER_PLAYERS = 19;
 export const CHALLENGE_GONE = "That challenge is not available: it was deleted, or you are not one of its players.";
 export const ROUND_GONE = "That round is no longer available: its item was deleted, or is no longer shared with you.";
 export const ALREADY_GUESSED = "You have already guessed that round.";
+// Why a round's full-size view shows no item, once the challenge was fetched again for it.
+export const ITEM_DELETED = "This round's item was deleted.";
+export const ITEM_NOT_SHARED = "This round's item is no longer shared with you.";
+export const RESULTS_HIDDEN =
+  "A round's item is shared with you again, so the results are hidden until you have played that round.";
 // The New challenge dialog's notes on its albums: when it could not find out which albums every
 // ticked player is in, and when none of the caller's albums has all of them.
 export const ALBUMS_UNCHECKED = "Could not check which albums every player is in, so all of yours are listed.";
@@ -200,6 +213,39 @@ export function guessDateNote(guess: Pick<ChallengeGuess, "guess_date" | "date_d
   const days = Math.round(guess.date_diff_days);
   if (days === 0) return `Guessed ${guess.guess_date}, the right day`;
   return `Guessed ${guess.guess_date}, ${formatCount(days)} ${days === 1 ? "day" : "days"} off`;
+}
+
+// What a round's item is, in words: "photo", "video", "360° photo" or "360° video".
+export function itemKind(mediaType: string | null): string {
+  if (mediaType === "photo_360") return "360° photo";
+  if (mediaType === "video_360") return "360° video";
+  return mediaType?.startsWith("video") ? "video" : "photo";
+}
+
+// The server signs a challenge's media URLs for 15 minutes (storage.presignTTL). A round's item
+// opens full size on the URL in hand while the challenge on screen is younger than this, which
+// leaves at least 5 minutes to load a photo or play a video; an older one is fetched again first.
+export const FRESH_URLS_MS = 10 * 60 * 1000;
+
+// What a round's full-size view shows: the challenge being fetched again for fresh URLs, a fetch
+// that failed, the round's item, or why the round can no longer be shown.
+export type RoundItemState =
+  | { status: "loading" }
+  | { status: "failed" }
+  | { status: "shown"; result: ChallengeRoundResult }
+  | { status: "gone"; reason: string };
+
+/**
+ * What a round's full-size view shows once the challenge was fetched again: the round at
+ * `position` in the fresh `results`, or why not. Only its item's deletion takes a round out of the
+ * results, and they are null again when a round the player could not read became theirs to play.
+ */
+export function roundItemState(results: ChallengeRoundResult[] | null, position: number): RoundItemState {
+  if (results === null) return { status: "gone", reason: RESULTS_HIDDEN };
+  const result = results.find((r) => r.position === position);
+  if (!result) return { status: "gone", reason: ITEM_DELETED };
+  if (!result.available || !result.url || !result.media_type) return { status: "gone", reason: ITEM_NOT_SHARED };
+  return { status: "shown", result };
 }
 
 // The New challenge dialog's own filters, and the albums it offers among them.
