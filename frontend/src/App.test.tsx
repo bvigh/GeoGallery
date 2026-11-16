@@ -236,6 +236,8 @@ describe("App URL", () => {
     ["a malformed album ID", "/albums/not-an-id?item=" + ITEM, "/albums", "Albums"],
     ["a malformed item ID", `/albums/${ALBUM}?item=nope`, `/albums/${ALBUM}`, "Albums"],
     ["an upper-case ID and other parameters", `/albums/${ALBUM.toUpperCase()}?x=1&item=${ITEM}`, `/albums/${ALBUM}?item=${ITEM}`, "Albums"],
+    ["a challenge link", `/game/${ALBUM.toUpperCase()}?item=${ITEM}`, `/game/${ALBUM}`, "Game"],
+    ["a malformed challenge ID", "/game/not-an-id", "/game", "Game"],
   ])("opens %s as its canonical URL", async (_name, path, canonical, tab) => {
     window.history.replaceState(null, "", path);
     render(<App />);
@@ -287,6 +289,21 @@ describe("App URL", () => {
     expect(url()).toBe("/albums");
     expect(depth()).toBe(0);
     expect(currentTab()).toEqual(["Albums"]);
+  });
+
+  // The Game page then opens the challenge on that entry, as the Albums page opens a gallery.
+  it("puts a challenge from a link on an entry of its own above the Game tab's", async () => {
+    window.history.replaceState(null, "", `/game/${ALBUM}`);
+    render(<App />);
+    await screen.findByRole("navigation");
+    expect(url()).toBe(`/game/${ALBUM}`);
+    expect(depth()).toBe(1);
+    expect(currentTab()).toEqual(["Game"]);
+
+    await back();
+    expect(url()).toBe("/game");
+    expect(depth()).toBe(0);
+    expect(currentTab()).toEqual(["Game"]);
   });
 
   it("keeps the entries a reload finds under a gallery's", async () => {

@@ -30,9 +30,12 @@ export default defineConfig({
   },
   projects: [
     { name: "setup", testMatch: /auth\.setup\.ts$/ },
-    { name: "e2e", testMatch: /.*\.e2e\.ts$/, testIgnore: /sharing\.e2e\.ts$/, dependencies: ["setup"] },
+    { name: "e2e", testMatch: /.*\.e2e\.ts$/, testIgnore: /(sharing|challenge)\.e2e\.ts$/, dependencies: ["setup"] },
     // After every other spec, never beside them: it shares alice's gps.jpg with bob, whose
     // empty-library spec must not see it, and uploads the file the upload spec expects to be new.
     { name: "sharing", testMatch: /sharing\.e2e\.ts$/, dependencies: ["e2e"] },
+    // After the sharing spec, never beside it: it puts five more photos into alice's library and
+    // shares them with bob, and the sharing spec counts the markers on bob's map.
+    { name: "challenge", testMatch: /challenge\.e2e\.ts$/, dependencies: ["sharing"] },
   ],
 });

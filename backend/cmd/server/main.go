@@ -423,6 +423,7 @@ type routeHandlers struct {
 	gpsTracks  *handlers.GPSTrackHandler
 	gpsMatcher *handlers.GPSMatcherHandler
 	albums     *handlers.AlbumHandler
+	challenges *handlers.ChallengeHandler
 	admin      *handlers.AdminHandler
 	provenance *handlers.ProvenanceHandler
 	checks     *handlers.ChecksHandler
@@ -471,6 +472,7 @@ func serve() {
 		gpsTracks:  handlers.NewGPSTrackHandler(pool, matchWindow),
 		gpsMatcher: handlers.NewGPSMatcherHandler(pool, matchWindow),
 		albums:     handlers.NewAlbumHandler(pool),
+		challenges: handlers.NewChallengeHandler(pool, s3Client),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
 		provenance: handlers.NewProvenanceHandler(pool, s3Client, matchWindow, cameraZone(cfg)),
 		checks:     handlers.NewChecksHandler(pool, matchWindow),
@@ -537,6 +539,12 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 			r.Post("/albums/{id}/media/remove", h.albums.RemoveMedia)
 			r.Get("/media/{id}/albums", h.albums.MediaAlbums)
 
+			// Playing a challenge. A round shows only media the caller can read anyway, and a guess
+			// is the caller's own, so tokens may use these.
+			r.Get("/challenges", h.challenges.List)
+			r.Get("/challenges/{id}", h.challenges.Get)
+			r.Post("/challenges/{id}/guess", h.challenges.Guess)
+
 			// A rule changes how the owner's future uploads are dated; neither a rule nor the camera
 			// list is location history, so tokens may use these.
 			r.Get("/camera-clock-rules", h.clockRules.List)
@@ -567,6 +575,11 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 				r.Post("/albums/{id}/members", h.albums.AddMember)
 				r.Delete("/albums/{id}/members/{user_id}", h.albums.RemoveMember)
 				r.Get("/users", h.albums.ListUsers)
+				// Making a challenge names other users as its players, who then see each other's
+				// names and scores; deleting or leaving one drops scores for good: never via token.
+				r.Post("/challenges", h.challenges.Create)
+				r.Delete("/challenges/{id}", h.challenges.Delete)
+				r.Post("/challenges/{id}/leave", h.challenges.Leave)
 				r.Get("/tokens", authH.ListTokens)
 				r.Post("/tokens", authH.CreateToken)
 				r.Delete("/tokens/{id}", authH.RevokeToken)

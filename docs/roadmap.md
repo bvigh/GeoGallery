@@ -1,6 +1,6 @@
 # GeoGallery roadmap
 
-As of 2026-11-15. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
+As of 2026-11-16. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
 
 Sizes: **XS** < 2 h, **S** ≤ 1 day, **M** 2–4 days, **L** a week or more.
 
@@ -89,6 +89,8 @@ Data repairs on the existing deployments are operator work, not issues: the far 
 | #43 | Share media by link | L, design |
 | #44 | No-login demo | M, design |
 
+#39 is built for people with an account: a challenge's players are picked from the user list, its five items are drawn from what all of them can already see, and its link (`/game/<id>`) opens it for them alone. Its last point, challenges for people without an account, is share links (#43) and waits for that decision.
+
 ## Public release
 
 What is left of PRD Phase 3.
@@ -116,7 +118,7 @@ Each needs a design note before it can be estimated.
 
 ## Dependencies
 
-- URL state (#31) → challenge links (#39), share links (#43). It did not absorb #17: a tab switch opens a new page entry, so the last viewed trip or album is kept in `sessionStorage` instead.
+- URL state (#31) → challenge links (#39, built), share links (#43) → challenges for people without an account. It did not absorb #17: a tab switch opens a new page entry, so the last viewed trip or album is kept in `sessionStorage` instead.
 - `retime` port (#24) → editing capture times (#26).
 - Per-user settings (#25) → default mute (#38).
 - Labels (#34) → search (#35).

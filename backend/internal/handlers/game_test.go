@@ -219,3 +219,70 @@ func TestMalformedFilters_Return400(t *testing.T) {
 		})
 	}
 }
+
+// scoreGuess is the one scoring rule of a free round and of a challenge's round.
+func TestScoreGuess(t *testing.T) {
+	// 1° of latitude is about 111.2 km.
+	budapest := guessAnswer{lat: 47.5, lng: 19.0, takenAt: ptr("2024-05-02 12:00:00+00"), confidence: 1}
+	undated := guessAnswer{lat: 47.5, lng: 19.0, confidence: 1}
+
+	t.Run("an exact guess without a date is the full location score", func(t *testing.T) {
+		got := scoreGuess(budapest, 47.5, 19.0, "", 500)
+		assert.InDelta(t, 0, got.DistanceKm, 1e-9)
+		assert.InDelta(t, 5000, got.LocationScore, 1e-9)
+		assert.InDelta(t, 5000, got.TotalScore, 1e-9)
+		assert.Nil(t, got.TimeScore)
+		assert.Nil(t, got.DateDiffDays)
+		assert.Equal(t, 47.5, got.ActualLat)
+		assert.Equal(t, 19.0, got.ActualLng)
+		assert.Equal(t, budapest.takenAt, got.ActualDate)
+	})
+
+	t.Run("the location score falls with the distance, relative to the scale", func(t *testing.T) {
+		near := scoreGuess(budapest, 48.5, 19.0, "", 500)
+		assert.InDelta(t, 111.2, near.DistanceKm, 0.1)
+		assert.InDelta(t, 5000*(1-near.DistanceKm/500), near.LocationScore, 1e-6)
+		wide := scoreGuess(budapest, 48.5, 19.0, "", 5000)
+		assert.Greater(t, wide.LocationScore, near.LocationScore, "the same miss costs less on a wider scale")
+		assert.Zero(t, scoreGuess(budapest, 57.5, 19.0, "", 500).LocationScore, "past the scale scores nothing, never below 0")
+	})
+
+	t.Run("a scale under 1 km counts as 1 km", func(t *testing.T) {
+		got := scoreGuess(budapest, 47.5, 19.0, "", 0)
+		assert.InDelta(t, 5000, got.LocationScore, 1e-9)
+		assert.Equal(t, scoreGuess(budapest, 47.501, 19.0, "", 1), scoreGuess(budapest, 47.501, 19.0, "", -3))
+	})
+
+	t.Run("a low confidence forgives part of the distance", func(t *testing.T) {
+		unsure := budapest
+		unsure.confidence = 0.5 // 5 km of tolerance
+		assert.InDelta(t, 5000, scoreGuess(unsure, 47.54, 19.0, "", 500).LocationScore, 1e-9, "4.4 km off")
+		assert.Less(t, scoreGuess(budapest, 47.54, 19.0, "", 500).LocationScore, 5000.0)
+	})
+
+	t.Run("a date is scored against the item's day, and the total is the mean", func(t *testing.T) {
+		got := scoreGuess(budapest, 47.5, 19.0, "2024-05-12", 500)
+		require.NotNil(t, got.DateDiffDays)
+		require.NotNil(t, got.TimeScore)
+		assert.InDelta(t, 10, *got.DateDiffDays, 1e-9)
+		assert.InDelta(t, 5000*(1-10.0/365), *got.TimeScore, 1e-9)
+		assert.InDelta(t, (5000+*got.TimeScore)/2, got.TotalScore, 1e-9)
+
+		before := scoreGuess(budapest, 47.5, 19.0, "2024-04-22", 500)
+		assert.InDelta(t, 10, *before.DateDiffDays, 1e-9, "ten days early costs what ten days late does")
+		assert.Zero(t, *scoreGuess(budapest, 47.5, 19.0, "2020-01-01", 500).TimeScore, "over a year off scores no time points")
+	})
+
+	t.Run("no time score without a date on either side", func(t *testing.T) {
+		for name, got := range map[string]guessResult{
+			"the item has no date":       scoreGuess(undated, 47.5, 19.0, "2024-05-02", 500),
+			"the date cannot be read":    scoreGuess(budapest, 47.5, 19.0, "02-05-2024", 500),
+			"the item's date is cut off": scoreGuess(guessAnswer{lat: 47.5, lng: 19.0, takenAt: ptr("2024"), confidence: 1}, 47.5, 19.0, "2024-05-02", 500),
+			"the item's date is not one": scoreGuess(guessAnswer{lat: 47.5, lng: 19.0, takenAt: ptr("infinity-and-on"), confidence: 1}, 47.5, 19.0, "2024-05-02", 500),
+		} {
+			assert.Nil(t, got.TimeScore, name)
+			assert.Nil(t, got.DateDiffDays, name)
+			assert.InDelta(t, 5000, got.TotalScore, 1e-9, name)
+		}
+	})
+}

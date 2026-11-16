@@ -246,6 +246,79 @@ export interface GuessResult {
   total_score: number;
 }
 
+// Game challenges: five fixed rounds that every player guesses once (/api/challenges).
+
+// A challenge in the caller's list, with their own standing in it.
+export interface ChallengeSummary {
+  id: string;
+  name: string;
+  owner_id: string;
+  owner_name: string | null;
+  is_owner: boolean;
+  created_at: string;
+  member_count: number;
+  // The rounds it has now: a round whose media was deleted is gone.
+  item_count: number;
+  // The caller's own: rounds guessed, and the sum of their scores.
+  played: number;
+  score: number;
+  // No round is left for the caller to play.
+  finished: boolean;
+}
+
+// One player. Members come in a fixed order (the owner, then by ID), not by score.
+export interface ChallengeMember {
+  user_id: string;
+  // Display name, else email.
+  name: string | null;
+  is_owner: boolean;
+  played: number;
+  score: number;
+}
+
+// The caller's next round. `position` names it in the guess; `number` counts the rounds left in
+// the challenge from 1.
+export interface ChallengeRound extends GameRound {
+  position: number;
+  number: number;
+}
+
+export interface ChallengeGuess {
+  user_id: string;
+  lat: number;
+  lng: number;
+  // YYYY-MM-DD; null when the player guessed no date.
+  guess_date: string | null;
+  distance_km: number;
+  date_diff_days: number | null;
+  location_score: number;
+  time_score: number | null;
+  total_score: number;
+}
+
+// One round once the caller has finished. A round whose item the caller can no longer read has
+// `available: false`, nulls and no guesses.
+export interface ChallengeRoundResult {
+  position: number;
+  number: number;
+  available: boolean;
+  media_id: string | null;
+  media_type: string | null;
+  url: string | null;
+  actual_lat: number | null;
+  actual_lng: number | null;
+  actual_date: string | null;
+  guesses: ChallengeGuess[];
+}
+
+export interface Challenge extends ChallengeSummary {
+  members: ChallengeMember[];
+  // The caller's next round; null once they have finished.
+  round: ChallengeRound | null;
+  // Every round's answer and guesses; null until the caller has finished.
+  results: ChallengeRoundResult[] | null;
+}
+
 // "Why here?": GET /api/media/{id}/provenance and /provenance/file (docs/gps-debugging.md, Step 1).
 // Every instant is RFC 3339 in UTC.
 

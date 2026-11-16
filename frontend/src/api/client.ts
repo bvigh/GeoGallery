@@ -6,12 +6,15 @@ import type {
   ApiToken,
   CameraClockRule,
   CameraClockRuleInput,
+  Challenge,
+  ChallengeSummary,
   ChecksResponse,
   CreatedApiToken,
   CurrentUser,
   DirectoryUser,
   FileReread,
   GpsUploadResult,
+  GuessResult,
   LibraryCamera,
   MediaItem,
   OrientationKeyframe,
@@ -396,6 +399,51 @@ function checksAgreement(from: number, signal?: AbortSignal): Promise<AgreementR
   return getCancellable<AgreementResponse>("/checks/agreement", signal, { from: String(from) });
 }
 
+function listChallenges(): Promise<ChallengeSummary[]> {
+  return getList<ChallengeSummary>("/challenges");
+}
+
+// Makes a challenge of five located items drawn from what `filters` select (filterParams, as for a
+// free round) and every player can read. The caller always plays; memberIds are the others. A
+// refusal says why in ApiError.reason: a 400's body, or a 409's when fewer than five items match.
+function createChallenge(name: string, memberIds: string[], filters: QueryParams): Promise<ChallengeSummary> {
+  const path = withQuery("/challenges", filters);
+  return sendWithReason<ChallengeSummary>("POST", path, { name, member_ids: memberIds }, [400, 409]);
+}
+
+// One challenge as the caller stands in it: their next round, or every round's results once they
+// have none left. A 404 means it is gone or the caller does not play in it.
+function getChallenge(id: string, signal?: AbortSignal): Promise<Challenge> {
+  return getCancellable<Challenge>(`/challenges/${id}`, signal);
+}
+
+// The caller's one guess for a round; `date` is YYYY-MM-DD or "". A 409 means the round was
+// guessed before, a 404 that it is gone or its item is no longer shared with the caller.
+function guessChallenge(
+  id: string,
+  position: number,
+  guess: { lat: number; lng: number },
+  date: string
+): Promise<GuessResult> {
+  return post<GuessResult>(`/challenges/${id}/guess`, {
+    position,
+    guess_lat: guess.lat,
+    guess_lng: guess.lng,
+    guess_date: date,
+  });
+}
+
+function deleteChallenge(id: string): Promise<void> {
+  return del(`/challenges/${id}`);
+}
+
+// Takes the caller, and their guesses, out of a challenge someone else owns.
+async function leaveChallenge(id: string): Promise<void> {
+  const path = `/challenges/${id}/leave`;
+  const res = await request(path, { method: "POST" });
+  if (!res.ok) throw new ApiError(`POST ${path} failed: ${res.status}`, res.status);
+}
+
 export const api = {
   get,
   post,
@@ -443,4 +491,10 @@ export const api = {
   updateSettings,
   setTakenAt,
   shiftTimes,
+  listChallenges,
+  createChallenge,
+  getChallenge,
+  guessChallenge,
+  deleteChallenge,
+  leaveChallenge,
 };

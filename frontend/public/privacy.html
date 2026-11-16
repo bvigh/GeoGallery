@@ -23,7 +23,7 @@
     <main>
       <p><a href="/">← GeoGallery</a></p>
       <h1>Privacy Policy</h1>
-      <p class="muted">Last updated: 15 November 2026</p>
+      <p class="muted">Last updated: 16 November 2026</p>
 
       <p>
         GeoGallery is a private, invite-only photo and video gallery with a map and a location-guessing game. It is
@@ -61,7 +61,8 @@
       <p>
         GeoGallery does not request access to your Google contacts, Google Photos, Drive, calendar or any other Google
         data. It uses your email address and name only to identify you, to show your name to people you share albums
-        with, and to let album owners find you when adding members.
+        or play challenges with, and to let album owners and people making a challenge find you when adding members
+        or players.
       </p>
       <p>
         Accounts are created only through an invitation. Invitations are stored with their role, creator, expiry and
@@ -170,7 +171,21 @@
       </p>
 
       <h3>2.6 The guessing game</h3>
-      <p>Your guesses are scored immediately and are not stored.</p>
+      <p>In a free round, your guess is scored immediately and is not stored.</p>
+      <p>
+        A <strong>challenge</strong> is a set of five rounds that its players each guess once. GeoGallery stores the
+        challenge's name, who made it, its players, which items are its rounds (with each item's location and capture
+        time as they were when the challenge was made), and for every guess the place and date you guessed, how far
+        off it was and its score. The players of a challenge see each other's names, how many rounds each has played
+        and their scores, and, once they have played every round themselves, where everyone guessed. A challenge
+        shares no media: its rounds are drawn only from items every player could already see, and a round whose item
+        is no longer shared with you is not shown to you.
+      </p>
+      <p>
+        When you leave a challenge, your guesses and scores in it are deleted. When its owner deletes it, everything
+        stored about it is deleted. Deleting an item removes the rounds made from it, and the guesses on them, from
+        every challenge.
+      </p>
 
       <h3>2.7 Server logs</h3>
       <p>
@@ -186,6 +201,7 @@
       <ul>
         <li>You.</li>
         <li>Members of albums into which you put items (only those items, see 2.5).</li>
+        <li>The players of challenges you play in (your name, your guesses and your scores there, see 2.6).</li>
         <li>
           The operator, who has technical access to the server, database and file storage and accesses them only to
           run, maintain and repair the service, or when you ask for it.
@@ -253,6 +269,10 @@
           delete them or
           your account is deleted. Deleting a photo or video in GeoGallery removes the file and its metadata, and
           removes it from every album.
+        </li>
+        <li>
+          <strong>Challenges, guesses and scores:</strong> until the challenge's owner deletes it; your own guesses
+          and scores also when you leave it.
         </li>
         <li><strong>Sessions:</strong> until you sign out, at the latest 30 days.</li>
         <li><strong>API tokens:</strong> until they expire or you revoke them (at most 365 days).</li>

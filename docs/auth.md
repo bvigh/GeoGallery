@@ -129,6 +129,7 @@ Personal API tokens let scripts call the API as the user.
   - `DELETE /api/media/{id}` and `DELETE /api/trips/{id}`
   - `GET /api/media/{id}/provenance` and `GET /api/media/{id}/provenance/file` (a token cannot read location history)
   - `DELETE /api/albums/{id}`, `POST /api/albums/{id}/members`, `DELETE /api/albums/{id}/members/{user_id}` and `GET /api/users` (a token cannot widen who sees the data or list users' emails)
+  - `POST /api/challenges`, `DELETE /api/challenges/{id}` and `POST /api/challenges/{id}/leave` (a token cannot name other users as a challenge's players, or drop scores for good; it can list, open and play a challenge)
   - `/api/tokens*` (a token cannot mint tokens)
   - `/api/admin/*`
 - Disabling a user deletes their sessions and revokes all their tokens and any unused invites they created. Re-enabling them does not bring the tokens or invites back.
