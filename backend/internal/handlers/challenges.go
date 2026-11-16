@@ -26,6 +26,11 @@ const (
 	// query that draws the items.
 	maxChallengePlayers   = 20
 	maxChallengeBodyBytes = 1 << 14
+	// challengeDrawGrid is the number of cells along each side of the grid the draw lays over the
+	// pool's extent, and challengeDrawPeriods the number of equal periods it cuts the pool's time
+	// span into (challengeDrawSQL).
+	challengeDrawGrid    = 8
+	challengeDrawPeriods = 8
 )
 
 // ChallengeHandler runs game challenges: five located items, fixed when the challenge is made,
@@ -259,10 +264,91 @@ func tooFewItemsMessage(n int64) string {
 	return fmt.Sprintf("Only %d located items match"+tail, n, challengeItemCount)
 }
 
+// challengeDrawSQL is the statement that draws a challenge's items from the pool (conds on media
+// aliased as m, as challengePoolConds returns them) and stores them with their answers. $idArg is
+// the challenge and $playersArg its players, the owner included.
+//
+// A plain random draw follows the number of items: a place with a thousand photos would fill most
+// challenges, and one photographed once would never come up. This draw goes by place and time
+// instead, and by what the players have had already:
+//
+//   - Items the players have had less often come first, so an item is repeated only when the
+//     pool has nothing fresher. An item counts as often as the player who has had it most has
+//     had it, in the challenges they play in. That is what keeps a place with two photos from
+//     coming up in every challenge: once used, they wait until the rest has been used as often.
+//     The count is read from challenge_items, so a deleted challenge is forgotten, and so is one
+//     a player left, for that player.
+//   - Among those, the rounds come from different cells of a grid of challengeDrawGrid cells a
+//     side, laid over the pool's extent (the area the guess map opens on): one item from each
+//     cell, the cells in random order, whatever the number of items in them. A second item from a
+//     cell is taken only when every cell has given one.
+//   - Inside a cell, the pool's time span is cut into challengeDrawPeriods equal periods (undated
+//     items are a period of their own), and the item comes from a random period, then at random
+//     from that period: ten years of photos of one town are not all from the year with the most.
+//
+// The positions are dealt at random, so the order of the rounds says nothing about the cells.
+func challengeDrawSQL(conds []string, idArg, playersArg int) string {
+	return fmt.Sprintf(`
+		WITH pool AS (
+			SELECT m.id, m.location, m.taken_at, COALESCE(m.gps_confidence, 1.0) AS confidence,
+			       ST_Y(m.location::geometry) AS lat, ST_X(m.location::geometry) AS lng,
+			       EXTRACT(EPOCH FROM m.taken_at) AS epoch
+			FROM media m
+			WHERE %[1]s
+		), extent AS (
+			SELECT MIN(lat) AS south, MAX(lat) AS north, MIN(lng) AS west, MAX(lng) AS east,
+			       MIN(epoch) AS earliest, MAX(epoch) AS latest
+			FROM pool
+		), used AS (
+			-- The most often one of the players has had the item.
+			SELECT had.media_id, MAX(had.times) AS times
+			FROM (
+				SELECT ci.media_id, cm.user_id, COUNT(*) AS times
+				FROM challenge_items ci
+				JOIN challenge_members cm ON cm.challenge_id = ci.challenge_id
+				WHERE cm.user_id = ANY($%[3]d::uuid[])
+				GROUP BY ci.media_id, cm.user_id
+			) had
+			GROUP BY had.media_id
+		), placed AS (
+			-- WIDTH_BUCKET puts the upper bound itself one past the last bucket, and refuses equal
+			-- bounds: a pool at one point, or of one instant, is one cell or one period.
+			SELECT p.id, p.location, p.taken_at, p.confidence, COALESCE(u.times, 0) AS times,
+			       CASE WHEN e.north > e.south
+			            THEN LEAST(WIDTH_BUCKET(p.lat, e.south, e.north, %[4]d), %[4]d) ELSE 1 END AS gy,
+			       CASE WHEN e.east > e.west
+			            THEN LEAST(WIDTH_BUCKET(p.lng, e.west, e.east, %[4]d), %[4]d) ELSE 1 END AS gx,
+			       CASE WHEN p.epoch IS NULL THEN 0
+			            WHEN e.latest > e.earliest
+			            THEN LEAST(WIDTH_BUCKET(p.epoch, e.earliest, e.latest, %[5]d), %[5]d)
+			            ELSE 1 END AS period
+			FROM pool p
+			CROSS JOIN extent e
+			LEFT JOIN used u ON u.media_id = p.id
+		), in_period AS (
+			SELECT pl.*, ROW_NUMBER() OVER (PARTITION BY times, gy, gx, period ORDER BY RANDOM()) AS nth_of_period
+			FROM placed pl
+		), in_cell AS (
+			-- A cell's items in turn: one from each of its periods, the periods in random order,
+			-- then a second from each.
+			SELECT ip.*, ROW_NUMBER() OVER (PARTITION BY times, gy, gx ORDER BY nth_of_period, RANDOM()) AS nth_of_cell
+			FROM in_period ip
+		), drawn AS (
+			SELECT id, location, taken_at, confidence
+			FROM in_cell
+			ORDER BY times, nth_of_cell, RANDOM()
+			LIMIT %[6]d
+		)
+		INSERT INTO challenge_items (challenge_id, position, media_id, location, taken_at, gps_confidence)
+		SELECT $%[2]d::uuid, ROW_NUMBER() OVER (ORDER BY RANDOM()), id, location, taken_at, confidence
+		FROM drawn`,
+		strings.Join(conds, " AND "), idArg, playersArg, challengeDrawGrid, challengeDrawPeriods, challengeItemCount)
+}
+
 // Create makes a challenge: {"name", "member_ids"?}, with the Game's filters in the query string,
-// exactly as GET /api/game/round takes them. The five items are drawn at random from the located
-// media those filters select that every player can read. Fewer than five → 409 with the reason,
-// and nothing is stored.
+// exactly as GET /api/game/round takes them. The five items are drawn (challengeDrawSQL) from the
+// located media those filters select that every player can read. Fewer than five → 409 with the
+// reason, and nothing is stored.
 func (h *ChallengeHandler) Create(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	me := auth.MustUser(ctx).ID
@@ -328,9 +414,10 @@ func (h *ChallengeHandler) Create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
+	players := append([]string{me}, c.others...)
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO challenge_members (challenge_id, user_id)
-		SELECT $1, unnest($2::uuid[])`, id, append([]string{me}, c.others...)); err != nil {
+		SELECT $1, unnest($2::uuid[])`, id, players); err != nil {
 		slog.Error("challenges: create members insert failed", "challenge_id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
@@ -338,17 +425,8 @@ func (h *ChallengeHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	// Drawn and stored in one statement, so an item deleted meanwhile is simply not drawn. The
 	// answer is copied here: every player is scored against the same one.
-	itemArgs := append(append([]any{}, args...), id)
-	tag, err := tx.Exec(ctx, fmt.Sprintf(`
-		INSERT INTO challenge_items (challenge_id, position, media_id, location, taken_at, gps_confidence)
-		SELECT $%d::uuid, ROW_NUMBER() OVER (), p.id, p.location, p.taken_at, p.confidence
-		FROM (
-			SELECT m.id, m.location, m.taken_at, COALESCE(m.gps_confidence, 1.0) AS confidence
-			FROM media m
-			WHERE %s
-			ORDER BY RANDOM()
-			LIMIT %d
-		) p`, len(itemArgs), strings.Join(conds, " AND "), challengeItemCount), itemArgs...)
+	itemArgs := append(append([]any{}, args...), id, players)
+	tag, err := tx.Exec(ctx, challengeDrawSQL(conds, len(itemArgs)-1, len(itemArgs)), itemArgs...)
 	if err != nil {
 		slog.Error("challenges: create items insert failed", "challenge_id", id, "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)

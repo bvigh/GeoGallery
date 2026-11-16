@@ -1,6 +1,7 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { api, ApiError } from "@/api/client";
 import { useCurrentUser } from "@/components/auth/AuthContext";
+import { FilterFields } from "@/components/map/FilterPanel";
 import { SearchInput } from "@/components/SearchInput";
 import {
   Dialog,
@@ -10,43 +11,65 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { CHALLENGE_ROUNDS, MAX_OTHER_PLAYERS } from "@/lib/challenge";
+import { CHALLENGE_ROUNDS, MAX_OTHER_PLAYERS, randomChallengeName } from "@/lib/challenge";
 import { activeFilterCount, filterParams } from "@/lib/filters";
 import { useCloseOnBack } from "@/lib/history";
 import { matchesSearch, SEARCH_MIN_ITEMS } from "@/lib/search";
-import type { ChallengeSummary, DirectoryUser, FilterState } from "@/types";
+import type { Album, ChallengeSummary, DirectoryUser, FilterState, Trip } from "@/types";
 
 // 16px text on touch: iOS zooms the page into a smaller focused field and stays zoomed.
 const TOUCH_INPUT_CLASS = "touch:py-2 touch:text-base";
 
+// Browsers submit a form on Enter in any of its inputs, a checkbox, a radio button and a date field
+// too. Among the players and the filters that would make the challenge half-way through choosing:
+// only the name field and the button make it.
+function keepEnterFromSubmitting(e: KeyboardEvent<HTMLElement>) {
+  if (e.key === "Enter" && e.target instanceof HTMLInputElement) e.preventDefault();
+}
+
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  // The Game page's filters: the items are drawn from what they select.
+  // The Game page's filters, which the dialog's own start from, and the trips and albums they
+  // choose among.
   filters: FilterState;
+  trips: Trip[];
+  albums: Album[];
   onCreated: (challenge: ChallengeSummary) => void;
 }
 
-// Makes a challenge: a name and the other players. The five items are drawn by the server from
-// what the Game's filters select and every chosen player can already see, so the dialog cannot
-// know beforehand whether there are enough: a refusal says how many there were.
-export function NewChallengeDialog({ open, onOpenChange, filters, onCreated }: Props) {
+// Makes a challenge: the other players, then the filters its items are drawn from, then a name,
+// which may be left out. The filters are the dialog's own: they start from the Game page's and
+// change nothing there. The five items are drawn by the server from what the filters select and
+// every chosen player can already see, so the dialog cannot know beforehand whether there are
+// enough: a refusal says how many there were.
+export function NewChallengeDialog({ open, onOpenChange, filters, trips, albums, onCreated }: Props) {
   const me = useCurrentUser();
   const [name, setName] = useState("");
+  // What the challenge is called when the name is left empty: chosen when the dialog opens, so it
+  // can be read before creating.
+  const [fallbackName, setFallbackName] = useState("");
+  const [draft, setDraft] = useState<FilterState>(filters);
   const [users, setUsers] = useState<DirectoryUser[] | null>(null);
   const [usersFailed, setUsersFailed] = useState(false);
   const [chosen, setChosen] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const nameHintId = useId();
+  const pageFilters = useRef(filters);
+  pageFilters.current = filters;
 
   const close = () => onOpenChange(false);
   useCloseOnBack(close, open);
 
-  // Each opening starts empty and with today's user list.
+  // Each opening starts empty, on the Game page's filters of that moment, with a new name to fall
+  // back on and today's user list.
   useEffect(() => {
     if (!open) return;
     setName("");
+    setFallbackName(randomChallengeName());
+    setDraft(pageFilters.current);
     setChosen([]);
     setQuery("");
     setError(null);
@@ -70,12 +93,11 @@ export function NewChallengeDialog({ open, onOpenChange, filters, onCreated }: P
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    const trimmed = name.trim();
-    if (!trimmed || submitting) return;
+    if (submitting) return;
     setSubmitting(true);
     setError(null);
     try {
-      const created = await api.createChallenge(trimmed, chosen, filterParams(filters));
+      const created = await api.createChallenge(name.trim() || fallbackName, chosen, filterParams(draft));
       onCreated(created);
       close();
     } catch (err) {
@@ -92,7 +114,6 @@ export function NewChallengeDialog({ open, onOpenChange, filters, onCreated }: P
     }
   };
 
-  const filterCount = activeFilterCount(filters);
   const full = chosen.length >= MAX_OTHER_PLAYERS;
   // Ticked users stay listed while searching, so they can always be unticked.
   const visible = (users ?? []).filter(
@@ -105,32 +126,11 @@ export function NewChallengeDialog({ open, onOpenChange, filters, onCreated }: P
         <DialogHeader>
           <DialogTitle>New challenge</DialogTitle>
           <DialogDescription>
-            {CHALLENGE_ROUNDS} located items are drawn at random from what{" "}
-            {filterCount === 0 ? "you can see" : "the Game's filters select"} and every player can already see. Each
-            player guesses each of them once.
+            {CHALLENGE_ROUNDS} located items, the same for every player. Each player guesses each of them once.
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={submit} className="space-y-4 text-sm">
-          <label className="block">
-            <span className="mb-1 block font-medium">Name</span>
-            <input
-              required
-              autoFocus
-              maxLength={200}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className={`w-full rounded-md border px-2 py-1 ${TOUCH_INPUT_CLASS}`}
-            />
-          </label>
-
-          <p className="text-muted-foreground">
-            {filterCount === 0
-              ? "No filters are set on the Game page."
-              : `Uses the Game page's filters (${filterCount} active).`}{" "}
-            A challenge shares nothing: an item a player cannot see yet is never drawn.
-          </p>
-
-          <fieldset className="space-y-2">
+        <form onSubmit={submit} className="space-y-5 text-sm">
+          <fieldset className="space-y-2" onKeyDown={keepEnterFromSubmitting}>
             <legend className="font-medium">Players</legend>
             <p className="text-muted-foreground">You always play. Tick who else does.</p>
             {usersFailed ? (
@@ -184,6 +184,43 @@ export function NewChallengeDialog({ open, onOpenChange, filters, onCreated }: P
             )}
           </fieldset>
 
+          <fieldset className="space-y-2" onKeyDown={keepEnterFromSubmitting}>
+            <legend className="font-medium">Items</legend>
+            <p className="text-muted-foreground">
+              Drawn from what these filters select, and only from items every player can already see: a challenge
+              shares nothing. The rounds come from different places and times where the items allow, and from items
+              the players have not had in a challenge first.
+            </p>
+            <div className="space-y-3">
+              <FilterFields
+                trips={trips}
+                albums={albums}
+                filters={draft}
+                onChange={setDraft}
+                activeCount={activeFilterCount(draft)}
+              />
+            </div>
+          </fieldset>
+
+          <div>
+            <label className="block">
+              <span className="mb-1 block font-medium">
+                Name <span className="font-normal text-muted-foreground">(optional)</span>
+              </span>
+              <input
+                maxLength={200}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder={fallbackName}
+                aria-describedby={nameHintId}
+                className={`w-full rounded-md border px-2 py-1 ${TOUCH_INPUT_CLASS}`}
+              />
+            </label>
+            <p id={nameHintId} className="mt-1 text-muted-foreground">
+              Left empty, the challenge is called “{fallbackName}”.
+            </p>
+          </div>
+
           {error && (
             <p role="alert" className="text-red-500">
               {error}
@@ -192,8 +229,8 @@ export function NewChallengeDialog({ open, onOpenChange, filters, onCreated }: P
           <DialogFooter>
             <button
               type="submit"
-              disabled={submitting || name.trim() === ""}
-              className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
+              disabled={submitting}
+              className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50 touch:min-h-11"
             >
               {submitting ? "Creating…" : "Create challenge"}
             </button>

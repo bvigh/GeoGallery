@@ -158,13 +158,91 @@ function Collections({ trips, albums, filters, onChange }: Pick<Props, "trips" |
   );
 }
 
+// Every filter of the Map and the Game, without a frame of its own: the panel below, and the New
+// challenge dialog, which sits in a form (so no button here may submit one).
+export function FilterFields({ trips, albums, filters, onChange, activeCount }: Props) {
+  const ownerRadioName = useId();
+
+  return (
+    <>
+      <fieldset>
+        <legend className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Show
+        </legend>
+        <div className="flex flex-wrap gap-x-3 gap-y-1">
+          {OWNER_OPTIONS.map((option) => (
+            <label key={option.value} className="flex items-center gap-1.5 text-sm cursor-pointer touch:min-h-11">
+              <input
+                type="radio"
+                name={ownerRadioName}
+                value={option.value}
+                checked={filters.owner === option.value}
+                onChange={() => onChange({ ...filters, owner: option.value })}
+                className="touch:h-5 touch:w-5"
+              />
+              {option.label}
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      <div>
+        <SectionTitle>Date range</SectionTitle>
+        <div className="space-y-1">
+          <input
+            type="date"
+            aria-label="From date"
+            value={filters.fromDate}
+            onChange={(e) => onChange({ ...filters, fromDate: e.target.value })}
+            className="w-full rounded border px-2 py-1 text-sm touch:min-h-11"
+          />
+          <input
+            type="date"
+            aria-label="To date"
+            value={filters.toDate}
+            onChange={(e) => onChange({ ...filters, toDate: e.target.value })}
+            className="w-full rounded border px-2 py-1 text-sm touch:min-h-11"
+          />
+        </div>
+      </div>
+
+      {(trips.length > 0 || albums.length > 0) && (
+        <Collections trips={trips} albums={albums} filters={filters} onChange={onChange} />
+      )}
+
+      <div>
+        <SectionTitle>Media type</SectionTitle>
+        <div className="space-y-1">
+          {ALL_MEDIA_TYPES.map((type) => (
+            <Checkbox
+              key={type}
+              checked={filters.mediaTypes.includes(type)}
+              onChange={() => onChange({ ...filters, mediaTypes: toggle(filters.mediaTypes, type) })}
+              label={type}
+            />
+          ))}
+        </div>
+      </div>
+
+      {activeCount > 0 && (
+        <button
+          type="button"
+          onClick={() => onChange(emptyFilters)}
+          className="w-full rounded border px-2 py-1 text-sm hover:bg-muted touch:min-h-11"
+        >
+          Reset filters
+        </button>
+      )}
+    </>
+  );
+}
+
 // The panel reaches at most 1rem above the bottom of the positioned parent and scrolls inside:
 // a phone held sideways leaves it only ~300 px. The column is as tall as the parent but lets the
 // pointer through beside the toggle and the panel. z-[900]: on a phone, the open panel covers
 // the map page's item sheet (z-[800]) instead of hiding under it.
 export function FilterPanel({ trips, albums, filters, onChange, activeCount }: Props) {
   const [open, setOpen] = useState(false);
-  const ownerRadioName = useId();
 
   return (
     <div className="pointer-events-none absolute bottom-4 left-4 top-4 z-[900] flex flex-col items-start gap-1">
@@ -184,73 +262,7 @@ export function FilterPanel({ trips, albums, filters, onChange, activeCount }: P
       {open && (
         <div className="pointer-events-auto flex min-h-0 w-[min(18rem,calc(100vw-2rem))] flex-col rounded-lg border bg-background shadow-lg sm:w-64">
           <div className="min-h-0 space-y-3 overflow-y-auto overscroll-contain p-3">
-            <fieldset>
-              <legend className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                Show
-              </legend>
-              <div className="flex flex-wrap gap-x-3 gap-y-1">
-                {OWNER_OPTIONS.map((option) => (
-                  <label key={option.value} className="flex items-center gap-1.5 text-sm cursor-pointer touch:min-h-11">
-                    <input
-                      type="radio"
-                      name={ownerRadioName}
-                      value={option.value}
-                      checked={filters.owner === option.value}
-                      onChange={() => onChange({ ...filters, owner: option.value })}
-                      className="touch:h-5 touch:w-5"
-                    />
-                    {option.label}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <div>
-              <SectionTitle>Date range</SectionTitle>
-              <div className="space-y-1">
-                <input
-                  type="date"
-                  aria-label="From date"
-                  value={filters.fromDate}
-                  onChange={(e) => onChange({ ...filters, fromDate: e.target.value })}
-                  className="w-full rounded border px-2 py-1 text-sm touch:min-h-11"
-                />
-                <input
-                  type="date"
-                  aria-label="To date"
-                  value={filters.toDate}
-                  onChange={(e) => onChange({ ...filters, toDate: e.target.value })}
-                  className="w-full rounded border px-2 py-1 text-sm touch:min-h-11"
-                />
-              </div>
-            </div>
-
-            {(trips.length > 0 || albums.length > 0) && (
-              <Collections trips={trips} albums={albums} filters={filters} onChange={onChange} />
-            )}
-
-            <div>
-              <SectionTitle>Media type</SectionTitle>
-              <div className="space-y-1">
-                {ALL_MEDIA_TYPES.map((type) => (
-                  <Checkbox
-                    key={type}
-                    checked={filters.mediaTypes.includes(type)}
-                    onChange={() => onChange({ ...filters, mediaTypes: toggle(filters.mediaTypes, type) })}
-                    label={type}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {activeCount > 0 && (
-              <button
-                onClick={() => onChange(emptyFilters)}
-                className="w-full rounded border px-2 py-1 text-sm hover:bg-muted touch:min-h-11"
-              >
-                Reset filters
-              </button>
-            )}
+            <FilterFields trips={trips} albums={albums} filters={filters} onChange={onChange} activeCount={activeCount} />
           </div>
           {/* On a phone the panel covers most of the map; this closes it without reaching back
               up to the toggle. Outside the scrolling part, so it is always in view. */}

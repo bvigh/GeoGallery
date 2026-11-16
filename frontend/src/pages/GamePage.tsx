@@ -203,7 +203,7 @@ export function GamePage() {
               </div>
               <p className="mb-3 text-sm text-muted-foreground">
                 Five fixed rounds that you and the players you choose each guess once, with a table of everyone's
-                scores. The items are drawn from the filters set here.
+                scores. You choose the players and what the items are drawn from when you make one.
               </p>
               {challengeNotice && (
                 <p role="alert" className="mb-3 text-sm text-red-500">
@@ -269,6 +269,8 @@ export function GamePage() {
             open={creating}
             onOpenChange={setCreating}
             filters={filters}
+            trips={trips}
+            albums={albums}
             onCreated={(c) => {
               setChallengeNotice(null);
               loadChallenges();

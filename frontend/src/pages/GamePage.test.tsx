@@ -993,16 +993,24 @@ describe("GamePage", () => {
       expect(mockApi.listChallenges).toHaveBeenCalledTimes(2);
     });
 
-    it("makes a challenge from the filters set on the page, and opens it", async () => {
+    it("opens the new challenge dialog on the page's filters and collections, and opens what it makes", async () => {
+      const trips = [
+        { id: "t1", name: "Tatra", start_date: "2024-07-01", end_date: "2024-07-09", media_count: 9, cover_key: null, user_edited: true },
+      ];
+      mockApi.get.mockImplementation((path: string) => (path === "/trips" ? Promise.resolve(trips) : noRounds(path)));
       renderPage();
       await screen.findByRole("button", { name: "Family five" });
       expect(challengeUi.dialog!.open).toBe(false);
+      expect(screen.getByText(/You choose the players and what the items are drawn from when you make one\./)).toBeInTheDocument();
       const filters = { ...emptyFilters, owner: "shared" as const, albumIds: ["a1"] };
       act(() => panel.props!.onChange(filters));
 
       await userEvent.click(screen.getByRole("button", { name: "New challenge…" }));
       expect(screen.getByTestId("new-challenge")).toBeInTheDocument();
+      // The dialog's own filters start from these and choose among the same trips and albums.
       expect(challengeUi.dialog!.filters).toEqual(filters);
+      expect(challengeUi.dialog!.trips).toEqual(trips);
+      expect(challengeUi.dialog!.albums).toEqual(sampleAlbums);
 
       const created = summary({ id: "c-new", name: "New one" });
       mockApi.listChallenges.mockResolvedValue([created, mine]);

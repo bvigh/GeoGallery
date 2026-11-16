@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  challengeNames,
   challengeStatus,
   formatKm,
   formatPoints,
@@ -13,6 +14,7 @@ import {
   pinColors,
   playersLabel,
   playLabel,
+  randomChallengeName,
   standings,
 } from "@/lib/challenge";
 import type { ChallengeMember } from "@/types";
@@ -212,5 +214,50 @@ describe("guessSummary and guessDateNote", () => {
   it("says nothing without a guessed date, or without a date to compare it with", () => {
     expect(guessDateNote({ guess_date: null, date_diff_days: null })).toBeNull();
     expect(guessDateNote({ guess_date: "2024-05-02", date_diff_days: null })).toBeNull();
+  });
+});
+
+describe("randomChallengeName", () => {
+  it("gives the first pair for the lowest draw and the last for the highest", () => {
+    expect(randomChallengeName(() => 0)).toBe("Bold Badger");
+    expect(randomChallengeName(() => 0.999999)).toBe("Witty Wombat");
+  });
+
+  it("stays inside the lists for a draw of exactly 1", () => {
+    expect(randomChallengeName(() => 1)).toBe("Witty Wombat");
+  });
+
+  it("draws the letter, the adjective and the animal one after the other", () => {
+    // The second row, then its first adjective and its second animal.
+    const draws = [1 / 18 + 0.001, 0, 0.4];
+    expect(randomChallengeName(() => draws.shift()!)).toBe("Cheerful Cheetah");
+  });
+
+  it("uses Math.random when given nothing", () => {
+    expect(challengeNames()).toContain(randomChallengeName());
+  });
+});
+
+describe("challengeNames", () => {
+  const names = challengeNames();
+
+  it("holds over a hundred different names", () => {
+    expect(names.length).toBeGreaterThan(100);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("pairs an adjective and an animal that start with the same letter", () => {
+    for (const name of names) {
+      expect(name).toMatch(/^[A-Z][a-z]+ [A-Z][a-z]+$/);
+      const [adjective, animal] = name.split(" ");
+      expect(adjective[0]).toBe(animal[0]);
+    }
+  });
+
+  it("gives only names the backend takes", () => {
+    for (const name of names) {
+      expect(name.trim()).toBe(name);
+      expect(name.length).toBeLessThanOrEqual(200);
+    }
   });
 });

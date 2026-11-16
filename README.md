@@ -7,7 +7,7 @@ A map-based media gallery and GeoGuessr-like game for reviewing trip photos, vid
 - Auto-detected trips grouped by time gaps, with manual rename and deletion
 - Delete individual media items from both the map and trips views (removes from DB and object storage)
 - Game mode: guess where and when a photo/video was taken, scored on distance and date accuracy (relative to your media's geographic spread)
-- Game challenges: five fixed rounds drawn from media every chosen player can already see, one guess each, with a high-score table and a map of everyone's guesses
+- Game challenges: five fixed rounds drawn from media every chosen player can already see (filtered by album, date and more, and spread over different places and times), one guess each, with a high-score table and a map of everyone's guesses
 - Filter media by date range, trip, and media type on both the map and game pages
 - 360° photo and video support with per-media default view and keyframe settings
 - Invite-only accounts via any OIDC provider (Logto, Keycloak, Auth0, …), with social login configured in the provider

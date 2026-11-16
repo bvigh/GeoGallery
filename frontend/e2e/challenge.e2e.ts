@@ -68,17 +68,21 @@ test("alice makes a challenge for herself and bob, both play it once and compare
     const added = await alice.request.post(`/api/albums/${albumId}/media`, { data: { media_ids: ids } });
     expect(await added.json()).toEqual({ added: ROUNDS });
 
-    // Alice makes the challenge on the Game page; it opens at its own URL.
+    // Alice makes the challenge on the Game page: the players, then what the items are drawn from
+    // (the album, through the dialog's own filters), then a name. It opens at its own URL.
     await alice.goto("/game");
     await alice.getByRole("button", { name: "New challenge…" }).click();
     const dialog = alice.getByRole("dialog", { name: "New challenge" });
-    await dialog.getByLabel("Name").fill(name);
     await dialog.getByRole("checkbox", { name: /Bob Test/ }).check();
+    await dialog.getByRole("group", { name: "Items" }).getByRole("checkbox", { name: `Challenge album ${stamp}` }).check();
+    await dialog.getByRole("textbox", { name: "Name (optional)" }).fill(name);
     const created = alice.waitForResponse(
       (r) => r.request().method() === "POST" && new URL(r.url()).pathname === "/api/challenges",
     );
     await dialog.getByRole("button", { name: "Create challenge" }).click();
     expect((await created).status()).toBe(201);
+    // The filters chosen in the dialog went with the request.
+    expect(new URL((await created).url()).searchParams.getAll("album_id")).toEqual([albumId]);
     challengeId = (await (await created).json()).id;
 
     const aliceView = alice.getByRole("dialog", { name });

@@ -1,20 +1,28 @@
 import type { ComponentProps } from "react";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/api/client";
 import { AuthContext } from "@/components/auth/AuthContext";
 import { NewChallengeDialog } from "@/components/game/NewChallengeDialog";
+import { randomChallengeName } from "@/lib/challenge";
 import { emptyFilters } from "@/lib/filters";
 import { BACK_DEPTH_KEY } from "@/lib/history";
-import type { ChallengeSummary, CurrentUser, DirectoryUser } from "@/types";
+import type { Album, ChallengeSummary, CurrentUser, DirectoryUser, Trip } from "@/types";
 
 vi.mock("@/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/client")>();
   return { ...actual, api: { listUsers: vi.fn(), createChallenge: vi.fn() } };
 });
 
+// The name a challenge falls back on is random: the tests choose it.
+vi.mock("@/lib/challenge", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/challenge")>();
+  return { ...actual, randomChallengeName: vi.fn() };
+});
+
 const mockApi = api as unknown as Record<"listUsers" | "createChallenge", ReturnType<typeof vi.fn>>;
+const mockName = vi.mocked(randomChallengeName);
 
 const me: CurrentUser = { id: "u-me", email: "me@example.test", display_name: "Me Myself", role: "user" };
 
@@ -46,6 +54,39 @@ const created: ChallengeSummary = {
   finished: false,
 };
 
+const albums: Album[] = [
+  {
+    id: "a1",
+    name: "Family",
+    owner_id: "u-me",
+    owner_name: "Me Myself",
+    is_owner: true,
+    member_count: 3,
+    media_count: 40,
+    start_date: null,
+    end_date: null,
+    created_at: "2026-01-01T00:00:00Z",
+    last_added_at: null,
+  },
+  {
+    id: "a2",
+    name: "Iceland 2024",
+    owner_id: "u-dana",
+    owner_name: "Dana",
+    is_owner: false,
+    member_count: 2,
+    media_count: 12,
+    start_date: null,
+    end_date: null,
+    created_at: "2026-02-01T00:00:00Z",
+    last_added_at: null,
+  },
+];
+
+const trips: Trip[] = [
+  { id: "t1", name: "Tatra", start_date: "2024-07-01", end_date: "2024-07-09", media_count: 9, cover_key: null, user_edited: true },
+];
+
 type Props = ComponentProps<typeof NewChallengeDialog>;
 
 function dialogElement(props: Props) {
@@ -57,7 +98,15 @@ function dialogElement(props: Props) {
 }
 
 function renderDialog(overrides: Partial<Props> = {}) {
-  const props: Props = { open: true, onOpenChange: vi.fn(), filters: emptyFilters, onCreated: vi.fn(), ...overrides };
+  const props: Props = {
+    open: true,
+    onOpenChange: vi.fn(),
+    filters: emptyFilters,
+    trips: [],
+    albums: [],
+    onCreated: vi.fn(),
+    ...overrides,
+  };
   const view = render(dialogElement(props));
   return { ...view, props };
 }
@@ -68,6 +117,11 @@ async function loadedDialog() {
   await waitFor(() => expect(within(dialog).queryByText("Loading…")).not.toBeInTheDocument());
   return dialog;
 }
+
+const nameField = (dialog: HTMLElement) => within(dialog).getByRole("textbox", { name: "Name (optional)" });
+// The players' checkboxes: the filters under them have checkboxes of their own.
+const playerBoxes = (dialog: HTMLElement) =>
+  within(within(dialog).getByRole("list", { name: "Other players" })).getAllByRole("checkbox");
 
 // jsdom traverses history in setTimeout(0) steps; this lets every pending step land.
 async function settle() {
@@ -86,6 +140,7 @@ describe("NewChallengeDialog", () => {
     window.history.replaceState(null, "", "/game");
     mockApi.listUsers.mockResolvedValue(directory);
     mockApi.createChallenge.mockResolvedValue(created);
+    mockName.mockReturnValue("Cheerful Cheetah");
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
@@ -100,19 +155,95 @@ describe("NewChallengeDialog", () => {
     const players = within(within(dialog).getByRole("list", { name: "Other players" })).getAllByRole("listitem");
     expect(players.map((p) => p.textContent)).toEqual(["Bobbob@example.test", "carol@example.test"]);
     expect(within(dialog).getByText("You always play. Tick who else does.")).toBeInTheDocument();
-    for (const box of within(dialog).getAllByRole("checkbox")) expect(box).not.toBeChecked();
+    for (const box of playerBoxes(dialog)) expect(box).not.toBeChecked();
   });
 
-  it("says what the items are drawn from: everything, or the Game's filters", async () => {
-    const { rerender, props } = renderDialog();
+  it("says what a challenge is and how its items are drawn", async () => {
+    renderDialog();
     const dialog = await loadedDialog();
-    expect(dialog).toHaveTextContent("5 located items are drawn at random from what you can see and every player can already see.");
-    expect(dialog).toHaveTextContent("No filters are set on the Game page.");
-    expect(dialog).toHaveTextContent("A challenge shares nothing: an item a player cannot see yet is never drawn.");
+    expect(dialog).toHaveTextContent("5 located items, the same for every player. Each player guesses each of them once.");
+    const items = within(dialog).getByRole("group", { name: "Items" });
+    expect(items).toHaveTextContent(
+      "Drawn from what these filters select, and only from items every player can already see: a challenge shares nothing.",
+    );
+    expect(items).toHaveTextContent(
+      "The rounds come from different places and times where the items allow, and from items the players have not had in a challenge first.",
+    );
+  });
 
-    rerender(dialogElement({ ...props, filters: { ...emptyFilters, owner: "mine", albumIds: ["a1"] } }));
-    expect(dialog).toHaveTextContent("from what the Game's filters select and every player can already see");
-    expect(dialog).toHaveTextContent("Uses the Game page's filters (2 active).");
+  it("asks for the players first, then the filters, then the name", async () => {
+    renderDialog({ albums, trips });
+    const dialog = await loadedDialog();
+    const players = within(dialog).getByRole("group", { name: "Players" });
+    const items = within(dialog).getByRole("group", { name: "Items" });
+    const name = nameField(dialog);
+    expect(players.compareDocumentPosition(items) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(items.compareDocumentPosition(name) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // The regular filters, all of them.
+    expect(within(items).getByRole("radio", { name: "Shared with me" })).toBeInTheDocument();
+    expect(within(items).getByLabelText("From date")).toBeInTheDocument();
+    expect(within(items).getByLabelText("To date")).toBeInTheDocument();
+    expect(within(items).getByRole("checkbox", { name: /Family/ })).toBeInTheDocument();
+    expect(within(items).getByRole("checkbox", { name: /Iceland 2024/ })).toBeInTheDocument();
+    expect(within(items).getByRole("checkbox", { name: "Tatra" })).toBeInTheDocument();
+    expect(within(items).getByRole("checkbox", { name: "video_360" })).toBeInTheDocument();
+  });
+
+  it("draws from the albums and the dates chosen in the dialog", async () => {
+    const { props } = renderDialog({ albums, trips });
+    const dialog = await loadedDialog();
+    const items = within(dialog).getByRole("group", { name: "Items" });
+    expect(within(items).queryByRole("button", { name: "Reset filters" })).toBeNull();
+
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: /Bob/ }));
+    await userEvent.click(within(items).getByRole("checkbox", { name: /Family/ }));
+    await userEvent.click(within(items).getByRole("checkbox", { name: /Iceland 2024/ }));
+    fireEvent.change(within(items).getByLabelText("From date"), { target: { value: "2024-05-01" } });
+    fireEvent.change(within(items).getByLabelText("To date"), { target: { value: "2024-09-30" } });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create challenge" }));
+
+    expect(mockApi.createChallenge).toHaveBeenCalledWith("Cheerful Cheetah", ["u-bob"], {
+      from_date: "2024-05-01",
+      to_date: "2024-09-30",
+      album_id: ["a1", "a2"],
+    });
+    await waitFor(() => expect(props.onCreated).toHaveBeenCalledWith(created));
+  });
+
+  it("starts from the Game page's filters, which the dialog's own then replace", async () => {
+    const filters = { ...emptyFilters, owner: "mine" as const, albumIds: ["a1"], fromDate: "2024-05-01" };
+    renderDialog({ filters, albums, trips });
+    const dialog = await loadedDialog();
+    const items = within(dialog).getByRole("group", { name: "Items" });
+    expect(within(items).getByRole("radio", { name: "Mine" })).toBeChecked();
+    expect(within(items).getByRole("checkbox", { name: /Family/ })).toBeChecked();
+    expect(within(items).getByLabelText("From date")).toHaveValue("2024-05-01");
+
+    // Reset is a plain button: it clears the filters and creates nothing.
+    await userEvent.click(within(items).getByRole("button", { name: "Reset filters" }));
+    expect(mockApi.createChallenge).not.toHaveBeenCalled();
+    expect(within(items).getByRole("radio", { name: "All" })).toBeChecked();
+    expect(within(items).getByRole("checkbox", { name: /Family/ })).not.toBeChecked();
+
+    await userEvent.click(within(items).getByRole("checkbox", { name: "Tatra" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create challenge" }));
+    expect(mockApi.createChallenge).toHaveBeenCalledWith("Cheerful Cheetah", [], { trip_id: ["t1"] });
+  });
+
+  it("creates only from the name field and the button: Enter among the players and the filters does nothing", async () => {
+    renderDialog({ albums });
+    const dialog = await loadedDialog();
+    const items = within(dialog).getByRole("group", { name: "Items" });
+    // A browser submits the form on Enter in an input unless the keydown is cancelled; jsdom
+    // submits nothing, so the cancelling is what there is to see.
+    const cancelled = (el: HTMLElement) => !fireEvent.keyDown(el, { key: "Enter" });
+    expect(cancelled(within(dialog).getByRole("checkbox", { name: /Bob/ }))).toBe(true);
+    expect(cancelled(within(items).getByRole("checkbox", { name: /Family/ }))).toBe(true);
+    expect(cancelled(within(items).getByRole("radio", { name: "Mine" }))).toBe(true);
+    expect(cancelled(within(items).getByLabelText("From date"))).toBe(true);
+    expect(cancelled(nameField(dialog))).toBe(false);
+    expect(cancelled(within(dialog).getByRole("button", { name: "Create challenge" }))).toBe(false);
   });
 
   it("creates the challenge with the trimmed name, the ticked players and the Game's filters", async () => {
@@ -120,9 +251,8 @@ describe("NewChallengeDialog", () => {
     const { props } = renderDialog({ filters });
     const dialog = await loadedDialog();
     const create = within(dialog).getByRole("button", { name: "Create challenge" });
-    expect(create).toBeDisabled();
 
-    await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "  Iceland ");
+    await userEvent.type(nameField(dialog), "  Iceland ");
     await userEvent.click(within(dialog).getByRole("checkbox", { name: /Bob/ }));
     await userEvent.click(create);
 
@@ -138,16 +268,29 @@ describe("NewChallengeDialog", () => {
   it("makes a challenge for the caller alone when nobody is ticked", async () => {
     const { props } = renderDialog();
     const dialog = await loadedDialog();
-    await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "Solo{Enter}");
+    await userEvent.type(nameField(dialog), "Solo{Enter}");
     expect(mockApi.createChallenge).toHaveBeenCalledWith("Solo", [], {});
     await waitFor(() => expect(props.onCreated).toHaveBeenCalled());
   });
 
-  it("does not create a challenge without a name", async () => {
+  it("calls a challenge without a name by the name it shows", async () => {
+    const { props } = renderDialog();
+    const dialog = await loadedDialog();
+    const create = within(dialog).getByRole("button", { name: "Create challenge" });
+    expect(create).toBeEnabled();
+    expect(nameField(dialog)).toHaveAttribute("placeholder", "Cheerful Cheetah");
+    expect(nameField(dialog)).toHaveAccessibleDescription("Left empty, the challenge is called “Cheerful Cheetah”.");
+
+    await userEvent.click(create);
+    expect(mockApi.createChallenge).toHaveBeenCalledWith("Cheerful Cheetah", [], {});
+    await waitFor(() => expect(props.onCreated).toHaveBeenCalledWith(created));
+  });
+
+  it("takes a name of spaces as no name", async () => {
     renderDialog();
     const dialog = await loadedDialog();
-    await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "   {Enter}");
-    expect(mockApi.createChallenge).not.toHaveBeenCalled();
+    await userEvent.type(nameField(dialog), "   {Enter}");
+    expect(mockApi.createChallenge).toHaveBeenCalledWith("Cheerful Cheetah", [], {});
   });
 
   it.each([
@@ -172,7 +315,7 @@ describe("NewChallengeDialog", () => {
     mockApi.createChallenge.mockRejectedValueOnce(error);
     const { props } = renderDialog();
     const dialog = await loadedDialog();
-    await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "Iceland");
+    await userEvent.type(nameField(dialog), "Iceland");
     await userEvent.click(within(dialog).getByRole("checkbox", { name: /Bob/ }));
     await userEvent.click(within(dialog).getByRole("button", { name: "Create challenge" }));
 
@@ -180,7 +323,7 @@ describe("NewChallengeDialog", () => {
     expect(props.onCreated).not.toHaveBeenCalled();
     expect(props.onOpenChange).not.toHaveBeenCalled();
     // What was entered is kept, and the next try clears the message.
-    expect(within(dialog).getByRole("textbox", { name: "Name" })).toHaveValue("Iceland");
+    expect(nameField(dialog)).toHaveValue("Iceland");
     expect(within(dialog).getByRole("checkbox", { name: /Bob/ })).toBeChecked();
     await userEvent.click(within(dialog).getByRole("button", { name: "Create challenge" }));
     await waitFor(() => expect(props.onCreated).toHaveBeenCalledWith(created));
@@ -191,10 +334,10 @@ describe("NewChallengeDialog", () => {
     mockApi.createChallenge.mockReturnValue(new Promise((res) => (resolve = res)));
     const { props } = renderDialog();
     const dialog = await loadedDialog();
-    await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "Iceland{Enter}");
+    await userEvent.type(nameField(dialog), "Iceland{Enter}");
     const busy = within(dialog).getByRole("button", { name: "Creating…" });
     expect(busy).toBeDisabled();
-    await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "{Enter}");
+    await userEvent.type(nameField(dialog), "{Enter}");
     expect(mockApi.createChallenge).toHaveBeenCalledTimes(1);
     await act(async () => resolve(created));
     expect(props.onCreated).toHaveBeenCalledTimes(1);
@@ -207,8 +350,8 @@ describe("NewChallengeDialog", () => {
     expect(
       await within(dialog).findByText("Could not load the user list. You can still make a challenge for yourself."),
     ).toBeInTheDocument();
-    expect(within(dialog).queryByRole("checkbox")).toBeNull();
-    await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "Solo{Enter}");
+    expect(within(dialog).queryByRole("list", { name: "Other players" })).toBeNull();
+    await userEvent.type(nameField(dialog), "Solo{Enter}");
     expect(mockApi.createChallenge).toHaveBeenCalledWith("Solo", [], {});
     await waitFor(() => expect(props.onCreated).toHaveBeenCalled());
   });
@@ -234,7 +377,7 @@ describe("NewChallengeDialog", () => {
     await userEvent.click(within(dialog).getByRole("checkbox", { name: "Player 03" }));
 
     await userEvent.type(within(dialog).getByRole("searchbox", { name: "Search users" }), "zoe adam");
-    const listed = () => within(dialog).getAllByRole("checkbox").map((box) => box.closest("label")!.textContent);
+    const listed = () => playerBoxes(dialog).map((box) => box.closest("label")!.textContent);
     expect(listed()).toEqual(["Player 03", "Zoë Ádámzoe@example.test"]);
 
     await userEvent.click(within(dialog).getByRole("checkbox", { name: "Player 03" }));
@@ -249,7 +392,7 @@ describe("NewChallengeDialog", () => {
     mockApi.listUsers.mockResolvedValue(manyUsers(21));
     renderDialog();
     const dialog = await loadedDialog();
-    const boxes = within(dialog).getAllByRole("checkbox");
+    const boxes = playerBoxes(dialog);
     for (const box of boxes.slice(0, 19)) await userEvent.click(box);
 
     expect(within(dialog).getByText("A challenge has at most 20 players.")).toBeInTheDocument();
@@ -263,22 +406,40 @@ describe("NewChallengeDialog", () => {
     expect(within(dialog).queryByText("A challenge has at most 20 players.")).toBeNull();
   });
 
-  it("starts empty on every opening, with the user list of that moment", async () => {
-    const { rerender, props } = renderDialog();
+  it("starts again on every opening: the page's filters, a new name to fall back on, the user list of that moment", async () => {
+    const { rerender, props } = renderDialog({ albums });
     let dialog = await loadedDialog();
-    await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "Iceland");
+    await userEvent.type(nameField(dialog), "Iceland");
     await userEvent.click(within(dialog).getByRole("checkbox", { name: /Bob/ }));
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: /Family/ }));
 
     rerender(dialogElement({ ...props, open: false }));
     expect(screen.queryByRole("dialog")).toBeNull();
     mockApi.listUsers.mockResolvedValue([...directory, { id: "u-dave", display_name: "Dave", email: null }]);
-    rerender(dialogElement({ ...props, open: true }));
+    mockName.mockReturnValue("Witty Wombat");
+    // The page's filters changed meanwhile: the next opening starts from them.
+    rerender(dialogElement({ ...props, open: true, filters: { ...emptyFilters, albumIds: ["a2"] } }));
 
     dialog = await loadedDialog();
-    expect(within(dialog).getByRole("textbox", { name: "Name" })).toHaveValue("");
+    expect(nameField(dialog)).toHaveValue("");
+    expect(nameField(dialog)).toHaveAttribute("placeholder", "Witty Wombat");
     expect(within(dialog).getByRole("checkbox", { name: /Bob/ })).not.toBeChecked();
+    expect(within(dialog).getByRole("checkbox", { name: /Family/ })).not.toBeChecked();
+    expect(within(dialog).getByRole("checkbox", { name: /Iceland 2024/ })).toBeChecked();
     expect(within(dialog).getByRole("checkbox", { name: "Dave" })).toBeInTheDocument();
     expect(mockApi.listUsers).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps its own filters and its name while the page behind it renders again", async () => {
+    const { rerender, props } = renderDialog({ albums });
+    const dialog = await loadedDialog();
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: /Family/ }));
+    mockName.mockReturnValue("Witty Wombat");
+
+    rerender(dialogElement({ ...props, filters: { ...emptyFilters } }));
+    expect(within(dialog).getByRole("checkbox", { name: /Family/ })).toBeChecked();
+    expect(nameField(dialog)).toHaveAttribute("placeholder", "Cheerful Cheetah");
+    expect(mockApi.listUsers).toHaveBeenCalledTimes(1);
   });
 
   it("loads nothing and holds no history entry while closed", async () => {
@@ -305,11 +466,12 @@ describe("NewChallengeDialog", () => {
     expect(props.onCreated).not.toHaveBeenCalled();
   });
 
-  it("gives every player's row a 44 px target on touch", async () => {
-    renderDialog();
+  it("gives every checkbox row and the button a 44 px target on touch", async () => {
+    renderDialog({ albums, trips });
     const dialog = await loadedDialog();
     for (const box of within(dialog).getAllByRole("checkbox")) {
       expect(box.closest("label")!.className.split(" ")).toContain("touch:min-h-11");
     }
+    expect(within(dialog).getByRole("button", { name: "Create challenge" }).className.split(" ")).toContain("touch:min-h-11");
   });
 });

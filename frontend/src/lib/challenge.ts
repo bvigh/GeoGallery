@@ -13,6 +13,44 @@ export const CHALLENGE_GONE = "That challenge is not available: it was deleted, 
 export const ROUND_GONE = "That round is no longer available: its item was deleted, or is no longer shared with you.";
 export const ALREADY_GUESSED = "You have already guessed that round.";
 
+// Words for a challenge nobody named: an adjective and an animal that start alike. Each row is one
+// letter. Every pair is under the backend's 200 characters.
+const NAME_WORDS: [adjectives: string[], animals: string[]][] = [
+  [["Bold", "Bouncy", "Brave"], ["Badger", "Beaver", "Bison"]],
+  [["Cheerful", "Clever", "Curious"], ["Camel", "Cheetah", "Crane"]],
+  [["Dapper", "Daring", "Dizzy"], ["Deer", "Dolphin", "Duck"]],
+  [["Eager", "Elegant"], ["Eagle", "Elk"]],
+  [["Fancy", "Fearless", "Friendly"], ["Falcon", "Fox", "Frog"]],
+  [["Gentle", "Giddy", "Graceful"], ["Gazelle", "Giraffe", "Goat"]],
+  [["Happy", "Hasty", "Humble"], ["Hare", "Hedgehog", "Heron"]],
+  [["Jazzy", "Jolly"], ["Jackal", "Jaguar"]],
+  [["Keen", "Kind"], ["Kiwi", "Koala"]],
+  [["Lively", "Loyal", "Lucky"], ["Lemur", "Llama", "Lynx"]],
+  [["Mellow", "Merry", "Mighty"], ["Marmot", "Mole", "Moose"]],
+  [["Nimble", "Noble"], ["Narwhal", "Newt"]],
+  [["Patient", "Playful", "Proud"], ["Panda", "Pelican", "Puffin"]],
+  [["Quick", "Quiet"], ["Quail", "Quokka"]],
+  [["Rapid", "Restless", "Royal"], ["Rabbit", "Raccoon", "Raven"]],
+  [["Silly", "Sunny", "Swift"], ["Seal", "Squirrel", "Swan"]],
+  [["Tidy", "Tireless", "Trusty"], ["Tiger", "Toucan", "Turtle"]],
+  [["Wandering", "Wise", "Witty"], ["Walrus", "Wolf", "Wombat"]],
+];
+
+/**
+ * A name for a challenge whose maker gave none, such as "Cheerful Cheetah". `random` returns a
+ * number from 0 up to, not including, 1, as Math.random does.
+ */
+export function randomChallengeName(random: () => number = Math.random): string {
+  const pick = <T,>(list: T[]): T => list[Math.min(list.length - 1, Math.floor(random() * list.length))];
+  const [adjectives, animals] = pick(NAME_WORDS);
+  return `${pick(adjectives)} ${pick(animals)}`;
+}
+
+/** Every name randomChallengeName can give. */
+export function challengeNames(): string[] {
+  return NAME_WORDS.flatMap(([adjectives, animals]) => adjectives.flatMap((a) => animals.map((b) => `${a} ${b}`)));
+}
+
 // A guess pin's colours. A pin says who guessed with the initials inside it, never with its colour:
 // with any number of players, colour only tells the viewer's own guess (the Game's orange) from
 // everyone else's. The two were checked with the dataviz palette validator against each other and
