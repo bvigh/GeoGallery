@@ -85,7 +85,7 @@ func evidenceWith(overrides map[string]any) map[string]any {
 		"v": 1.0, "by": "ingest", "retimed_from": nil, "src": "none", "zone": nil, "wall": nil, "gps_utc": nil,
 		"wall_minus_gps_s": nil, "offset_tag": nil, "offset_ignored": false, "offset_used_min": nil, "clock_rule": nil,
 		"camera_zone": "Europe/Warsaw", "camera_zone_from": "server", "camera_zone_utc_fallback": false, "make": nil, "model": nil,
-		"exif_partial": false, "creation_time": nil, "file_mtime": nil, "duration_s": nil, "encoder": nil, "codec": nil,
+		"exif_partial": false, "creation_time": nil, "name_wall": nil, "file_mtime": nil, "duration_s": nil, "encoder": nil, "codec": nil,
 		"transcoded": false,
 	}
 	for k, v := range overrides {
@@ -238,6 +238,63 @@ func TestRegisterMedia_CaptureEvidence(t *testing.T) {
 	})
 }
 
+// A file without an EXIF time is dated by the date and time its name holds, read in the camera zone,
+// before its modified time. The name's time is recorded whichever source won.
+func TestRegisterMedia_FilenameTime(t *testing.T) {
+	warsaw := mustLoadLocation(t, "Europe/Warsaw")
+	set := ingest.CameraZone{Loc: warsaw, Set: true}
+	utcServer := ingest.CameraZone{Loc: time.UTC, UTCFallback: true}
+	mtime := time.Date(2022, 12, 13, 17, 5, 23, 860_000_000, time.UTC)
+	const mtimeUTC = "2022-12-13T17:05:23.86Z"
+	const motorola = "2012-08-24_18-14-24_124.jpg"
+
+	tests := []struct {
+		name     string
+		photo    exiftest.Photo
+		filename string
+		zone     ingest.CameraZone
+		mtime    *time.Time
+		wantAt   string // taken_at in UTC; empty: none
+		want     map[string]any
+	}{
+		{"an edited copy without EXIF: the name, not the file time", exiftest.Photo{}, motorola, set, &mtime,
+			"2012-08-24T16:14:24Z", map[string]any{
+				"src": "filename", "zone": "camera", "offset_used_min": 120.0, "name_wall": "2012-08-24 18:14:24", "file_mtime": mtimeUTC}},
+		{"the camera zone's winter time", exiftest.Photo{}, "IMG_20230115_120000.jpg", set, &mtime,
+			"2023-01-15T11:00:00Z", map[string]any{
+				"src": "filename", "zone": "camera", "offset_used_min": 60.0, "name_wall": "2023-01-15 12:00:00", "file_mtime": mtimeUTC}},
+		{"without a file time", exiftest.Photo{}, motorola, set, nil,
+			"2012-08-24T16:14:24Z", map[string]any{
+				"src": "filename", "zone": "camera", "offset_used_min": 120.0, "name_wall": "2012-08-24 18:14:24"}},
+		{"a UTC server's zone", exiftest.Photo{}, motorola, utcServer, &mtime,
+			"2012-08-24T18:14:24Z", map[string]any{
+				"src": "filename", "zone": "camera", "offset_used_min": 0.0, "name_wall": "2012-08-24 18:14:24", "file_mtime": mtimeUTC,
+				"camera_zone": "server zone (unset)", "camera_zone_utc_fallback": true}},
+		{"EXIF wins, and the name is recorded", exiftest.Photo{Make: "Motorola", Model: "MB526", DateTimeOriginal: "2012:08:24 18:14:22"}, motorola, set, &mtime,
+			"2012-08-24T16:14:22Z", map[string]any{
+				"src": "exif_original", "zone": "camera", "wall": "2012:08:24 18:14:22", "offset_used_min": 120.0, "make": "Motorola", "model": "MB526",
+				"name_wall": "2012-08-24 18:14:24", "file_mtime": mtimeUTC}},
+		{"a name that only looks like a date: the file time", exiftest.Photo{}, "20231301_120000.jpg", set, &mtime,
+			"2022-12-13T17:05:23.86Z", map[string]any{"src": "mtime", "file_mtime": mtimeUTC}},
+		{"a date alone: the file time", exiftest.Photo{}, "IMG-20230729-WA0001.jpg", set, &mtime,
+			"2022-12-13T17:05:23.86Z", map[string]any{"src": "mtime", "file_mtime": mtimeUTC}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			insert := registerFile(t, tt.zone, exiftest.JPEG(tt.photo), tt.filename, tt.mtime)
+			want := evidenceWith(tt.want)
+			if _, ok := tt.want["camera_zone"]; !ok {
+				want["camera_zone"] = "Europe/Warsaw"
+			}
+			assert.Equal(t, want, decodeEvidence(t, insert))
+			takenAt, ok := insert[insertArgTakenAt].(*time.Time)
+			require.True(t, ok)
+			require.NotNil(t, takenAt)
+			assert.Equal(t, tt.wantAt, takenAt.UTC().Format(time.RFC3339Nano))
+		})
+	}
+}
+
 func TestNewCaptureEvidence_Video(t *testing.T) {
 	zone := ingest.CameraZone{Loc: time.UTC, Set: true}
 	mtime := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
@@ -245,43 +302,63 @@ func TestNewCaptureEvidence_Video(t *testing.T) {
 	exifTime := time.Date(2003, 4, 5, 6, 7, 8, 0, time.FixedZone("", 7200))
 	duration := 12.5
 	const createdUTC, mtimeUTC = "2002-03-04T04:06:07Z", "2001-02-03T04:05:06Z"
+	named, ok := ingest.FilenameTime("VID_20000102_030405.mp4", zone)
+	require.True(t, ok)
 
 	tests := []struct {
 		name  string
 		exif  ingest.ExifData
 		probe ingest.VideoProbeResult
+		named *ingest.NameTime
 		mtime *time.Time
 		want  map[string]any
 	}{
 		{"the container's time",
 			ingest.ExifData{},
 			ingest.VideoProbeResult{CreatedAt: &created, CodecName: "h264", Encoder: "Lavf60.16.100", DurationS: &duration},
+			nil,
 			&mtime,
 			map[string]any{"src": "container", "creation_time": createdUTC, "file_mtime": mtimeUTC, "duration_s": 12.5, "encoder": "Lavf60.16.100", "codec": "h264"}},
+		{"the container's time outranks the name's, which is recorded",
+			ingest.ExifData{},
+			ingest.VideoProbeResult{CreatedAt: &created, CodecName: "h264"},
+			&named,
+			&mtime,
+			map[string]any{"src": "container", "creation_time": createdUTC, "name_wall": "2000-01-02 03:04:05", "file_mtime": mtimeUTC, "codec": "h264"}},
+		{"no container time, so the name's",
+			ingest.ExifData{},
+			ingest.VideoProbeResult{CodecName: "h264"},
+			&named,
+			&mtime,
+			map[string]any{"src": "filename", "zone": "camera", "offset_used_min": 0.0, "name_wall": "2000-01-02 03:04:05", "file_mtime": mtimeUTC, "codec": "h264"}},
 		{"the container's time and the file time are kept when EXIF wins",
 			ingest.ExifData{TakenAt: &exifTime, TakenAtZone: ingest.ZoneCamera, Raw: ingest.RawExif{WallTag: ingest.WallTagOriginal, WallClock: "2003:04:05 06:07:08"}},
 			ingest.VideoProbeResult{CreatedAt: &created, CodecName: "hevc"},
+			nil,
 			&mtime,
 			map[string]any{"src": "exif_original", "zone": "camera", "wall": "2003:04:05 06:07:08", "offset_used_min": 120.0, "creation_time": createdUTC, "file_mtime": mtimeUTC, "codec": "hevc"}},
 		{"a re-encoded video",
 			ingest.ExifData{},
 			ingest.VideoProbeResult{CreatedAt: &created, CodecName: "mpeg4"},
 			nil,
+			nil,
 			map[string]any{"src": "container", "creation_time": createdUTC, "codec": "mpeg4", "transcoded": true}},
 		{"no container time, so the file time",
 			ingest.ExifData{},
 			ingest.VideoProbeResult{CodecName: "h264"},
+			nil,
 			&mtime,
 			map[string]any{"src": "mtime", "file_mtime": mtimeUTC, "codec": "h264"}},
 		{"the codec name is cleaned",
 			ingest.ExifData{},
 			ingest.VideoProbeResult{CodecName: "h2\xff64"},
 			nil,
+			nil,
 			map[string]any{"codec": "h264", "transcoded": true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := newCaptureEvidence(tt.exif, tt.probe, tt.mtime, zone).encode()
+			raw := newCaptureEvidence(captureReading{exif: tt.exif, probe: tt.probe, name: tt.named, mtime: tt.mtime}, zone).encode()
 			var got map[string]any
 			require.NoError(t, json.Unmarshal(raw, &got))
 			want := evidenceWith(tt.want)
@@ -294,20 +371,20 @@ func TestNewCaptureEvidence_Video(t *testing.T) {
 func TestCaptureEvidence_ValuesThatCannotBeWritten(t *testing.T) {
 	t.Run("a file time RFC 3339 cannot express is null", func(t *testing.T) {
 		mtime := time.UnixMilli(math.MaxInt64)
-		ev := newCaptureEvidence(ingest.ExifData{}, ingest.VideoProbeResult{}, &mtime, ingest.CameraZone{})
+		ev := newCaptureEvidence(captureReading{exif: ingest.ExifData{}, mtime: &mtime}, ingest.CameraZone{})
 		assert.Nil(t, ev.FileMtime)
 		assert.NotNil(t, ev.encode())
 	})
 	t.Run("a GPS stamp RFC 3339 cannot express takes its difference with it", func(t *testing.T) {
 		stamp := time.Date(20000, 1, 1, 0, 0, 0, 0, time.UTC)
 		diff := time.Hour
-		ev := newCaptureEvidence(ingest.ExifData{Raw: ingest.RawExif{GPSStamp: &stamp, WallMinusGPS: &diff}}, ingest.VideoProbeResult{}, nil, ingest.CameraZone{})
+		ev := newCaptureEvidence(captureReading{exif: ingest.ExifData{Raw: ingest.RawExif{GPSStamp: &stamp, WallMinusGPS: &diff}}}, ingest.CameraZone{})
 		assert.Nil(t, ev.GPSUTC)
 		assert.Nil(t, ev.WallMinusGPSS)
 	})
 	t.Run("evidence that cannot be encoded is NULL, not a failure", func(t *testing.T) {
 		nan := math.NaN()
-		ev := newCaptureEvidence(ingest.ExifData{}, ingest.VideoProbeResult{DurationS: &nan}, nil, ingest.CameraZone{})
+		ev := newCaptureEvidence(captureReading{exif: ingest.ExifData{}, probe: ingest.VideoProbeResult{DurationS: &nan}}, ingest.CameraZone{})
 		assert.Nil(t, ev.encode())
 	})
 }

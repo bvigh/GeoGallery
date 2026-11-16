@@ -91,7 +91,7 @@ func TestNewCaptureEvidence_ClockRule(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := ingest.ExtractExif(bytes.NewReader(exiftest.JPEG(tt.photo)), zone)
-			raw := newCaptureEvidence(e, ingest.VideoProbeResult{}, &mtime, zone).encode()
+			raw := newCaptureEvidence(captureReading{exif: e, mtime: &mtime}, zone).encode()
 			var got map[string]any
 			require.NoError(t, json.Unmarshal(raw, &got))
 			assert.Equal(t, evidenceWith(tt.want), got)
@@ -101,13 +101,13 @@ func TestNewCaptureEvidence_ClockRule(t *testing.T) {
 	t.Run("a rule is named only with its zone", func(t *testing.T) {
 		at := time.Date(2019, 1, 15, 12, 0, 0, 0, time.FixedZone("", 3600))
 		rule := tz200ClockRule
-		ev := newCaptureEvidence(ingest.ExifData{TakenAt: &at, TakenAtZone: ingest.ZoneCamera, ClockRule: &rule}, ingest.VideoProbeResult{}, nil, zone)
+		ev := newCaptureEvidence(captureReading{exif: ingest.ExifData{TakenAt: &at, TakenAtZone: ingest.ZoneCamera, ClockRule: &rule}}, zone)
 		assert.Nil(t, ev.ClockRule)
 	})
 
 	t.Run("from ingest, retimed_from is null", func(t *testing.T) {
 		e := ingest.ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: "2019:01:15 12:00:00"})), zone)
-		ev := newCaptureEvidence(e, ingest.VideoProbeResult{}, nil, zone)
+		ev := newCaptureEvidence(captureReading{exif: e}, zone)
 		assert.Equal(t, "ingest", ev.By)
 		assert.Nil(t, ev.RetimedFrom)
 		var got map[string]any
@@ -132,7 +132,7 @@ func TestNewCaptureEvidence_VideoClockRule(t *testing.T) {
 	assert.Equal(t, "2001-02-03T02:05:06Z", e.TakenAt.UTC().Format(time.RFC3339), "04:05:06 at the rule's +02:00, not Warsaw's winter +01:00")
 
 	var got map[string]any
-	require.NoError(t, json.Unmarshal(newCaptureEvidence(e, probe, nil, zone).encode(), &got))
+	require.NoError(t, json.Unmarshal(newCaptureEvidence(captureReading{exif: e, probe: probe}, zone).encode(), &got))
 	assert.Equal(t, evidenceWith(map[string]any{
 		"src": "exif_original", "zone": "clock_rule", "wall": "2001:02:03 04:05:06", "offset_tag": "+01:00",
 		"offset_ignored": true, "offset_used_min": 120.0, "make": "Panasonic", "model": "DC-TZ200",
@@ -149,7 +149,7 @@ func TestCaptureEvidence_TimeDroppedClearsClockRule(t *testing.T) {
 	e := ingest.ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: "9999:06:01 12:00:00"})), zone)
 	require.Equal(t, ingest.ZoneClockRule, e.TakenAtZone)
 
-	ev := newCaptureEvidence(e, ingest.VideoProbeResult{}, nil, zone)
+	ev := newCaptureEvidence(captureReading{exif: e}, zone)
 	require.NotNil(t, ev.ClockRule)
 	dropped := ev.timeDropped()
 

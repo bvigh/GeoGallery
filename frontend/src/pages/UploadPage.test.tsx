@@ -634,6 +634,29 @@ describe("UploadPage", () => {
         general: null,
       },
       {
+        name: "file names, read in the camera zone as some EXIF times were",
+        report: timeReport({
+          bySource: { exif_original: 2, filename: 3, mtime: 1 },
+          byZone: { offset: 1, camera: 4 },
+          file_date_names: ["a.jpg"],
+        }),
+        line:
+          "Capture times: 2 from EXIF (1 photo offset, 1 assumed camera zone Europe/Warsaw), " +
+          "3 from file name (assumed camera zone Europe/Warsaw), 1 from file date",
+        general: null,
+      },
+      {
+        name: "file names alone, in the upload's zone",
+        report: timeReport({
+          bySource: { filename: 2 },
+          byZone: { camera: 2 },
+          camera_zone: "America/New_York",
+          camera_zone_from: "batch",
+        }),
+        line: "Capture times: 2 from file name (this upload's zone America/New_York)",
+        general: null,
+      },
+      {
         name: "no EXIF at all",
         report: timeReport({ bySource: { container: 1, mtime: 2, none: 1 }, file_date_names: ["a.jpg", "b.jpg"] }),
         line: "Capture times: 1 from video container, 2 from file date, 1 with no capture time",
@@ -664,6 +687,16 @@ describe("UploadPage", () => {
 
       await userEvent.click(toggle);
       expect(screen.queryByText("IMG_0001.JPG")).not.toBeInTheDocument();
+    });
+
+    // A batch answered before the backend read names has no filename count.
+    it("adds up file names across batches, one of them without the count", async () => {
+      const older = timeReport({ bySource: { mtime: 1 }, file_date_names: ["v0.mp4"] });
+      await uploadAnswered(older, timeReport({ bySource: { filename: 1, mtime: 0 }, byZone: { camera: 1 } }));
+
+      expect(
+        screen.getByText("Capture times: 1 from file name (assumed camera zone Europe/Warsaw), 1 from file date")
+      ).toBeInTheDocument();
     });
 
     it("adds up the reports of every batch", async () => {

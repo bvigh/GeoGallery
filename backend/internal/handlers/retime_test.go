@@ -98,16 +98,16 @@ func TestRetimedEvidence(t *testing.T) {
 	mtime := time.Date(2019, 3, 14, 7, 0, 0, 0, time.UTC)
 	noRule := zone
 	noRule.Clock = nil
-	ingested := newCaptureEvidence(ingest.ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{
+	ingested := newCaptureEvidence(captureReading{exif: ingest.ExtractExif(bytes.NewReader(exiftest.JPEG(exiftest.Photo{
 		Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: "2019:03:13 19:28:15", OffsetTimeOriginal: "+01:00",
-	})), noRule), ingest.VideoProbeResult{}, &mtime, noRule).encode()
+	})), noRule), mtime: &mtime}, noRule).encode()
 
 	// A video ingest dated from its container, with every container input recorded.
 	created := time.Date(2019, 3, 13, 19, 28, 16, 0, time.UTC)
 	duration := 12.5
-	container := newCaptureEvidence(ingest.ExifData{}, ingest.VideoProbeResult{
+	container := newCaptureEvidence(captureReading{exif: ingest.ExifData{}, probe: ingest.VideoProbeResult{
 		CreatedAt: &created, DurationS: &duration, Encoder: "Panasonic", CodecName: "h264",
-	}, nil, ingest.CameraZone{Loc: time.UTC}).encode()
+	}}, ingest.CameraZone{Loc: time.UTC}).encode()
 
 	tests := []struct {
 		name string
@@ -130,7 +130,7 @@ func TestRetimedEvidence(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := retimedEvidence(tt.old, winter, zone, oldTakenAt)
+			raw, err := retimedEvidence(tt.old, captureReading{exif: winter}, zone, oldTakenAt)
 			require.NoError(t, err)
 			var got map[string]any
 			require.NoError(t, json.Unmarshal(raw, &got))
@@ -143,10 +143,10 @@ func TestRetimedEvidence(t *testing.T) {
 			Make: "Panasonic", Model: "DC-TZ200", DateTimeOriginal: "2017:12:01 10:00:00",
 		})), zone)
 		require.Equal(t, ingest.ZoneCamera, summer.TakenAtZone, "before the rule's first day")
-		old, err := retimedEvidence(nil, winter, zone, oldTakenAt)
+		old, err := retimedEvidence(nil, captureReading{exif: winter}, zone, oldTakenAt)
 		require.NoError(t, err)
 
-		raw, err := retimedEvidence(old, summer, zone, time.Date(2017, 12, 1, 8, 0, 0, 0, time.UTC))
+		raw, err := retimedEvidence(old, captureReading{exif: summer}, zone, time.Date(2017, 12, 1, 8, 0, 0, 0, time.UTC))
 		require.NoError(t, err)
 		var got map[string]any
 		require.NoError(t, json.Unmarshal(raw, &got))
@@ -154,6 +154,74 @@ func TestRetimedEvidence(t *testing.T) {
 		assert.Equal(t, "camera", got["zone"])
 		assert.Equal(t, "2017-12-01T08:00:00Z", got["retimed_from"], "the time this retime moved")
 	})
+
+	t.Run("a time from the name replaces the EXIF part, and the file time stays", func(t *testing.T) {
+		name, ok := ingest.FilenameTime("2019-03-13_19-28-15_124.jpg", zone)
+		require.True(t, ok)
+		old := []byte(`{"v": 1, "by": "ingest", "src": "mtime", "transcoded": false, "file_mtime": "2022-12-13T17:05:23.86Z",
+			"make": "Old", "wall": "x"}`)
+
+		raw, err := retimedEvidence(old, captureReading{name: &name, mtime: &oldTakenAt}, zone, oldTakenAt)
+		require.NoError(t, err)
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(raw, &got))
+		assert.Equal(t, evidenceWith(map[string]any{
+			"by": "retime", "retimed_from": "2019-03-13T18:28:15Z", "src": "filename", "zone": "camera", "offset_used_min": 60.0,
+			"name_wall": "2019-03-13 19:28:15", "file_mtime": "2022-12-13T17:05:23.86Z",
+		}), got, "the re-read's make and wall clock, none, replace what was recorded; the mtime given is not used")
+	})
+}
+
+func TestRetimeCandidate_NameMayDate(t *testing.T) {
+	tests := []struct {
+		name string
+		m    retimeCandidate
+		want bool
+	}{
+		{"a photo without evidence", retimeCandidate{mediaType: "photo"}, true},
+		{"a 360° photo without evidence", retimeCandidate{mediaType: "photo_360"}, true},
+		{"a video without evidence: its container may have dated it", retimeCandidate{mediaType: "video"}, false},
+		{"a 360° video without evidence", retimeCandidate{mediaType: "video_360"}, false},
+		{"dated from the file time", retimeCandidate{mediaType: "video", recorded: true, src: "mtime"}, true},
+		{"dated from the name", retimeCandidate{mediaType: "photo", recorded: true, src: "filename"}, true},
+		{"dated from the container", retimeCandidate{mediaType: "video", recorded: true, src: "container"}, false},
+		{"dated from EXIF", retimeCandidate{mediaType: "photo", recorded: true, src: "exif_original"}, false},
+		{"recorded without a time", retimeCandidate{mediaType: "photo", recorded: true, src: "none"}, false},
+		{"recorded without a source", retimeCandidate{mediaType: "photo", recorded: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.m.nameMayDate())
+		})
+	}
+}
+
+func TestRetimeCandidate_CameFromNameOrFileTime(t *testing.T) {
+	stored := time.Date(2022, 12, 13, 17, 5, 23, 860_000_000, time.UTC)
+	name := time.Date(2012, 8, 24, 18, 14, 24, 0, time.FixedZone("", 2*3600))
+	tests := []struct {
+		name string
+		m    retimeCandidate
+		want bool
+	}{
+		{"no evidence contradicts it", retimeCandidate{takenAt: stored}, true},
+		{"the recorded file time", retimeCandidate{takenAt: stored, recorded: true, src: "mtime", fileMtime: "2022-12-13T17:05:23.86Z"}, true},
+		{"within retimeTolerance of it", retimeCandidate{takenAt: stored, recorded: true, src: "mtime", fileMtime: "2022-12-13T17:05:28.86Z"}, true},
+		{"moved since", retimeCandidate{takenAt: stored, recorded: true, src: "mtime", fileMtime: "2022-12-13T17:05:29Z"}, false},
+		{"no file time recorded", retimeCandidate{takenAt: stored, recorded: true, src: "mtime"}, false},
+		{"a file time that does not parse", retimeCandidate{takenAt: stored, recorded: true, src: "mtime", fileMtime: "yesterday"}, false},
+		{"the name's wall clock in another zone",
+			retimeCandidate{takenAt: time.Date(2012, 8, 24, 18, 14, 24, 0, time.UTC), recorded: true, src: "filename"}, true},
+		{"the name's wall clock at a quarter-hour offset",
+			retimeCandidate{takenAt: time.Date(2012, 8, 24, 12, 29, 24, 0, time.UTC), recorded: true, src: "filename"}, true},
+		{"not the name's wall clock at any offset",
+			retimeCandidate{takenAt: time.Date(2012, 8, 24, 18, 21, 24, 0, time.UTC), recorded: true, src: "filename"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.m.cameFromNameOrFileTime(name))
+		})
+	}
 }
 
 // retimeReadStore serves object heads from memory and records the keys read.

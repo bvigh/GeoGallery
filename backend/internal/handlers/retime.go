@@ -38,11 +38,19 @@ type RetimeChange struct {
 	MediaID  string
 	Filename string
 	Old, New time.Time
-	// Zone is where New's offset came from: ingest.ZoneGPS, ZoneClockRule, ZoneOffset or ZoneCamera.
+	// Src is what New comes from: captureSrcExifOriginal, captureSrcExifIFD0 or captureSrcFilename.
+	Src string
+	// Zone is where New's offset came from: ingest.ZoneGPS, ZoneClockRule, ZoneOffset or ZoneCamera
+	// (always ZoneCamera for a time from the file name).
 	Zone string
 	// ClockRule is the owner's rule that gave the offset, set exactly when Zone is ZoneClockRule.
 	ClockRule *ingest.ClockRule
 	GPSSource string // the item's gps_source before the change; "" without a location
+}
+
+// FromName reports whether New is the date and time the file name holds, read in the camera zone.
+func (c RetimeChange) FromName() bool {
+	return c.Src == captureSrcFilename
 }
 
 // RetimeResult counts what RunRetime found among the owner's media with a taken_at.
@@ -50,10 +58,13 @@ type RetimeResult struct {
 	Checked   int
 	Retimed   int // taken_at moved (in a dry run: would move)
 	Unchanged int // already what ingest computes today, within retimeTolerance
-	NotExif   int // no EXIF capture time to read: taken_at came from the video container or the file time
-	Edited    int // the owner set or shifted taken_at (time_edit): left alone, its object never read
-	Mismatch  int // an EXIF time the stored taken_at is not, at any offset: left alone, logged
-	Failed    int // object unreadable or the update failed: logged
+	// NotExif counts rows with no EXIF capture time to read, whose name gives none that may replace
+	// the stored time either: taken_at came from the video container, or from the file time of a file
+	// whose name holds no date and time.
+	NotExif  int
+	Edited   int // the owner set or shifted taken_at (time_edit): left alone, its object never read
+	Mismatch int // an EXIF or name time the stored taken_at did not come from: left alone, logged
+	Failed   int // object unreadable or the update failed: logged
 }
 
 // retimeTolerance is how far a stored taken_at may sit from what ingest computes today and still
@@ -73,6 +84,12 @@ const maxUTCOffset = 14 * time.Hour
 // the rows stored before CAMERA_TIMEZONE, before the owner's camera zone setting or before ingest
 // read OffsetTimeOriginal.
 //
+// Where the file has no EXIF time, the date and time its name holds (ingest.FilenameTime, in the
+// camera zone) replaces a stored time that came from the name or from the file's modified time,
+// which ingest now ranks below the name (nameMayDate). That repairs the rows stored before ingest
+// read names, such as edited copies whose EXIF was stripped and whose file time is the day they were
+// copied, and rows dated from their name in an earlier camera zone.
+//
 // The camera zone is the one the owner's uploads get today (their setting, loaded once, else the
 // server's), except for an item whose upload or scan named a zone of its own: that zone stays with
 // its files (storedItemCameraZone).
@@ -83,12 +100,13 @@ const maxUTCOffset = 14 * time.Hour
 // offset. An edit made after the listing makes that row fail, as any change of it since does
 // (applyRetime); a re-run counts it as edited.
 //
-// Only rows dated from EXIF change. A photo is read from the same mediaHeadSize bytes ingest read; a
-// video only when a camera rule dates some videos from their EXIF (otherwise nothing is read for it),
-// and never with ffprobe. A row is left alone when that head has no EXIF capture time, when the
-// stored taken_at is already the new time (within retimeTolerance), or when the stored taken_at is
-// not the EXIF wall clock read at any UTC offset (within retimeTolerance): then it did not come from
-// this EXIF, and it is logged as a mismatch.
+// A photo is read from the same mediaHeadSize bytes ingest read; a video only when a camera rule
+// dates some videos from their EXIF (otherwise nothing is read for it), and never with ffprobe. A row
+// is left alone when neither that head's EXIF nor the name gives a time that may replace the stored
+// one, when the stored taken_at is already the new time (within retimeTolerance), or when the stored
+// taken_at did not come from this source: it is not the EXIF wall clock, nor the name's for a row
+// dated from its name, read at any UTC offset (within retimeTolerance), nor the recorded file time
+// for a row dated from that. Such a row is logged as a mismatch.
 //
 // With apply, each change is one transaction that also:
 //   - clears an interpolated location, which was matched at the old time;
@@ -154,28 +172,43 @@ func RunRetime(ctx context.Context, deps RetimeDeps, ownerID string, apply bool,
 			res.Failed++
 			continue
 		}
-		if !found {
+		reading := captureReading{exif: exifData}
+		if name, ok := ingest.FilenameTime(m.filename, zone); ok {
+			reading.name = &name
+		}
+		// A file without an EXIF time may be dated by its name. One whose EXIF time JSON cannot carry
+		// may not: ingest stored no time for it at all.
+		if !found && (exifData.TakenAt != nil || reading.name == nil || !m.nameMayDate()) {
 			res.NotExif++
 			continue
 		}
+		newTime := *reading.takenAt()
 		switch {
-		case exifData.TakenAt.Sub(m.takenAt).Abs() <= retimeTolerance:
+		case newTime.Sub(m.takenAt).Abs() <= retimeTolerance:
 			res.Unchanged++
 			continue
-		case !sameWallClock(m.takenAt, *exifData.TakenAt):
+		case found && !sameWallClock(m.takenAt, newTime):
 			slog.Warn("retime: stored taken_at is not the EXIF time at any offset, left alone",
 				"id", m.id, "filename", m.filename, "taken_at", m.takenAt.UTC(),
-				"exif_time", wallClock(*exifData.TakenAt).Format(time.DateTime))
+				"exif_time", wallClock(newTime).Format(time.DateTime))
+			res.Mismatch++
+			continue
+		case !found && !m.cameFromNameOrFileTime(newTime):
+			slog.Warn("retime: stored taken_at is neither the name's time at any offset nor the recorded file time, left alone",
+				"id", m.id, "filename", m.filename, "taken_at", m.takenAt.UTC(), "src", m.src, "name_time", reading.name.Wall)
 			res.Mismatch++
 			continue
 		}
 
 		change := RetimeChange{
-			MediaID: m.id, Filename: m.filename, Old: m.takenAt, New: *exifData.TakenAt,
+			MediaID: m.id, Filename: m.filename, Old: m.takenAt, New: newTime, Src: captureSource(reading),
 			Zone: exifData.TakenAtZone, ClockRule: exifData.ClockRule, GPSSource: m.gpsSource,
 		}
+		if !found {
+			change.Zone, change.ClockRule = ingest.ZoneCamera, nil
+		}
 		if apply {
-			if err := applyRetime(ctx, deps.pool, ownerID, change, exifData, zone, deps.matchWindow); err != nil {
+			if err := applyRetime(ctx, deps.pool, ownerID, change, reading, zone, deps.matchWindow); err != nil {
 				if ctx.Err() != nil {
 					break
 				}
@@ -213,7 +246,39 @@ type retimeCandidate struct {
 	takenAt                                        time.Time
 	// zoneFrom and zoneName are capture_evidence's camera_zone_from and camera_zone, "" when absent.
 	zoneFrom, zoneName string
-	edited             bool // the owner set or shifted taken_at: time_edit is not NULL
+	// recorded says the row has capture_evidence. src is its src, and fileMtime its file_mtime as
+	// recorded (RFC 3339), "" where absent.
+	recorded       bool
+	src, fileMtime string
+	edited         bool // the owner set or shifted taken_at: time_edit is not NULL
+}
+
+// nameMayDate reports whether the date and time in m's name may replace its stored taken_at, when
+// the file holds no EXIF time: that time came from the name, or from the file's modified time, which
+// ingest now ranks below the name. A row without evidence (ingested before migration 10) qualifies
+// only as a photo: a photo without an EXIF time could only be dated by its file time, while a video
+// may have been dated by its container, which ingest ranks above the name and retime never probes.
+func (m retimeCandidate) nameMayDate() bool {
+	if !m.recorded {
+		return m.mediaType == "photo" || m.mediaType == "photo_360"
+	}
+	return m.src == captureSrcFilename || m.src == captureSrcMtime
+}
+
+// cameFromNameOrFileTime reports whether m's stored taken_at came from where its evidence says, for a
+// row nameMayDate admits, with nameTime its name's time read today: the name's wall clock at some UTC
+// offset (the camera zone may have changed since), or the file time it recorded. A row without
+// evidence recorded neither, so nothing contradicts it.
+func (m retimeCandidate) cameFromNameOrFileTime(nameTime time.Time) bool {
+	switch {
+	case !m.recorded:
+		return true
+	case m.src == captureSrcFilename:
+		return sameWallClock(m.takenAt, nameTime)
+	default:
+		mtime, err := time.Parse(time.RFC3339Nano, m.fileMtime)
+		return err == nil && mtime.Sub(m.takenAt).Abs() <= retimeTolerance
+	}
 }
 
 // retimeCandidates lists ownerID's media with a taken_at (a row without one has no EXIF time), read
@@ -223,6 +288,8 @@ func retimeCandidates(ctx context.Context, pool *pgxpool.Pool, ownerID string) (
 	rows, err := pool.Query(ctx, `
 		SELECT id::text, filename, storage_key, media_type, taken_at, coalesce(gps_source, ''),
 		       coalesce(capture_evidence->>'camera_zone_from', ''), coalesce(capture_evidence->>'camera_zone', ''),
+		       capture_evidence IS NOT NULL, coalesce(capture_evidence->>'src', ''),
+		       coalesce(capture_evidence->>'file_mtime', ''),
 		       time_edit IS NOT NULL
 		FROM media
 		WHERE owner_id = $1 AND taken_at IS NOT NULL
@@ -233,7 +300,7 @@ func retimeCandidates(ctx context.Context, pool *pgxpool.Pool, ownerID string) (
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (retimeCandidate, error) {
 		var c retimeCandidate
 		err := row.Scan(&c.id, &c.filename, &c.storageKey, &c.mediaType, &c.takenAt, &c.gpsSource, &c.zoneFrom, &c.zoneName,
-			&c.edited)
+			&c.recorded, &c.src, &c.fileMtime, &c.edited)
 		return c, err
 	})
 }
@@ -292,7 +359,9 @@ func sameWallClock(stored, now time.Time) bool {
 	return min(off, quarter-off) <= retimeTolerance
 }
 
-func applyRetime(ctx context.Context, pool *pgxpool.Pool, ownerID string, c RetimeChange, exifData ingest.ExifData, zone ingest.CameraZone, matchWindow time.Duration) error {
+// applyRetime writes one change, read from reading: its EXIF, or its name when the EXIF has no time.
+func applyRetime(ctx context.Context, pool *pgxpool.Pool, ownerID string, c RetimeChange, reading captureReading, zone ingest.CameraZone, matchWindow time.Duration) error {
+	exifData := reading.exif
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -315,7 +384,7 @@ func applyRetime(ctx context.Context, pool *pgxpool.Pool, ownerID string, c Reti
 	if err != nil {
 		return err
 	}
-	evidence, err := retimedEvidence(oldEvidence, exifData, zone, c.Old)
+	evidence, err := retimedEvidence(oldEvidence, reading, zone, c.Old)
 	if err != nil {
 		return fmt.Errorf("capture evidence: %w", err)
 	}
@@ -334,9 +403,10 @@ func applyRetime(ctx context.Context, pool *pgxpool.Pool, ownerID string, c Reti
 		return fmt.Errorf("update media: %w", err)
 	}
 
-	// Ingest stored the EXIF position as an 'exif' point at taken_at (insertExifGPSTrack). Its owner
-	// may since have placed the photo by hand, which leaves gps_source 'manual'. A video read through
-	// VideoExif has no position, as ingest makes no point for it.
+	// Ingest stored the EXIF position as an 'exif' point at taken_at (insertExifGPSTrack), also when
+	// taken_at came from the name or the file time. Its owner may since have placed the photo by hand,
+	// which leaves gps_source 'manual'. A video read through VideoExif has no position, as ingest makes
+	// no point for it.
 	movedExif, movedManual := false, false
 	if exifData.Lat != nil && exifData.Lng != nil {
 		p := ownTrackPoint{"exif", *exifData.Lat, *exifData.Lng}
@@ -371,25 +441,26 @@ func applyRetime(ctx context.Context, pool *pgxpool.Pool, ownerID string, c Reti
 const captureByRetime = "retime"
 
 // retimeReplacedKeys are the capture_evidence keys retimedEvidence takes from the re-read: what the
-// EXIF says and how today's rules read it. Every other key (v, and the container and file inputs:
-// creation_time, file_mtime, duration_s, encoder, codec, transcoded) stays as ingest recorded it,
-// because the re-read has only the head of the stored object and cannot know them.
+// EXIF and the name say and how today's rules read them. Every other key (v, and the container and
+// file inputs: creation_time, file_mtime, duration_s, encoder, codec, transcoded) stays as ingest
+// recorded it, because the re-read has only the head of the stored object and cannot know them.
 var retimeReplacedKeys = map[string]bool{
 	"by": true, "retimed_from": true,
 	"src": true, "zone": true, "wall": true, "gps_utc": true, "wall_minus_gps_s": true,
 	"offset_tag": true, "offset_ignored": true, "offset_used_min": true,
 	"camera_zone": true, "camera_zone_from": true, "camera_zone_utc_fallback": true,
-	"make": true, "model": true, "exif_partial": true, "clock_rule": true,
+	"make": true, "model": true, "exif_partial": true, "clock_rule": true, "name_wall": true,
 }
 
-// retimedEvidence returns the capture_evidence of a row retimed from e: old, when it is a JSON
-// object, with the retimeReplacedKeys taken from e as read with zone, by "retime" and retimed_from
-// the old taken_at. Without an old object (rows ingested before migration 10 have NULL) it is a whole
-// evidence object whose container and file inputs are null, since nothing recorded them, and whose
-// transcoded is false: a retimed row was dated from the EXIF in its stored object, which a re-encode
-// would have dropped.
-func retimedEvidence(old []byte, e ingest.ExifData, zone ingest.CameraZone, oldTakenAt time.Time) ([]byte, error) {
-	fresh := newCaptureEvidence(e, ingest.VideoProbeResult{}, nil, zone)
+// retimedEvidence returns the capture_evidence of a row retimed from c (its EXIF, or its name when
+// the EXIF has no time): old, when it is a JSON object, with the retimeReplacedKeys taken from c as
+// read with zone, by "retime" and retimed_from the old taken_at. Without an old object (rows ingested
+// before migration 10 have NULL) it is a whole evidence object whose container and file inputs are
+// null, since nothing recorded them, and whose transcoded is false: such a row is retimed only as a
+// photo, or as a video dated from the EXIF in its stored object, which a re-encode would have
+// dropped.
+func retimedEvidence(old []byte, c captureReading, zone ingest.CameraZone, oldTakenAt time.Time) ([]byte, error) {
+	fresh := newCaptureEvidence(captureReading{exif: c.exif, name: c.name}, zone)
 	fresh.By = captureByRetime
 	fresh.RetimedFrom = rfc3339UTC(&oldTakenAt)
 	b, err := json.Marshal(fresh)

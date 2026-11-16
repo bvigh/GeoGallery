@@ -584,6 +584,7 @@ describe("timeOriginChip", () => {
     ["exif_original", "EXIF capture time", null],
     ["exif_ifd0", "EXIF general date, may be an edit time", null],
     ["container", "Video container time", null],
+    ["filename", "File name's date and time", "Phones and apps name a file by when it was taken, and copies keep the name."],
     ["mtime", "File modified time, may be wrong", "A modified time is often a copy or download time."],
     ["none", "No capture time", null],
   ] as const)("recorded %s", (src, text, note) => {
@@ -596,6 +597,10 @@ describe("timeOriginChip", () => {
     ["container", "Video container time"],
   ] as const)("follows the re-read's %s when nothing was recorded", (source, text) => {
     expect(timeOriginChip(null, reread(rule({ source })))).toEqual({ text, note: null });
+  });
+
+  it("follows a re-read that found the time in the name", () => {
+    expect(timeOriginChip(null, reread(rule({ source: "filename" }))).text).toBe("File name's date and time");
   });
 
   it("prefers the recorded origin over the re-read", () => {
@@ -853,6 +858,24 @@ describe("cameraClock", () => {
       "file date",
     ],
     ["no time at all", evidence({ src: "none", zone: null, offset_used_min: null, wall: null }), "No wall clock.", null],
+    [
+      "the file name, read in the camera zone",
+      evidence({ src: "filename", zone: "camera", offset_used_min: 120, wall: null, name_wall: "2012-08-24 18:14:24" }),
+      "2012-08-24 18:14:24 +02:00",
+      "assumed",
+    ],
+    [
+      "the file name, never the EXIF wall clock beside it",
+      evidence({ src: "filename", zone: "camera", offset_used_min: 120, wall: "garbled", name_wall: "2012-08-24 18:14:24" }),
+      "2012-08-24 18:14:24 +02:00",
+      "assumed",
+    ],
+    [
+      "a name time without its wall clock",
+      evidence({ src: "filename", zone: "camera", offset_used_min: 120, wall: null }),
+      "not recorded +02:00",
+      "assumed",
+    ],
   ])("recorded: %s", (_name, input, text, word) => {
     expect(cameraClock(input, null)).toEqual({ text, word });
   });
@@ -886,6 +909,15 @@ describe("cameraClock", () => {
     ],
     ["no capture time", reread(null, { wall_clock: null }), "No wall clock.", null],
     ["a wall clock that does not parse", reread(null, { wall_clock: "garbled" }), "garbled", null],
+    [
+      "the file name",
+      reread(rule({ source: "filename", zone_rule: "camera", offset_min: 120 }), {
+        wall_clock: "garbled",
+        name_wall: "2012-08-24 18:14:24",
+      }),
+      "2012-08-24 18:14:24 +02:00",
+      "assumed",
+    ],
   ])("re-read: %s", (_name, input, text, word) => {
     expect(cameraClock(null, input)).toEqual({ text, word });
   });
@@ -927,8 +959,9 @@ describe("checkSentence", () => {
 });
 
 describe("rereadSentence", () => {
-  const photoMessage = "No capture time could be read from this file. This reader understands EXIF in JPEG and TIFF only.";
-  const videoMessage = "No capture time could be read from this video's container.";
+  const photoMessage =
+    "No capture time could be read from this file, nor a date and time from its name. This reader understands EXIF in JPEG, TIFF, PNG, WebP and HEIC.";
+  const videoMessage = "No capture time could be read from this video's container, nor a date and time from its name.";
   const mtimeNote = "The stored time is the file's modified date.";
   type Row = [string, FileReread["class"], number | null, "photo" | "video" | "video_360", CaptureEvidence | null, string];
 

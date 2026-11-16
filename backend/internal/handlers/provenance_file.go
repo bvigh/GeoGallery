@@ -87,6 +87,8 @@ type rereadFile struct {
 	Make          *string      `json:"make"`
 	Model         *string      `json:"model"`
 	Video         *rereadVideo `json:"video"`
+	// NameWall is the date and time the file name holds ("2006-01-02 15:04:05"), null without one.
+	NameWall *string `json:"name_wall"`
 }
 
 type rereadVideo struct {
@@ -101,7 +103,7 @@ type rereadRule struct {
 	Source    string  `json:"source"`
 	ZoneRule  *string `json:"zone_rule"`
 	OffsetMin *int    `json:"offset_min"` // nil for a container time
-	ZoneName  *string `json:"zone_name"`  // set only when ZoneRule is "camera"
+	ZoneName  *string `json:"zone_name"`  // set only when ZoneRule is "camera", as it is for a name
 	// ZoneFrom says who named ZoneName, set only when ZoneRule is "camera": "batch" (the item's upload
 	// or scan), "user" (the owner's setting) or "server".
 	ZoneFrom *string `json:"zone_from"`
@@ -122,6 +124,7 @@ type rereadCheck struct {
 type rereadItem struct {
 	mediaType   string
 	storageKey  string
+	filename    string
 	takenAt     *time.Time
 	uploadedAt  time.Time
 	evidence    json.RawMessage
@@ -155,8 +158,9 @@ type fileRead struct {
 
 // File serves GET /api/media/{id}/provenance/file: the stored file read again with today's rules,
 // which are the camera zone (the one the item's upload named, else the owner's setting, else the
-// server's), the camera rules and the owner's clock rules as they are now. It only reports, and
-// never moves taken_at. A foreign or shared item is 404.
+// server's), the camera rules and the owner's clock rules as they are now. Where the file gives no
+// time, its name may, as at ingest (withName). It only reports, and never moves taken_at. A foreign
+// or shared item is 404.
 func (h *ProvenanceHandler) File(w http.ResponseWriter, r *http.Request) {
 	ownerID := auth.MustUser(r.Context()).ID
 	id, ok := auth.CanonicalUUID(chi.URLParam(r, "id"))
@@ -210,7 +214,7 @@ func (h *ProvenanceHandler) File(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := json.Marshal(newFileReread(item, read))
+	body, err := json.Marshal(newFileReread(item, withName(read, item.filename, zone)))
 	if err != nil {
 		slog.Error("provenance file: encode response failed", "err", err)
 		http.Error(w, "encode error", http.StatusInternalServerError)
@@ -245,11 +249,12 @@ func (h *ProvenanceHandler) loadRereadItem(ctx context.Context, id, ownerID stri
 	var item rereadItem
 	var evidence []byte
 	err := h.db.QueryRow(ctx, `
-		SELECT m.media_type, m.storage_key, m.taken_at, m.created_at, m.capture_evidence, u.camera_timezone
+		SELECT m.media_type, m.storage_key, m.taken_at, m.created_at, m.capture_evidence, u.camera_timezone, m.filename
 		FROM media m
 		JOIN users u ON u.id = m.owner_id
 		WHERE m.id = $1 AND m.owner_id = $2
-	`, id, ownerID).Scan(&item.mediaType, &item.storageKey, &item.takenAt, &item.uploadedAt, &evidence, &item.zoneSetting)
+	`, id, ownerID).Scan(&item.mediaType, &item.storageKey, &item.takenAt, &item.uploadedAt, &evidence, &item.zoneSetting,
+		&item.filename)
 	if err != nil {
 		return rereadItem{}, err
 	}
@@ -331,7 +336,7 @@ func exifFileRead(e ingest.ExifData, zone ingest.CameraZone) (rereadFile, *rerea
 	_, offsetSeconds := e.TakenAt.Zone()
 	offsetMin := offsetSeconds / 60
 	rule := &rereadRule{
-		Source:    captureSource(e, ingest.VideoProbeResult{}, nil),
+		Source:    captureSource(captureReading{exif: e}),
 		ZoneRule:  nilIfEmpty(e.TakenAtZone),
 		OffsetMin: &offsetMin,
 		TakenAt:   *takenAt,
@@ -388,6 +393,36 @@ func newVideoRead(probe ingest.VideoProbeResult, embedded videoExif, zone ingest
 	}
 	if created := read.file.Video.CreationTime; !embedded.ok && created != nil {
 		read.rule = &rereadRule{Source: captureSrcContainer, TakenAt: *created}
+	}
+	return read
+}
+
+// withName adds what the file's name says to read: its date and time, and, when the file itself gave
+// no time (neither EXIF nor a container time), the time today's rules read from the name, in the
+// camera zone, as ingest ranks the name below both (captureReading.takenAt).
+func withName(read fileRead, filename string, zone ingest.CameraZone) fileRead {
+	name, ok := ingest.FilenameTime(filename, zone)
+	if !ok {
+		return read
+	}
+	read.file.NameWall = &name.Wall
+	if read.rule != nil {
+		return read
+	}
+	takenAt := utcTime(&name.At)
+	if takenAt == nil {
+		return read
+	}
+	_, offsetSeconds := name.At.Zone()
+	offsetMin := offsetSeconds / 60
+	zoneRule, zoneName, zoneFrom := ingest.ZoneCamera, zone.Name(), zone.Source()
+	read.rule = &rereadRule{
+		Source:    captureSrcFilename,
+		ZoneRule:  &zoneRule,
+		OffsetMin: &offsetMin,
+		ZoneName:  &zoneName,
+		ZoneFrom:  &zoneFrom,
+		TakenAt:   *takenAt,
 	}
 	return read
 }

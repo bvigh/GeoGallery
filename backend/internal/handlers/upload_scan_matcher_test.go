@@ -169,10 +169,10 @@ func uploadFiles(filenames ...string) *http.Request {
 // The time_report of a test upload through a registrar with a zero camera zone, of files that hold no
 // time and are sent without a file_mtime: when none is stored as a new row, and when one is.
 const (
-	timeReportNothingNew = `{"by_source":{"exif_original":0,"exif_ifd0":0,"container":0,"mtime":0,"none":0},` +
+	timeReportNothingNew = `{"by_source":{"exif_original":0,"exif_ifd0":0,"container":0,"filename":0,"mtime":0,"none":0},` +
 		`"by_zone":{"gps":0,"clock_rule":0,"offset":0,"camera":0},` +
 		`"camera_zone":"server zone (unset)","camera_zone_from":"server","assumed_zone_is_utc":false,"file_date_names":[]}`
-	timeReportOneUndated = `{"by_source":{"exif_original":0,"exif_ifd0":0,"container":0,"mtime":0,"none":1},` +
+	timeReportOneUndated = `{"by_source":{"exif_original":0,"exif_ifd0":0,"container":0,"filename":0,"mtime":0,"none":1},` +
 		`"by_zone":{"gps":0,"clock_rule":0,"offset":0,"camera":0},` +
 		`"camera_zone":"server zone (unset)","camera_zone_from":"server","assumed_zone_is_utc":false,"file_date_names":[]}`
 )

@@ -61,6 +61,8 @@ Mostly frontend. Small enough to ship as two or three bundled PRs.
 
 #24 grew beyond its issue: instead of one built-in rule for the Insta360 ONE RS in 2022, each user defines rules for their own cameras in Settings (a make and model, the UTC offset its clock showed, an optional period), and `server retime` applies them to stored items. Make-wide facts stay in `backend/camera-rules.json`.
 
+#30 also repairs what is stored: `server retime` gives a file without an EXIF time the date and time its name holds, where its stored time came from the name or the file time, so edited copies whose EXIF was stripped leave the day they were copied.
+
 360° is the owner's decision (#27). Ingest still makes a first guess, and #28 makes that guess better for new files, but a manual choice always wins.
 
 Data repairs on the existing deployments are operator work, not issues: the far dashcam rows, the Insta360 photos and videos, and checking Hetzner. The esoko week rollover is repaired, by correcting the two source logs and importing them again. They are tracked in local notes kept out of this repository, because they describe personal location history.

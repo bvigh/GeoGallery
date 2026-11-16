@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -57,6 +58,7 @@ type rereadRow struct {
 	uploaded    time.Time
 	evidence    string
 	zoneSetting *string // the owner's camera_timezone
+	filename    string  // "photo.jpg" when empty
 }
 
 func (r rereadRow) Scan(dest ...any) error {
@@ -68,6 +70,7 @@ func (r rereadRow) Scan(dest ...any) error {
 		*dest[4].(*[]byte) = []byte(r.evidence)
 	}
 	*dest[5].(**string) = r.zoneSetting
+	*dest[6].(*string) = cmp.Or(r.filename, "photo.jpg")
 	return nil
 }
 
@@ -595,7 +598,8 @@ func TestProvenanceFile_Wire(t *testing.T) {
 				"wall_minus_gps_s": 3600,
 				"make": "TestMake",
 				"model": "TestModel",
-				"video": null
+				"video": null,
+				"name_wall": null
 			},
 			"rule_today": {"source": "exif_original", "zone_rule": "gps", "offset_min": 60, "zone_name": null, "zone_from": null, "clock_rule": null, "taken_at": "2001-02-03T12:00:00Z"},
 			"delta_s": 0,
@@ -623,7 +627,8 @@ func TestProvenanceFile_Wire(t *testing.T) {
 			"file": {
 				"wall_clock": null, "wall_tag": null, "offset_tag": null, "offset_ignored": false,
 				"gps_stamp": null, "wall_minus_gps_s": null, "make": null, "model": null,
-				"video": {"creation_time": "2001-02-03T12:00:00Z", "duration_s": 12.5, "encoder": "Lavf60.16.100", "codec": "hevc"}
+				"video": {"creation_time": "2001-02-03T12:00:00Z", "duration_s": 12.5, "encoder": "Lavf60.16.100", "codec": "hevc"},
+				"name_wall": null
 			},
 			"rule_today": {"source": "container", "zone_rule": null, "offset_min": null, "zone_name": null, "zone_from": null, "clock_rule": null, "taken_at": "2001-02-03T12:00:00Z"},
 			"delta_s": 0,
@@ -643,10 +648,108 @@ func TestProvenanceFile_Wire(t *testing.T) {
 			"basis": "reread_now", "stored_taken_at": null, "uploaded_at": "2001-03-01T00:00:00Z",
 			"file": {
 				"wall_clock": null, "wall_tag": null, "offset_tag": null, "offset_ignored": false,
-				"gps_stamp": null, "wall_minus_gps_s": null, "make": null, "model": null, "video": null
+				"gps_stamp": null, "wall_minus_gps_s": null, "make": null, "model": null, "video": null, "name_wall": null
 			},
 			"rule_today": null, "delta_s": null, "class": "no_file_time", "checks": [], "tags": []
 		}`, rec.Body.String())
+	})
+	t.Run("the name, when the file gives no time", func(t *testing.T) {
+		row := photoRow(noonPlus(0))
+		row.filename = "2012-08-24_18-14-24_124.jpg"
+		h := newRereadHandler(row, &stubRereadStorage{head: []byte("not a photo")}, utcZone, probeMustNotRun(t))
+		rec := httptest.NewRecorder()
+
+		h.File(rec, provenanceRequest(rereadID))
+
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.JSONEq(t, `{
+			"basis": "reread_now", "stored_taken_at": "2001-02-03T12:00:00Z", "uploaded_at": "2001-03-01T00:00:00Z",
+			"file": {
+				"wall_clock": null, "wall_tag": null, "offset_tag": null, "offset_ignored": false,
+				"gps_stamp": null, "wall_minus_gps_s": null, "make": null, "model": null, "video": null,
+				"name_wall": "2012-08-24 18:14:24"
+			},
+			"rule_today": {"source": "filename", "zone_rule": "camera", "offset_min": 0, "zone_name": "UTC", "zone_from": "server",
+				"clock_rule": null, "taken_at": "2012-08-24T18:14:24Z"},
+			"delta_s": 364630464, "class": "other", "checks": [], "tags": []
+		}`, rec.Body.String())
+	})
+}
+
+// The name dates an item the file cannot, after its EXIF and its container time, in the zone the
+// item is read in today, as ingest ranks them.
+func TestProvenanceFile_Name(t *testing.T) {
+	warsaw := ingest.CameraZone{Loc: mustLoadLocation(t, "Europe/Warsaw"), Set: true, Rules: panasonicOffsetRule}
+	const motorola = "2012-08-24_18-14-24_124.jpg"
+	stored := time.Date(2012, 8, 24, 16, 14, 24, 0, time.UTC)
+	created := time.Date(2012, 8, 24, 16, 20, 0, 0, time.UTC)
+	uploaded := time.Date(2013, 1, 1, 0, 0, 0, 0, time.UTC)
+	photoRow := func(takenAt *time.Time) rereadRow {
+		return rereadRow{mediaType: "photo", takenAt: takenAt, uploaded: uploaded}
+	}
+	videoRow := func(takenAt *time.Time, evidence string) rereadRow {
+		return rereadRow{mediaType: "video", takenAt: takenAt, uploaded: uploaded, evidence: evidence}
+	}
+
+	t.Run("a photo without an EXIF time", func(t *testing.T) {
+		row := photoRow(&stored)
+		row.filename = motorola
+		got := photoReread(t, exiftest.Photo{Make: "Motorola"}, row, warsaw)
+
+		require.NotNil(t, got.RuleToday)
+		assert.Equal(t, captureSrcFilename, got.RuleToday.Source)
+		assert.Equal(t, ptr(ingest.ZoneCamera), got.RuleToday.ZoneRule)
+		assert.Equal(t, ptr(120), got.RuleToday.OffsetMin)
+		assert.Equal(t, ptr("Europe/Warsaw"), got.RuleToday.ZoneName)
+		assert.Equal(t, ptr(ingest.CameraZoneFromServer), got.RuleToday.ZoneFrom)
+		assert.True(t, stored.Equal(got.RuleToday.TakenAt))
+		assert.Equal(t, rereadSame, got.Class)
+		assert.Equal(t, ptr("2012-08-24 18:14:24"), got.File.NameWall)
+	})
+	t.Run("the owner's zone today", func(t *testing.T) {
+		row := photoRow(&stored)
+		row.filename, row.zoneSetting = motorola, ptr("Asia/Tokyo")
+		got := photoReread(t, exiftest.Photo{}, row, warsaw)
+
+		require.NotNil(t, got.RuleToday)
+		assert.Equal(t, ptr("Asia/Tokyo"), got.RuleToday.ZoneName)
+		assert.Equal(t, ptr(ingest.CameraZoneFromUser), got.RuleToday.ZoneFrom)
+		assert.Equal(t, rereadWholeOffset, got.Class, "an hour's difference")
+	})
+	t.Run("the EXIF time wins, and the name is shown", func(t *testing.T) {
+		row := photoRow(&stored)
+		row.filename = motorola
+		got := photoReread(t, exiftest.Photo{DateTimeOriginal: "2012:08:24 18:14:22"}, row, warsaw)
+
+		require.NotNil(t, got.RuleToday)
+		assert.Equal(t, captureSrcExifOriginal, got.RuleToday.Source)
+		assert.Equal(t, ptr("2012-08-24 18:14:24"), got.File.NameWall)
+	})
+	t.Run("a video's container time wins", func(t *testing.T) {
+		row := videoRow(&stored, "")
+		row.filename = "VID_20120824_181424.mp4"
+		got := callFile(t, newRereadHandler(row, &stubRereadStorage{}, warsaw, probeReturns(ingest.VideoProbeResult{CreatedAt: &created})))
+
+		require.NotNil(t, got.RuleToday)
+		assert.Equal(t, captureSrcContainer, got.RuleToday.Source)
+		assert.Equal(t, ptr("2012-08-24 18:14:24"), got.File.NameWall)
+		assert.Equal(t, []string{checkVideoTimeMayBeEnd}, checkIDs(got))
+	})
+	t.Run("a video without a container time", func(t *testing.T) {
+		row := videoRow(&stored, "")
+		row.filename = "VID_20120824_181424.mp4"
+		got := callFile(t, newRereadHandler(row, &stubRereadStorage{}, warsaw, probeReturns(ingest.VideoProbeResult{CodecName: "h264"})))
+
+		require.NotNil(t, got.RuleToday)
+		assert.Equal(t, captureSrcFilename, got.RuleToday.Source)
+		assert.Equal(t, rereadSame, got.Class)
+		assert.Empty(t, checkIDs(got), "the end-of-clip remark is the container's")
+	})
+	t.Run("a name without a date and time", func(t *testing.T) {
+		got := photoReread(t, exiftest.Photo{}, photoRow(&stored), warsaw)
+		assert.Nil(t, got.RuleToday)
+		assert.Nil(t, got.File.NameWall)
+		assert.Equal(t, rereadNoFileTime, got.Class)
 	})
 }
 
