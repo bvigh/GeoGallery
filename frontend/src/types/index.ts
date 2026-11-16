@@ -305,6 +305,10 @@ export interface ChallengeRoundResult {
   media_id: string | null;
   media_type: string | null;
   url: string | null;
+  // The item's 360° default view, as its round had it; null without one.
+  initial_yaw: number | null;
+  initial_pitch: number | null;
+  initial_fov: number | null;
   actual_lat: number | null;
   actual_lng: number | null;
   actual_date: string | null;

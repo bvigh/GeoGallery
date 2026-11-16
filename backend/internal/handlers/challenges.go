@@ -136,16 +136,21 @@ type challengeGuess struct {
 // For a round whose item the caller cannot read, only Position, Number and Available (false) are
 // set: the answer and the guesses around it would give its location away.
 type challengeResult struct {
-	Position   int              `json:"position"`
-	Number     int              `json:"number"`
-	Available  bool             `json:"available"`
-	MediaID    *string          `json:"media_id"`
-	MediaType  *string          `json:"media_type"`
-	URL        *string          `json:"url"`
-	ActualLat  *float64         `json:"actual_lat"`
-	ActualLng  *float64         `json:"actual_lng"`
-	ActualDate *string          `json:"actual_date"`
-	Guesses    []challengeGuess `json:"guesses"`
+	Position  int     `json:"position"`
+	Number    int     `json:"number"`
+	Available bool    `json:"available"`
+	MediaID   *string `json:"media_id"`
+	MediaType *string `json:"media_type"`
+	URL       *string `json:"url"`
+	// The item's 360° default view, as its round had it, so the results open the item full size
+	// on the same view. Null when the owner never set one.
+	InitialYaw   *float64         `json:"initial_yaw"`
+	InitialPitch *float64         `json:"initial_pitch"`
+	InitialFov   *float64         `json:"initial_fov"`
+	ActualLat    *float64         `json:"actual_lat"`
+	ActualLng    *float64         `json:"actual_lng"`
+	ActualDate   *string          `json:"actual_date"`
+	Guesses      []challengeGuess `json:"guesses"`
 }
 
 type challengeDetail struct {
@@ -538,6 +543,7 @@ func (h *ChallengeHandler) Get(w http.ResponseWriter, r *http.Request) {
 			}
 			res.Available = true
 			res.MediaID, res.MediaType, res.URL = &it.mediaID, &it.mediaType, &url
+			res.InitialYaw, res.InitialPitch, res.InitialFov = it.yaw, it.pitch, it.fov
 			res.ActualLat, res.ActualLng, res.ActualDate = &it.lat, &it.lng, it.takenAt
 			if g := guesses[it.position]; g != nil {
 				res.Guesses = g

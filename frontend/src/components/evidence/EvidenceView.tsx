@@ -9,6 +9,7 @@ import { PointCard, type PickedPoint } from "@/components/evidence/PointCard";
 import { TimeCard } from "@/components/evidence/TimeCard";
 import { keyBelongsToDialog } from "@/lib/dialogKeys";
 import { ITEM_GONE, leadSentence, NOT_OWNER, REMATCH_FAILED, stateBadge } from "@/lib/evidence";
+import { isTextField, keepTabInside } from "@/lib/focusTrap";
 import { useCloseOnBack } from "@/lib/history";
 import { galleryRoute, routeUrl } from "@/lib/routes";
 import { timeSavedMessage } from "@/lib/timeEdit";
@@ -44,31 +45,6 @@ const actionButton =
   "rounded border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50 touch:min-h-11";
 const tripLink =
   "inline-flex items-center justify-center rounded border border-border px-2 py-1 text-sm hover:bg-muted touch:min-h-11 touch:min-w-11";
-
-const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-// The page behind the view is covered but still in the tab order, and reaching its location editor
-// would let an arrow key change the item under that editor.
-function keepTabInside(e: KeyboardEvent, root: HTMLElement | null) {
-  if (!root) return;
-  const items = root.querySelectorAll<HTMLElement>(FOCUSABLE);
-  const first = items[0];
-  const last = items[items.length - 1];
-  const active = document.activeElement;
-  if (!first || !last) {
-    e.preventDefault();
-  } else if (!root.contains(active)) {
-    e.preventDefault();
-    first.focus();
-  } else if (e.shiftKey && (active === first || active === root)) {
-    e.preventDefault();
-    last.focus();
-  } else if (!e.shiftKey && active === last) {
-    e.preventDefault();
-    first.focus();
-  }
-}
 
 // A click the browser handles itself: a new tab or window (Ctrl, Cmd, Shift or a middle click).
 function opensElsewhere(e: MouseEvent): boolean {
@@ -118,16 +94,6 @@ function TripRow({
         </a>
       </span>
     </section>
-  );
-}
-
-function isTextField(target: EventTarget | null): boolean {
-  const element = target as HTMLElement | null;
-  return (
-    element?.tagName === "INPUT" ||
-    element?.tagName === "TEXTAREA" ||
-    element?.tagName === "SELECT" ||
-    element?.isContentEditable === true
   );
 }
 
@@ -221,6 +187,8 @@ export function EvidenceView({
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (keyBelongsToDialog(e)) return;
+      // Reaching the location editor of the page behind would let an arrow key change the item
+      // under that editor.
       if (e.key === "Tab") {
         keepTabInside(e, rootRef.current);
         return;

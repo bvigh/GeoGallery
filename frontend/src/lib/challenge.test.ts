@@ -4,9 +4,13 @@ import {
   challengeStatus,
   formatKm,
   formatPoints,
+  FRESH_URLS_MS,
   guessDateNote,
   guessSummary,
   initialsOf,
+  ITEM_DELETED,
+  ITEM_NOT_SHARED,
+  itemKind,
   memberInitials,
   memberLabel,
   offerAlbums,
@@ -16,12 +20,14 @@ import {
   playersLabel,
   playLabel,
   randomChallengeName,
+  RESULTS_HIDDEN,
+  roundItemState,
   standings,
   untickedAlbumsNote,
   type ChallengeFilters,
 } from "@/lib/challenge";
 import { emptyFilters } from "@/lib/filters";
-import type { Album, ChallengeMember } from "@/types";
+import type { Album, ChallengeMember, ChallengeRoundResult } from "@/types";
 
 function member(user_id: string, name: string | null, played = 0, score = 0): ChallengeMember {
   return { user_id, name, is_owner: false, played, score };
@@ -350,5 +356,67 @@ describe("untickedAlbumsNote", () => {
     [["Family", "Iceland 2024", "Tatra"], "Unticked “Family”, “Iceland 2024” and “Tatra”: not every player is in them."],
   ])("%j", (names, want) => {
     expect(untickedAlbumsNote(names.map((name) => ({ name })))).toBe(want);
+  });
+});
+
+describe("itemKind", () => {
+  it.each<[string | null, string]>([
+    ["photo", "photo"],
+    ["video", "video"],
+    ["photo_360", "360° photo"],
+    ["video_360", "360° video"],
+    [null, "photo"],
+  ])("%s is a %s", (mediaType, kind) => {
+    expect(itemKind(mediaType)).toBe(kind);
+  });
+});
+
+describe("FRESH_URLS_MS", () => {
+  it("leaves at least 5 of the 15 minutes a presigned URL lasts", () => {
+    expect(15 * 60 * 1000 - FRESH_URLS_MS).toBeGreaterThanOrEqual(5 * 60 * 1000);
+  });
+});
+
+describe("roundItemState", () => {
+  function result(position: number, extra: Partial<ChallengeRoundResult> = {}): ChallengeRoundResult {
+    return {
+      position,
+      number: position,
+      available: true,
+      media_id: `m${position}`,
+      media_type: "photo",
+      url: `https://s3.example/m${position}`,
+      initial_yaw: null,
+      initial_pitch: null,
+      initial_fov: null,
+      actual_lat: 47.5,
+      actual_lng: 19,
+      actual_date: null,
+      guesses: [],
+      ...extra,
+    };
+  }
+  const unreadable = (position: number) =>
+    result(position, { available: false, media_id: null, media_type: null, url: null, actual_lat: null, actual_lng: null });
+
+  it("shows the round at the position, whatever its number now", () => {
+    const fresh = [result(1), result(3, { number: 2 })];
+    expect(roundItemState(fresh, 3)).toEqual({ status: "shown", result: fresh[1] });
+  });
+
+  it("says the item was deleted when its round has gone from the results", () => {
+    expect(roundItemState([result(1), result(3, { number: 2 })], 2)).toEqual({ status: "gone", reason: ITEM_DELETED });
+    expect(roundItemState([], 1)).toEqual({ status: "gone", reason: ITEM_DELETED });
+  });
+
+  it("says the item is no longer shared when the round is unavailable", () => {
+    expect(roundItemState([result(1), unreadable(2)], 2)).toEqual({ status: "gone", reason: ITEM_NOT_SHARED });
+    // Never an item without a URL or a type to show it with.
+    expect(roundItemState([result(1, { url: null })], 1)).toEqual({ status: "gone", reason: ITEM_NOT_SHARED });
+    expect(roundItemState([result(1, { media_type: null })], 1)).toEqual({ status: "gone", reason: ITEM_NOT_SHARED });
+  });
+
+  it("says the results are hidden while a round is the player's to play again", () => {
+    expect(roundItemState(null, 1)).toEqual({ status: "gone", reason: RESULTS_HIDDEN });
   });
 });

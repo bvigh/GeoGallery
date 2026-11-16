@@ -1,8 +1,8 @@
 import { useEffect, useRef, type RefObject, type SyntheticEvent } from "react";
 import { keyBelongsToDialog } from "@/lib/dialogKeys";
 
-// Space and M in the full-size video players: the gallery, the Map page's view, the Game round and
-// Video360.
+// Space and M in the full-size video players: the gallery, the Map page's view, the Game round, a
+// challenge round's item full size and Video360.
 
 export interface VideoKeyActions {
   togglePlayback: () => void;

@@ -88,6 +88,9 @@ function round(number: number, guesses: ChallengeGuess[], extra: Partial<Challen
     media_id: `m${number}`,
     media_type: "photo",
     url: `https://s3.example/m${number}`,
+    initial_yaw: null,
+    initial_pitch: null,
+    initial_fov: null,
     actual_lat: 47.5,
     actual_lng: 19.04,
     actual_date: "2024-05-02 12:00:00+00",
@@ -103,11 +106,16 @@ const hidden: ChallengeRoundResult = {
   media_id: null,
   media_type: null,
   url: null,
+  initial_yaw: null,
+  initial_pitch: null,
+  initial_fov: null,
   actual_lat: null,
   actual_lng: null,
   actual_date: null,
   guesses: [],
 };
+
+const onOpenItem = vi.fn();
 
 const results: ChallengeRoundResult[] = [
   round(1, [
@@ -139,7 +147,7 @@ describe("ChallengeResults", () => {
   });
 
   it("shows the first round: the actual location, a pin per guess and a dashed line from each", () => {
-    render(<ChallengeResults results={results} members={members} meId={ME} />);
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
 
     expect(screen.getByRole("heading", { name: "Round 1 of 3" })).toBeInTheDocument();
     expect(markers().map((m) => m.dataset.position)).toEqual(["47.52,19.05", "48.2,16.37", "-33.9,151.2", "47.5,19.04"]);
@@ -153,7 +161,7 @@ describe("ChallengeResults", () => {
   });
 
   it("draws the actual location above the pins, and names it", () => {
-    render(<ChallengeResults results={results} members={members} meId={ME} />);
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
     const actual = screen.getByTitle("Actual location");
     expect(actual.dataset.zIndexOffset).toBe(String(TOP_MARKER_Z_INDEX_OFFSET));
     for (const marker of markers().filter((m) => m !== actual)) expect(marker.dataset.zIndexOffset).toBe("0");
@@ -161,7 +169,7 @@ describe("ChallengeResults", () => {
   });
 
   it("writes each player's initials in their pin: the viewer's orange, everyone else's blue", () => {
-    render(<ChallengeResults results={results} members={members} meId={ME} />);
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
 
     const mine = pinOf("Me Myself");
     expect(mine.textContent).toBe("MM");
@@ -185,7 +193,7 @@ describe("ChallengeResults", () => {
       { user_id: "u2", name: "Bea Vigh", is_owner: false, played: 1, score: 2 },
     ];
     render(
-      <ChallengeResults results={[round(1, [guess("u1", 1, 2), guess("u2", 3, 4)])]} members={family} meId="u1" />,
+      <ChallengeResults results={[round(1, [guess("u1", 1, 2), guess("u2", 3, 4)])]} members={family} meId="u1" onOpenItem={onOpenItem} />,
     );
     expect(pinOf("Balázs Vigh").textContent).toBe("Ba");
     expect(pinOf("Bea Vigh").textContent).toBe("Be");
@@ -196,7 +204,7 @@ describe("ChallengeResults", () => {
       { user_id: "u1", name: '<img src=x onerror="alert(1)"> <b>Bob</b>', is_owner: true, played: 1, score: 1 },
     ];
     const { container } = render(
-      <ChallengeResults results={[round(1, [guess("u1", 1, 2)])]} members={hostile} meId="other" />,
+      <ChallengeResults results={[round(1, [guess("u1", 1, 2)])]} members={hostile} meId="other" onOpenItem={onOpenItem} />,
     );
     expect(container.querySelector("img[src='x']")).toBeNull();
     expect(container.querySelector("b")).toBeNull();
@@ -207,7 +215,7 @@ describe("ChallengeResults", () => {
   });
 
   it("says in a pin's popup who guessed, how far off and for how many points", () => {
-    render(<ChallengeResults results={results} members={members} meId={ME} />);
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
     const popup = (name: string) => within(screen.getByTitle(name)).getByTestId("popup");
     expect(popup("Me Myself")).toHaveTextContent("Me Myself3.3 km away · 4,813 ptsGuessed 2024-05-11, 9 days off");
     expect(popup("Alice Smith")).toHaveTextContent("Alice Smith214 km away · 2,100 pts");
@@ -217,7 +225,7 @@ describe("ChallengeResults", () => {
   });
 
   it("lists the round's guesses in the order given, then the players without one", () => {
-    render(<ChallengeResults results={results} members={members} meId={ME} />);
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
     const rows = within(screen.getByRole("list", { name: "Guesses of round 1" })).getAllByRole("listitem");
     expect(rows.map((r) => r.textContent)).toEqual([
       "MMMe Myself (you)Guessed 2024-05-11, 9 days off3.3 km away · 4,813 pts",
@@ -228,7 +236,7 @@ describe("ChallengeResults", () => {
   });
 
   it("fits the map to the actual location and the guesses, once per round", async () => {
-    const { rerender } = render(<ChallengeResults results={results} members={members} meId={ME} />);
+    const { rerender } = render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
     expect(leaflet.map.fitBounds).toHaveBeenCalledTimes(1);
     const [bounds, options] = leaflet.map.fitBounds.mock.calls[0];
     expect(bounds.getSouthWest()).toMatchObject({ lat: -33.9, lng: 16.37 });
@@ -236,7 +244,7 @@ describe("ChallengeResults", () => {
     expect(options).toEqual({ padding: [40, 40], maxZoom: 12, animate: false });
 
     // The same results again (a reload of the challenge) leave the map where the player put it.
-    rerender(<ChallengeResults results={structuredClone(results)} members={members} meId={ME} />);
+    rerender(<ChallengeResults results={structuredClone(results)} members={members} meId={ME} onOpenItem={onOpenItem} />);
     expect(leaflet.map.fitBounds).toHaveBeenCalledTimes(1);
 
     await userEvent.click(screen.getByRole("button", { name: "Round 2" }));
@@ -246,12 +254,12 @@ describe("ChallengeResults", () => {
 
   it("does not fit a map without room", () => {
     leaflet.size = { x: 60, y: 300 };
-    render(<ChallengeResults results={results} members={members} meId={ME} />);
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
     expect(leaflet.map.fitBounds).not.toHaveBeenCalled();
   });
 
   it("steps through the rounds with the numbers and the arrows", async () => {
-    render(<ChallengeResults results={results} members={members} meId={ME} />);
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
     const previous = screen.getByRole("button", { name: "Previous round" });
     const next = screen.getByRole("button", { name: "Next round" });
     expect(previous).toBeDisabled();
@@ -271,7 +279,7 @@ describe("ChallengeResults", () => {
   });
 
   it("shows nothing of a round whose item is no longer shared with the viewer", async () => {
-    render(<ChallengeResults results={results} members={members} meId={ME} />);
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
     await userEvent.click(screen.getByRole("button", { name: "Round 3" }));
     expect(screen.getByRole("heading", { name: "Round 3 of 3" })).toBeInTheDocument();
     expect(
@@ -279,31 +287,66 @@ describe("ChallengeResults", () => {
     ).toBeInTheDocument();
     expect(screen.queryByTestId("map")).toBeNull();
     expect(screen.queryByRole("list")).toBeNull();
+    // Nothing to open either: it has no URL.
+    expect(screen.queryByRole("button", { name: /full size/ })).toBeNull();
+    expect(document.querySelector("img, video")).toBeNull();
   });
 
-  it("shows the round's item small: a photo as an image, a video as its first frame without controls", async () => {
-    const { container } = render(<ChallengeResults results={results} members={members} meId={ME} />);
-    expect(screen.getByRole("img", { name: "Round 1's photo" })).toHaveAttribute("src", "https://s3.example/m1");
+  it("shows the round's item small in a button: a photo as an image, a video as its first frame without controls", async () => {
+    const { container } = render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
+    const photo = screen.getByRole("button", { name: "Open round 1's photo full size" });
+    const img = photo.querySelector("img")!;
+    expect(img).toHaveAttribute("src", "https://s3.example/m1");
+    // The button names it; the full-size 360° viewers load the same URL in CORS mode.
+    expect(img).toHaveAttribute("alt", "");
+    expect(img).toHaveAttribute("crossorigin", "anonymous");
     expect(container.querySelector("video")).toBeNull();
 
     await userEvent.click(screen.getByRole("button", { name: "Round 2" }));
-    const video = container.querySelector("video")!;
+    const clip = screen.getByRole("button", { name: "Open round 2's video full size" });
+    const video = clip.querySelector("video")!;
     expect(video).toHaveAttribute("src", "https://s3.example/m2");
     expect(video).not.toHaveAttribute("controls");
     expect(video).toHaveAttribute("preload", "metadata");
+    expect(video).toHaveAttribute("crossorigin", "anonymous");
     expect(screen.getByText("Actual location")).toBeInTheDocument();
     expect(screen.queryByText(/taken/)).toBeNull();
   });
 
+  it("opens the round's item full size from its thumbnail", async () => {
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
+    await userEvent.click(screen.getByRole("button", { name: "Open round 1's photo full size" }));
+    expect(onOpenItem).toHaveBeenCalledTimes(1);
+    expect(onOpenItem).toHaveBeenCalledWith(results[0]);
+
+    await userEvent.click(screen.getByRole("button", { name: "Next round" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open round 2's video full size" }));
+    expect(onOpenItem).toHaveBeenLastCalledWith(results[1]);
+  });
+
+  it.each([
+    { media_type: "photo_360", name: "Open round 1's 360° photo full size" },
+    { media_type: "video_360", name: "Open round 1's 360° video full size" },
+  ])("names a $media_type's button by its kind", ({ media_type, name }) => {
+    render(<ChallengeResults results={[round(1, [], { media_type })]} members={members} meId={ME} onOpenItem={onOpenItem} />);
+    expect(screen.getByRole("button", { name })).toBeInTheDocument();
+  });
+
+  it("gives the thumbnail a 44 px target on touch", () => {
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
+    const classes = screen.getByRole("button", { name: "Open round 1's photo full size" }).className.split(" ");
+    expect(classes).toEqual(expect.arrayContaining(["touch:min-h-11", "touch:min-w-11"]));
+  });
+
   it("leaves out the guess of a player who has left", () => {
     const one = [round(1, [guess("u-gone", 1, 2), guess(ME, 3, 4)])];
-    render(<ChallengeResults results={one} members={members} meId={ME} />);
+    render(<ChallengeResults results={one} members={members} meId={ME} onOpenItem={onOpenItem} />);
     expect(markers().map((m) => m.dataset.position)).toEqual(["3,4", "47.5,19.04"]);
     expect(screen.getAllByTestId("line")).toHaveLength(1);
   });
 
   it("says so when no round is left", () => {
-    render(<ChallengeResults results={[]} members={members} meId={ME} />);
+    render(<ChallengeResults results={[]} members={members} meId={ME} onOpenItem={onOpenItem} />);
     expect(screen.getByText("This challenge has no rounds left: its items were deleted.")).toBeInTheDocument();
     expect(screen.queryByTestId("map")).toBeNull();
   });
@@ -311,7 +354,7 @@ describe("ChallengeResults", () => {
   // index.css gives every Leaflet container height: 100%, which beats a height class on the map
   // itself: in an auto-height grid row the map would be 0 px tall.
   it("sizes the map by its wrapper, which the map fills", () => {
-    render(<ChallengeResults results={results} members={members} meId={ME} />);
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
     const map = screen.getByTestId("map");
     expect(map.className.split(" ")).toEqual(expect.arrayContaining(["h-full", "w-full"]));
     expect(map.className).not.toMatch(/\bh-(72|96)\b/);
@@ -320,7 +363,7 @@ describe("ChallengeResults", () => {
   });
 
   it("keeps Leaflet's layers inside the map and its credit in a new tab", () => {
-    render(<ChallengeResults results={results} members={members} meId={ME} />);
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
     expect(screen.getByTestId("map").className.split(" ")).toContain("isolate");
     const credit = screen.getByTestId("tile-credit").dataset.attribution!;
     expect(credit).toContain('target="_blank"');
@@ -328,7 +371,7 @@ describe("ChallengeResults", () => {
   });
 
   it("gives the round buttons a 44 px target on touch", () => {
-    render(<ChallengeResults results={results} members={members} meId={ME} />);
+    render(<ChallengeResults results={results} members={members} meId={ME} onOpenItem={onOpenItem} />);
     for (const name of ["Previous round", "Round 1", "Round 3", "Next round"]) {
       const classes = screen.getByRole("button", { name }).className.split(" ");
       expect(classes).toEqual(expect.arrayContaining(["touch:h-11", "touch:w-11"]));

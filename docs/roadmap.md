@@ -98,7 +98,7 @@ Data repairs on the existing deployments are operator work, not issues: the far 
 
 #39 is built for people with an account: a challenge's players are picked from the user list, its five items are drawn from what all of them can already see, and its link (`/game/<id>`) opens it for them alone. Its last point, challenges for people without an account, is share links (#43) and waits for that decision.
 
-#81 to #87 are what #39's pull request (#80) left. #81 and #83 are one rule seen from the dialog and from the server; #83 closes the limit #80 accepted. #86 waits for evidence that deleting finished challenges brings repeats.
+#81 to #87 are what #39's pull request (#80) left. #81 and #83 are one rule seen from the dialog and from the server; #83 closes the limit #80 accepted. #86 waits for evidence that deleting finished challenges brings repeats. #82 is built: the results open a round's photo or video full size.
 
 ## Public release
 

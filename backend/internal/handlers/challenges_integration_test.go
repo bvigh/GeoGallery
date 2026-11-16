@@ -564,6 +564,70 @@ func TestChallenge_AnswerIsFixedWhenMade(t *testing.T) {
 	assert.Equal(t, rounds[0].answer.takenAt, d.Results[0].ActualDate)
 }
 
+// A finished player opens a round's item full size from the results, so a readable result carries
+// what the round carried to show it: the media type, a URL and the item's 360° default view.
+func TestChallenge_ResultsCarryTheItemsView(t *testing.T) {
+	f := newChallengeFixture(t)
+	c := f.create(t, f.alice, "?owner=mine", f.withBob("Views"))
+	rounds := f.rounds(t, c.ID)
+	// The last four items are 360° photos with a view of their own; the first keeps none.
+	for i, r := range rounds[1:] {
+		f.exec(t, `UPDATE media SET media_type = 'photo_360', initial_yaw = $2, initial_pitch = -0.25, initial_fov = $3
+			WHERE id = $1`, r.mediaID, 0.5*float64(i+1), 60+float64(i))
+	}
+
+	type view struct{ yaw, pitch, fov *float64 }
+	shown := map[int]view{}
+	for pos := 1; pos <= 5; pos++ {
+		d := f.get(t, f.bob, c.ID)
+		require.NotNil(t, d.Round)
+		require.Equal(t, pos, d.Round.Position)
+		shown[pos] = view{d.Round.InitialYaw, d.Round.InitialPitch, d.Round.InitialFov}
+		f.mustGuess(t, f.bob, c.ID, pos, 48, 17, "")
+	}
+
+	rec := do(t, f.api, f.bob, http.MethodGet, "/api/challenges/"+c.ID, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var d challengeDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &d))
+	require.Len(t, d.Results, 5)
+
+	first := d.Results[0]
+	require.True(t, first.Available)
+	assert.Equal(t, ptr("photo"), first.MediaType)
+	assert.Nil(t, first.InitialYaw)
+	assert.Nil(t, first.InitialPitch)
+	assert.Nil(t, first.InitialFov)
+	for i, res := range d.Results[1:] {
+		require.True(t, res.Available)
+		assert.Equal(t, ptr("photo_360"), res.MediaType)
+		require.NotNil(t, res.URL)
+		assert.True(t, strings.HasPrefix(*res.URL, "https://s3.test/media/"), *res.URL)
+		require.NotNil(t, res.InitialYaw)
+		require.NotNil(t, res.InitialPitch)
+		require.NotNil(t, res.InitialFov)
+		assert.InDelta(t, 0.5*float64(i+1), *res.InitialYaw, 1e-9)
+		assert.InDelta(t, -0.25, *res.InitialPitch, 1e-9)
+		assert.InDelta(t, 60+float64(i), *res.InitialFov, 1e-9)
+		assert.Equal(t, shown[res.Position], view{res.InitialYaw, res.InitialPitch, res.InitialFov},
+			"the result opens on the view the round showed")
+	}
+
+	// On the wire: always the three keys, null without a view.
+	var raw struct {
+		Results []map[string]any `json:"results"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	for _, key := range []string{"initial_yaw", "initial_pitch", "initial_fov"} {
+		value, ok := raw.Results[0][key]
+		assert.True(t, ok, key)
+		assert.Nil(t, value, key)
+	}
+	assert.Equal(t, 0.5, raw.Results[1]["initial_yaw"])
+	assert.Equal(t, -0.25, raw.Results[1]["initial_pitch"])
+	assert.Equal(t, 60.0, raw.Results[1]["initial_fov"])
+}
+
 // A challenge is no second way to read media: a round whose item a player can no longer read
 // through an album is neither shown nor guessable, and its answer and guesses are withheld.
 func TestChallenge_NeverShowsMediaThePlayerCannotRead(t *testing.T) {
@@ -574,6 +638,8 @@ func TestChallenge_NeverShowsMediaThePlayerCannotRead(t *testing.T) {
 	hidden := rounds[0]
 	var hiddenKey string
 	require.NoError(t, f.pool.QueryRow(ctx, `SELECT storage_key FROM media WHERE id = $1`, hidden.mediaID).Scan(&hiddenKey))
+	// A 360° default view of its own, which a readable result would carry.
+	f.exec(t, `UPDATE media SET initial_yaw = 1.25, initial_pitch = 0.5, initial_fov = 75 WHERE id = $1`, hidden.mediaID)
 
 	// Alice takes the first round's photo out of the album: Bob no longer reads it.
 	f.exec(t, `DELETE FROM album_media WHERE album_id = $1 AND media_id = $2`, f.family, hidden.mediaID)
@@ -597,7 +663,7 @@ func TestChallenge_NeverShowsMediaThePlayerCannotRead(t *testing.T) {
 		f.mustGuess(t, f.alice, c.ID, 1, hidden.answer.lat, hidden.answer.lng, "")
 	})
 
-	t.Run("finished without it, the player gets no answer, guess or key of it", func(t *testing.T) {
+	t.Run("finished without it, the player gets no answer, guess, key or view of it", func(t *testing.T) {
 		for pos := 2; pos <= 5; pos++ {
 			f.mustGuess(t, f.bob, c.ID, pos, 48, 17, "")
 		}
