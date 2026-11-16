@@ -235,8 +235,13 @@ async function adminCreateInvite(role: "user" | "admin"): Promise<string> {
   return data.url;
 }
 
-function listAlbums(): Promise<Album[]> {
-  return getList<Album>("/albums");
+// The albums the caller belongs to, newest first. With memberIds, only those every one of these
+// users is in too: the New challenge dialog's albums. A 404 then means one of them is no longer an
+// active user. The signal cancels the request when the players change again.
+async function listAlbums(
+  { memberIds = [], signal }: { memberIds?: string[]; signal?: AbortSignal } = {}
+): Promise<Album[]> {
+  return (await getCancellable<Album[] | null>("/albums", signal, { member_id: memberIds })) ?? [];
 }
 
 function createAlbum(name: string): Promise<Album> {

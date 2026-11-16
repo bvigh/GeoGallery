@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -23,6 +24,9 @@ const (
 	maxAlbumMediaIDs  = 5000
 	// 5000 quoted UUIDs are about 200 KB, well over maxBodyBytes.
 	maxAlbumMediaBodyBytes = 1 << 20
+	// maxAlbumMemberFilter is the most users GET /api/albums' member_id may name besides the
+	// caller: the New challenge dialog's filter, so a challenge's other players.
+	maxAlbumMemberFilter = maxChallengePlayers - 1
 )
 
 // AlbumHandler manages albums: who is in them and what they hold. Whether a member can read an
@@ -189,9 +193,74 @@ func isForeignKeyViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }
 
+// parseAlbumMemberFilter reads GET /api/albums' member_id values: the users who must all be in an
+// album for it to be listed, in canonical form, each once. The caller's own ID is dropped, since
+// the route lists only albums the caller is in.
+func parseAlbumMemberFilter(q url.Values, me string) ([]string, error) {
+	members := []string{}
+	seen := map[string]bool{me: true}
+	for _, raw := range q["member_id"] {
+		id, ok := auth.CanonicalUUID(raw)
+		if !ok {
+			return nil, errors.New("invalid member_id")
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		members = append(members, id)
+	}
+	if len(members) > maxAlbumMemberFilter {
+		return nil, fmt.Errorf("member_id may name at most %d other users", maxAlbumMemberFilter)
+	}
+	return members, nil
+}
+
+// allActiveUsers reports whether every one of ids (canonical, each once) is an active, claimed
+// user: someone who can join an album or play in a challenge, as GET /api/users lists them.
+func allActiveUsers(ctx context.Context, db rowQuerier, ids []string) (bool, error) {
+	var active int
+	if err := db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM users
+		WHERE id = ANY($1::uuid[]) AND issuer IS NOT NULL AND disabled_at IS NULL`, ids).Scan(&active); err != nil {
+		return false, err
+	}
+	return active == len(ids), nil
+}
+
+// List returns the albums the caller is a member of, newest first. member_id (repeatable) keeps
+// only the albums every one of those users is in too: the New challenge dialog offers just those,
+// because an album one player is not in adds only what that player reads some other way. Each
+// must be an active, claimed user, as a challenge's players must be (else 404). The filter only
+// narrows: an album the caller is not in stays out, whoever else is in it.
 func (h *AlbumHandler) List(w http.ResponseWriter, r *http.Request) {
-	me := auth.MustUser(r.Context()).ID
-	rows, err := h.db.Query(r.Context(), albumSelect+` ORDER BY a.created_at DESC, a.id`, me)
+	ctx := r.Context()
+	me := auth.MustUser(ctx).ID
+	members, err := parseAlbumMemberFilter(r.URL.Query(), me)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	query, args := albumSelect, []any{me}
+	if len(members) > 0 {
+		active, err := allActiveUsers(ctx, h.db, members)
+		if err != nil {
+			slog.Error("albums: list member lookup failed", "err", err)
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		if !active {
+			http.Error(w, "user not found", http.StatusNotFound)
+			return
+		}
+		// Each user is named once and is in an album at most once, so the count is all of them
+		// exactly when every one of them is in it.
+		query += ` WHERE (SELECT COUNT(*) FROM album_members mm
+			WHERE mm.album_id = a.id AND mm.user_id = ANY($2::uuid[])) = cardinality($2::uuid[])`
+		args = append(args, members)
+	}
+
+	rows, err := h.db.Query(ctx, query+` ORDER BY a.created_at DESC, a.id`, args...)
 	if err != nil {
 		slog.Error("albums: list query failed", "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)

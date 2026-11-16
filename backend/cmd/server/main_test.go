@@ -164,6 +164,7 @@ func TestRouter_AuthWiring(t *testing.T) {
 		{"token adds album media", http.MethodPost, "/api/albums/" + badID + "/media", true, "", nil, http.StatusNotFound},
 		{"token removes album media", http.MethodPost, "/api/albums/" + badID + "/media/remove", true, "", nil, http.StatusNotFound},
 		{"token lists media albums", http.MethodGet, "/api/media/" + badID + "/albums", true, "", nil, http.StatusOK},
+		{"token lists albums, malformed member", http.MethodGet, "/api/albums?member_id=" + badID, true, "", nil, http.StatusBadRequest},
 		{"token checks known hashes", http.MethodPost, "/api/media/known-hashes", true, "", nil, http.StatusBadRequest},
 		{"anonymous known hashes", http.MethodPost, "/api/media/known-hashes", false, "", nil, http.StatusUnauthorized},
 		// No multipart body: 400 from the handler shows the route is wired and open to tokens.

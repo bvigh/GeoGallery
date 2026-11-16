@@ -48,6 +48,7 @@ test("alice makes a challenge for herself and bob, both play it once and compare
   const alice = await aliceContext.newPage();
   const bob = await bobContext.newPage();
   let albumId: string | null = null;
+  let aloneId: string | null = null;
   let challengeId: string | null = null;
   try {
     // Setup through the API: five located photos of alice's, shared with bob through an album.
@@ -67,21 +68,32 @@ test("alice makes a challenge for herself and bob, both play it once and compare
     expect((await alice.request.post(`/api/albums/${albumId}/members`, { data: { user_id: bobId } })).status()).toBe(204);
     const added = await alice.request.post(`/api/albums/${albumId}/media`, { data: { media_ids: ids } });
     expect(await added.json()).toEqual({ added: ROUNDS });
+    // And an album bob is not in.
+    const alone = await alice.request.post("/api/albums", { data: { name: `Alone album ${stamp}` } });
+    expect(alone.status()).toBe(201);
+    aloneId = (await alone.json()).id;
 
     // Alice makes the challenge on the Game page: the players, then what the items are drawn from
-    // (the album, through the dialog's own filters), then a name. It opens at its own URL.
+    // (the album, through the dialog's own filters), then a name. It opens at its own URL. The
+    // dialog offers only the albums every player is in: ticking bob takes her other album off the
+    // list, and unticks it.
     await alice.goto("/game");
     await alice.getByRole("button", { name: "New challenge…" }).click();
     const dialog = alice.getByRole("dialog", { name: "New challenge" });
+    const items = dialog.getByRole("group", { name: "Items" });
+    const aloneBox = items.getByRole("checkbox", { name: `Alone album ${stamp}` });
+    await aloneBox.check();
     await dialog.getByRole("checkbox", { name: /Bob Test/ }).check();
-    await dialog.getByRole("group", { name: "Items" }).getByRole("checkbox", { name: `Challenge album ${stamp}` }).check();
+    await expect(aloneBox).toHaveCount(0);
+    await expect(dialog.getByRole("status")).toHaveText(`Unticked “Alone album ${stamp}”: not every player is in it.`);
+    await items.getByRole("checkbox", { name: `Challenge album ${stamp}` }).check();
     await dialog.getByRole("textbox", { name: "Name (optional)" }).fill(name);
     const created = alice.waitForResponse(
       (r) => r.request().method() === "POST" && new URL(r.url()).pathname === "/api/challenges",
     );
     await dialog.getByRole("button", { name: "Create challenge" }).click();
     expect((await created).status()).toBe(201);
-    // The filters chosen in the dialog went with the request.
+    // The filters chosen in the dialog went with the request, without the album it unticked.
     expect(new URL((await created).url()).searchParams.getAll("album_id")).toEqual([albumId]);
     challengeId = (await (await created).json()).id;
 
@@ -166,6 +178,7 @@ test("alice makes a challenge for herself and bob, both play it once and compare
     // Teardown through the API, also for a test that failed half-way.
     if (challengeId) await alice.request.delete(`/api/challenges/${challengeId}`).catch(() => {});
     if (albumId) await alice.request.delete(`/api/albums/${albumId}`).catch(() => {});
+    if (aloneId) await alice.request.delete(`/api/albums/${aloneId}`).catch(() => {});
     for (const id of await mediaIds(alice.request, prefix).catch(() => [])) {
       await alice.request.delete(`/api/media/${id}`).catch(() => {});
     }

@@ -9,6 +9,7 @@ import {
   initialsOf,
   memberInitials,
   memberLabel,
+  offerAlbums,
   OTHER_PIN,
   OWN_PIN,
   pinColors,
@@ -16,8 +17,11 @@ import {
   playLabel,
   randomChallengeName,
   standings,
+  untickedAlbumsNote,
+  type ChallengeFilters,
 } from "@/lib/challenge";
-import type { ChallengeMember } from "@/types";
+import { emptyFilters } from "@/lib/filters";
+import type { Album, ChallengeMember } from "@/types";
 
 function member(user_id: string, name: string | null, played = 0, score = 0): ChallengeMember {
   return { user_id, name, is_owner: false, played, score };
@@ -259,5 +263,92 @@ describe("challengeNames", () => {
       expect(name.trim()).toBe(name);
       expect(name.length).toBeLessThanOrEqual(200);
     }
+  });
+});
+
+describe("offerAlbums", () => {
+  const album = (id: string, name: string): Album => ({
+    id,
+    name,
+    owner_id: "u-me",
+    owner_name: "Me",
+    is_owner: true,
+    member_count: 2,
+    media_count: 1,
+    start_date: null,
+    end_date: null,
+    created_at: "2026-01-01T00:00:00Z",
+    last_added_at: null,
+  });
+  const family = album("a1", "Family");
+  const iceland = album("a2", "Iceland 2024");
+  const tatra = album("a3", "Tatra");
+  const all = [family, iceland, tatra];
+  const ticked = (albumIds: string[]) => ({ ...emptyFilters, albumIds, fromDate: "2024-05-01" });
+  const start = (albumIds: string[]): ChallengeFilters => ({ filters: ticked(albumIds), albums: null, unticked: [] });
+  const tick = (c: ChallengeFilters, id: string): ChallengeFilters => ({
+    ...c,
+    filters: { ...c.filters, albumIds: [...c.filters.albumIds, id] },
+  });
+
+  it("unticks a ticked album that is no longer offered, and names it", () => {
+    expect(offerAlbums(start(["a1", "a2"]), [family, tatra], all)).toEqual({
+      filters: ticked(["a1"]),
+      albums: [family, tatra],
+      unticked: [iceland],
+    });
+  });
+
+  it("leaves the filters as they are when every ticked album is still offered", () => {
+    const current = start(["a1"]);
+    const next = offerAlbums(current, [family], all);
+    expect(next.filters).toBe(current.filters);
+    expect(next.unticked).toEqual([]);
+  });
+
+  it("names an album until it is offered again, and never ticks it again", () => {
+    const withBob = offerAlbums(start(["a2"]), [family], all);
+    const withCarolToo = offerAlbums(withBob, [], all);
+    expect(withCarolToo.unticked).toEqual([iceland]);
+    expect(withCarolToo.albums).toEqual([]);
+
+    const back = offerAlbums(withCarolToo, [family, iceland], all);
+    expect(back.unticked).toEqual([]);
+    expect(back.filters.albumIds).toEqual([]);
+  });
+
+  it("adds what a later answer unticks to the albums still named, each once", () => {
+    let c = offerAlbums(start(["a1", "a2"]), [family, tatra], all);
+    c = offerAlbums(tick(c, "a3"), [family], all);
+    expect(c.unticked).toEqual([iceland, tatra]);
+    expect(c.filters.albumIds).toEqual(["a1"]);
+  });
+
+  it("names an album that only an earlier answer offered", () => {
+    const fresh = album("a9", "Made since the Game page loaded");
+    const c = offerAlbums(start([]), [family, fresh], all);
+    expect(offerAlbums(tick(c, "a9"), [family], all).unticked).toEqual([fresh]);
+  });
+
+  it("unticks an album it does not know without naming it", () => {
+    const next = offerAlbums(start(["a-left", "a1"]), [family], all);
+    expect(next.filters.albumIds).toEqual(["a1"]);
+    expect(next.unticked).toEqual([]);
+  });
+
+  it("offers every album for null, keeping the ticks and naming none", () => {
+    const narrowed = offerAlbums(start(["a1", "a2"]), [family], all);
+    expect(offerAlbums(narrowed, null, all)).toEqual({ filters: ticked(["a1"]), albums: null, unticked: [] });
+  });
+});
+
+describe("untickedAlbumsNote", () => {
+  it.each<[string[], string | null]>([
+    [[], null],
+    [["Family"], "Unticked “Family”: not every player is in it."],
+    [["Family", "Iceland 2024"], "Unticked “Family” and “Iceland 2024”: not every player is in them."],
+    [["Family", "Iceland 2024", "Tatra"], "Unticked “Family”, “Iceland 2024” and “Tatra”: not every player is in them."],
+  ])("%j", (names, want) => {
+    expect(untickedAlbumsNote(names.map((name) => ({ name })))).toBe(want);
   });
 });

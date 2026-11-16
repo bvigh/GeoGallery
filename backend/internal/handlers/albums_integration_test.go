@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -277,6 +278,98 @@ func TestAlbums_LastAddedAt(t *testing.T) {
 	got, err := time.Parse(time.RFC3339, lastAdded(t, f.userA)[f.family])
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now(), got, time.Minute, "adding sets it to now")
+}
+
+// GET /api/albums?member_id=… lists the caller's albums that every named user is in too: the
+// albums the New challenge dialog offers. It never lists an album the caller is not in, and it
+// refuses a user who could not play in a challenge, as POST /api/challenges does.
+func TestAlbums_ListByMembers(t *testing.T) {
+	f := newAlbumsFixture(t)
+	withCarol := insertAlbum(t, f.pool, f.userA, "A and carol")
+	insertAlbumMember(t, f.pool, withCarol, f.carol)
+	allThree := insertAlbum(t, f.pool, f.userB, "All three")
+	insertAlbumMember(t, f.pool, allThree, f.userA)
+	insertAlbumMember(t, f.pool, allThree, f.carol)
+	bobAndCarol := insertAlbum(t, f.pool, f.userB, "B and carol") // A is not in it
+	insertAlbumMember(t, f.pool, bobAndCarol, f.carol)
+	erin := createUser(t, f.pool, "erin") // in no album
+	dave := createUser(t, f.pool, "dave")
+	insertAlbumMember(t, f.pool, f.family, dave)
+	disableUser(t, f.pool, dave) // disabled users keep their memberships
+
+	list := func(t *testing.T, user, query string) []albumItem {
+		t.Helper()
+		return decodeAlbums(t, do(t, f.api, user, http.MethodGet, "/api/albums"+query, ""))
+	}
+	// only keeps the rows of an unfiltered list whose ID is one of ids, in the list's order.
+	only := func(all []albumItem, ids ...string) []albumItem {
+		out := []albumItem{}
+		for _, a := range all {
+			if slices.Contains(ids, a.ID) {
+				out = append(out, a)
+			}
+		}
+		require.Len(t, out, len(ids), "every wanted album is in the unfiltered list")
+		return out
+	}
+	ofA, ofB, ofCarol := list(t, f.userA, ""), list(t, f.userB, ""), list(t, f.carol, "")
+	require.ElementsMatch(t, []string{f.family, f.private, withCarol, allThree}, albumIDs(ofA))
+	both := func(a, b string) string { return "?member_id=" + a + "&member_id=" + b }
+
+	tests := []struct {
+		name  string
+		user  string
+		query string
+		want  []albumItem // rows as the unfiltered list has them, in its order
+	}{
+		{"A with B: the albums both are in", f.userA, "?member_id=" + f.userB, only(ofA, f.family, allThree)},
+		{"A with carol: never B's album with carol, which A is not in", f.userA, "?member_id=" + f.carol,
+			only(ofA, withCarol, allThree)},
+		{"A with B and carol: the album all three are in", f.userA, both(f.userB, f.carol), only(ofA, allThree)},
+		{"B with carol", f.userB, "?member_id=" + f.carol, only(ofB, allThree, bobAndCarol)},
+		{"carol with A, whichever owns the album", f.carol, "?member_id=" + f.userA, only(ofCarol, withCarol, allThree)},
+		{"a user named twice, in any spelling", f.userA, both(strings.ToUpper(f.userB), f.userB), only(ofA, f.family, allThree)},
+		{"the caller's own ID: every album of theirs", f.userA, "?member_id=" + f.userA, ofA},
+		{"the caller's own ID beside another", f.userA, both(f.userA, f.carol), only(ofA, withCarol, allThree)},
+		{"a user in none of the caller's albums", f.userA, "?member_id=" + erin, []albumItem{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, list(t, tt.user, tt.query))
+		})
+	}
+
+	rec := do(t, f.api, f.userA, http.MethodGet, "/api/albums?member_id="+erin, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `[]`, rec.Body.String(), "no album in common is [], not null")
+
+	t.Run("refused as a challenge's players are", func(t *testing.T) {
+		for _, tt := range []struct {
+			name       string
+			query      string
+			wantStatus int
+			wantBody   string
+		}{
+			{"an unknown user", "?member_id=" + unknownUUID, http.StatusNotFound, "user not found"},
+			{"an unknown user beside one in the albums", both(f.userB, unknownUUID), http.StatusNotFound, "user not found"},
+			{"a disabled user, though still in an album", "?member_id=" + dave, http.StatusNotFound, "user not found"},
+			{"the unclaimed legacy owner", "?member_id=" + auth.LegacyOwnerID, http.StatusNotFound, "user not found"},
+			{"a malformed ID", both(f.userB, "nope"), http.StatusBadRequest, "invalid member_id"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				rec := do(t, f.api, f.userA, http.MethodGet, "/api/albums"+tt.query, "")
+				assert.Equal(t, tt.wantStatus, rec.Code)
+				assert.Equal(t, tt.wantBody, strings.TrimSpace(rec.Body.String()))
+			})
+		}
+	})
+
+	t.Run("membership as it is now", func(t *testing.T) {
+		rec := do(t, f.api, f.userA, http.MethodDelete, "/api/albums/"+f.family+"/members/"+f.userB, "")
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		assert.Equal(t, []string{allThree}, albumIDs(list(t, f.userA, "?member_id="+f.userB)),
+			"an album B was removed from is no longer one A shares with B")
+	})
 }
 
 func TestAlbums_Rename(t *testing.T) {

@@ -11,7 +11,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { CHALLENGE_ROUNDS, MAX_OTHER_PLAYERS, randomChallengeName } from "@/lib/challenge";
+import {
+  ALBUMS_UNCHECKED,
+  CHALLENGE_ROUNDS,
+  MAX_OTHER_PLAYERS,
+  NO_SHARED_ALBUM,
+  offerAlbums,
+  randomChallengeName,
+  untickedAlbumsNote,
+  type ChallengeFilters,
+} from "@/lib/challenge";
 import { activeFilterCount, filterParams } from "@/lib/filters";
 import { useCloseOnBack } from "@/lib/history";
 import { matchesSearch, SEARCH_MIN_ITEMS } from "@/lib/search";
@@ -42,14 +51,18 @@ interface Props {
 // which may be left out. The filters are the dialog's own: they start from the Game page's and
 // change nothing there. The five items are drawn by the server from what the filters select and
 // every chosen player can already see, so the dialog cannot know beforehand whether there are
-// enough: a refusal says how many there were.
+// enough: a refusal says how many there were. It does offer only the albums every chosen player is
+// in, though: an album one of them is not in adds only what that player sees some other way.
 export function NewChallengeDialog({ open, onOpenChange, filters, trips, albums, onCreated }: Props) {
   const me = useCurrentUser();
   const [name, setName] = useState("");
   // What the challenge is called when the name is left empty: chosen when the dialog opens, so it
   // can be read before creating.
   const [fallbackName, setFallbackName] = useState("");
-  const [draft, setDraft] = useState<FilterState>(filters);
+  // The dialog's own filters, and the albums it offers among them (offerAlbums).
+  const [draft, setDraft] = useState<ChallengeFilters>({ filters, albums: null, unticked: [] });
+  // The albums of the ticked players could not be looked up: every album of the caller's is offered.
+  const [albumsFailed, setAlbumsFailed] = useState(false);
   const [users, setUsers] = useState<DirectoryUser[] | null>(null);
   const [usersFailed, setUsersFailed] = useState(false);
   const [chosen, setChosen] = useState<string[]>([]);
@@ -59,6 +72,8 @@ export function NewChallengeDialog({ open, onOpenChange, filters, trips, albums,
   const nameHintId = useId();
   const pageFilters = useRef(filters);
   pageFilters.current = filters;
+  // The album lookup in flight, for the ticked players of the moment.
+  const albumLookup = useRef<AbortController | null>(null);
 
   const close = () => onOpenChange(false);
   useCloseOnBack(close, open);
@@ -69,7 +84,8 @@ export function NewChallengeDialog({ open, onOpenChange, filters, trips, albums,
     if (!open) return;
     setName("");
     setFallbackName(randomChallengeName());
-    setDraft(pageFilters.current);
+    setDraft({ filters: pageFilters.current, albums: null, unticked: [] });
+    setAlbumsFailed(false);
     setChosen([]);
     setQuery("");
     setError(null);
@@ -85,11 +101,45 @@ export function NewChallengeDialog({ open, onOpenChange, filters, trips, albums,
       });
     return () => {
       current = false;
+      albumLookup.current?.abort();
+      albumLookup.current = null;
     };
   }, [open, me.id]);
 
-  const toggle = (id: string) =>
-    setChosen((ids) => (ids.includes(id) ? ids.filter((v) => v !== id) : [...ids, id]));
+  const offer = (list: Album[] | null, failed = false) => {
+    setDraft((d) => offerAlbums(d, list, albums));
+    setAlbumsFailed(failed);
+  };
+
+  // Offers the albums every one of `players` is in, once the server says which; nobody ticked
+  // offers them all at once. A change of players cancels the lookup before it, so only the answer
+  // for the players ticked now counts. Until it comes, the albums offered before stay.
+  const lookUpAlbums = (players: string[]) => {
+    albumLookup.current?.abort();
+    albumLookup.current = null;
+    if (players.length === 0) {
+      offer(null);
+      return;
+    }
+    const lookup = new AbortController();
+    albumLookup.current = lookup;
+    api
+      .listAlbums({ memberIds: players, signal: lookup.signal })
+      .then((list) => {
+        if (!lookup.signal.aborted) offer(list);
+      })
+      .catch((e) => {
+        if (lookup.signal.aborted) return;
+        console.error(e);
+        offer(null, true);
+      });
+  };
+
+  const toggle = (id: string) => {
+    const next = chosen.includes(id) ? chosen.filter((v) => v !== id) : [...chosen, id];
+    setChosen(next);
+    lookUpAlbums(next);
+  };
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -97,7 +147,7 @@ export function NewChallengeDialog({ open, onOpenChange, filters, trips, albums,
     setSubmitting(true);
     setError(null);
     try {
-      const created = await api.createChallenge(name.trim() || fallbackName, chosen, filterParams(draft));
+      const created = await api.createChallenge(name.trim() || fallbackName, chosen, filterParams(draft.filters));
       onCreated(created);
       close();
     } catch (err) {
@@ -119,6 +169,7 @@ export function NewChallengeDialog({ open, onOpenChange, filters, trips, albums,
   const visible = (users ?? []).filter(
     (u) => chosen.includes(u.id) || matchesSearch(query, u.display_name, u.email),
   );
+  const untickedNote = untickedAlbumsNote(draft.unticked);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -189,15 +240,34 @@ export function NewChallengeDialog({ open, onOpenChange, filters, trips, albums,
             <p className="text-muted-foreground">
               Drawn from what these filters select, and only from items every player can already see: a challenge
               shares nothing. The rounds come from different places and times where the items allow, and from items
-              the players have not had in a challenge first.
+              the players have not had in a challenge first. Only the albums every player is in are listed.
             </p>
+            {albumsFailed ? (
+              <p role="status" className="text-red-500">
+                {ALBUMS_UNCHECKED}
+              </p>
+            ) : (
+              <>
+                {untickedNote && (
+                  <p role="status" className="text-amber-700 dark:text-amber-500">
+                    {untickedNote}
+                  </p>
+                )}
+                {/* Said, or the albums would just vanish from the filters below. */}
+                {draft.albums?.length === 0 && albums.length > 0 && (
+                  <p role="status" className="text-muted-foreground">
+                    {NO_SHARED_ALBUM}
+                  </p>
+                )}
+              </>
+            )}
             <div className="space-y-3">
               <FilterFields
                 trips={trips}
-                albums={albums}
-                filters={draft}
-                onChange={setDraft}
-                activeCount={activeFilterCount(draft)}
+                albums={draft.albums ?? albums}
+                filters={draft.filters}
+                onChange={(next) => setDraft((d) => ({ ...d, filters: next }))}
+                activeCount={activeFilterCount(draft.filters)}
               />
             </div>
           </fieldset>
