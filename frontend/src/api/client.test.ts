@@ -363,6 +363,34 @@ describe("api client", () => {
       await expect(call()).resolves.toEqual([]);
     });
 
+    it("listAlbums() asks for the albums every one of memberIds is in, with the signal that cancels it", async () => {
+      fetchMock.mockResolvedValue(response(200, [sampleAlbum]));
+      const signal = new AbortController().signal;
+      await expect(api.listAlbums({ memberIds: ["u2", "u3"], signal })).resolves.toEqual([sampleAlbum]);
+      expect(fetchMock).toHaveBeenCalledWith("/api/albums?member_id=u2&member_id=u3", { signal });
+    });
+
+    it("listAlbums() without memberIds asks for every album", async () => {
+      fetchMock.mockResolvedValue(response(200, [sampleAlbum]));
+      await expect(api.listAlbums({ memberIds: [] })).resolves.toEqual([sampleAlbum]);
+      expect(fetchMock).toHaveBeenCalledWith("/api/albums", { signal: undefined });
+    });
+
+    it("listAlbums() rejects with the status when a player is gone", async () => {
+      fetchMock.mockResolvedValue(response(404));
+      await expect(api.listAlbums({ memberIds: ["u9"] })).rejects.toMatchObject({
+        status: 404,
+        message: "GET /albums failed: 404",
+      });
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it("listAlbums() lets an abort reach the caller", async () => {
+      const aborted = new DOMException("Aborted", "AbortError");
+      fetchMock.mockRejectedValue(aborted);
+      await expect(api.listAlbums({ memberIds: ["u2"], signal: new AbortController().signal })).rejects.toBe(aborted);
+    });
+
     it.each([
       { name: "renameAlbum() as a member", call: () => api.renameAlbum("a1", "x"), status: 403, message: "PATCH /albums/a1 failed: 403" },
       { name: "addAlbumMember() for an unknown user", call: () => api.addAlbumMember("a1", "u9"), status: 404, message: "POST /albums/a1/members failed: 404" },

@@ -248,6 +248,7 @@ Where the code on `feat/albums-sharing` differs from or adds to the plan above. 
 - A malformed UUID in a request body (`user_id`, `media_ids`, `trip_id`) → **400**. Only path UUIDs → 404. Body checks run before the membership check, so a bad body is 400 even for a non-member.
 - Removing a user who is not a member → 404. `GET /api/media/{id}/albums` with a malformed ID → `[]`, like keyframes.
 - Album names are trimmed, and NUL is rejected. The album media body is capped at 1 MiB.
+- `GET /api/albums?member_id=…` (repeatable, for the New challenge dialog, #81) lists only the caller's albums that every named user is in too: never an album the caller is not in. A malformed ID → 400; a user who is not active and claimed → 404, as for a challenge's players; at most 19 users besides the caller.
 
 **Media and upload**
 - Upload: a malformed `album_id` → 404, the same as a non-member. `album_added` is present only when `album_id` was given.

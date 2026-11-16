@@ -2,6 +2,9 @@ package handlers
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -100,6 +103,75 @@ func TestAlbumMediaSelection_CondAndArg(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.wantCond, tt.sel.cond(tt.n))
 			assert.Equal(t, tt.wantArg, tt.sel.arg())
+		})
+	}
+}
+
+func TestParseAlbumMemberFilter(t *testing.T) {
+	const (
+		upper = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+		lower = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		other = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	)
+	nineteen, twenty := challengeTestIDs(19), challengeTestIDs(20)
+	tests := []struct {
+		name    string
+		values  []string // the member_id values, in order; nil leaves the key out
+		want    []string
+		wantErr string
+	}{
+		{"no filter", nil, []string{}, ""},
+		{"canonicalised, in order", []string{other, upper}, []string{other, lower}, ""},
+		{"a user named twice, in any spelling, counts once", []string{upper, lower, other, upper}, []string{lower, other}, ""},
+		{"the caller's own ID is dropped", []string{strings.ToUpper(testOwnerID), other}, []string{other}, ""},
+		{"only the caller: no filter", []string{testOwnerID}, []string{}, ""},
+		{"19 other users", nineteen, nineteen, ""},
+		{"19 other users and the caller", append([]string{testOwnerID}, nineteen...), nineteen, ""},
+		{"19 other users, one named twice", append(append([]string{}, nineteen...), strings.ToUpper(nineteen[0])), nineteen, ""},
+
+		{"malformed", []string{other, "nope"}, nil, "invalid member_id"},
+		{"empty", []string{""}, nil, "invalid member_id"},
+		{"unassigned is not a user", []string{"unassigned"}, nil, "invalid member_id"},
+		{"20 other users", twenty, nil, "member_id may name at most 19 other users"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := url.Values{"owner": {"mine"}} // other keys are not this filter's
+			if tt.values != nil {
+				q["member_id"] = tt.values
+			}
+			got, err := parseAlbumMemberFilter(q, testOwnerID)
+			if tt.wantErr != "" {
+				assert.EqualError(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// The handler has no database here: reaching it would panic, so each status comes from a check
+// made before any query.
+func TestAlbumHandler_ListRefusesBeforeTheDatabase(t *testing.T) {
+	const valid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	twenty := "member_id=" + strings.Join(challengeTestIDs(20), "&member_id=")
+	tests := []struct {
+		name     string
+		target   string
+		wantBody string
+	}{
+		{"a malformed member", "/api/albums?member_id=nope", "invalid member_id"},
+		{"an empty member", "/api/albums?member_id=", "invalid member_id"},
+		{"a malformed member after a valid one", "/api/albums?member_id=" + valid + "&member_id=nope", "invalid member_id"},
+		{"20 other users", "/api/albums?" + twenty, "member_id may name at most 19 other users"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			(&AlbumHandler{}).List(rec, withTestUser(httptest.NewRequest(http.MethodGet, tt.target, nil)))
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Equal(t, tt.wantBody, strings.TrimSpace(rec.Body.String()))
 		})
 	}
 }

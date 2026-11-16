@@ -368,16 +368,13 @@ func (h *ChallengeHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(c.others) > 0 {
-		var active int
-		if err := h.db.QueryRow(ctx, `
-			SELECT COUNT(*) FROM users
-			WHERE id = ANY($1::uuid[]) AND issuer IS NOT NULL AND disabled_at IS NULL`,
-			c.others).Scan(&active); err != nil {
+		active, err := allActiveUsers(ctx, h.db, c.others)
+		if err != nil {
 			slog.Error("challenges: create user lookup failed", "err", err)
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
-		if active != len(c.others) {
+		if !active {
 			http.Error(w, "user not found", http.StatusNotFound)
 			return
 		}

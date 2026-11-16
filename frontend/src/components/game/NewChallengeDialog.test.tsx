@@ -12,7 +12,7 @@ import type { Album, ChallengeSummary, CurrentUser, DirectoryUser, Trip } from "
 
 vi.mock("@/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/client")>();
-  return { ...actual, api: { listUsers: vi.fn(), createChallenge: vi.fn() } };
+  return { ...actual, api: { listUsers: vi.fn(), listAlbums: vi.fn(), createChallenge: vi.fn() } };
 });
 
 // The name a challenge falls back on is random: the tests choose it.
@@ -21,7 +21,7 @@ vi.mock("@/lib/challenge", async (importOriginal) => {
   return { ...actual, randomChallengeName: vi.fn() };
 });
 
-const mockApi = api as unknown as Record<"listUsers" | "createChallenge", ReturnType<typeof vi.fn>>;
+const mockApi = api as unknown as Record<"listUsers" | "listAlbums" | "createChallenge", ReturnType<typeof vi.fn>>;
 const mockName = vi.mocked(randomChallengeName);
 
 const me: CurrentUser = { id: "u-me", email: "me@example.test", display_name: "Me Myself", role: "user" };
@@ -134,11 +134,38 @@ async function settle() {
 
 const depth = () => ((window.history.state as Record<string, unknown> | null)?.[BACK_DEPTH_KEY] as number) ?? 0;
 
+// Which of the albums each other player is in. GET /api/albums?member_id=… answers with the
+// caller's albums every named player is in.
+function playersIn(albumsOf: Record<string, string[]>) {
+  mockApi.listAlbums.mockImplementation(({ memberIds }: { memberIds: string[] }) =>
+    Promise.resolve(albums.filter((a) => memberIds.every((id) => albumsOf[id]?.includes(a.id)))),
+  );
+}
+
+// The albums the dialog offers, as their checkboxes are labelled: someone else's says whose it is.
+function offeredAlbums(dialog: HTMLElement): string[] {
+  const items = within(dialog).getByRole("group", { name: "Items" });
+  const group = within(items).queryByRole("group", { name: "Albums" });
+  return group ? within(group).getAllByRole("checkbox").map((box) => box.closest("label")!.textContent!) : [];
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("NewChallengeDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     window.history.replaceState(null, "", "/game");
     mockApi.listUsers.mockResolvedValue(directory);
+    // Unless a test says otherwise, every player is in every album.
+    mockApi.listAlbums.mockResolvedValue(albums);
     mockApi.createChallenge.mockResolvedValue(created);
     mockName.mockReturnValue("Cheerful Cheetah");
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -169,6 +196,7 @@ describe("NewChallengeDialog", () => {
     expect(items).toHaveTextContent(
       "The rounds come from different places and times where the items allow, and from items the players have not had in a challenge first.",
     );
+    expect(items).toHaveTextContent("Only the albums every player is in are listed.");
   });
 
   it("asks for the players first, then the filters, then the name", async () => {
@@ -473,5 +501,147 @@ describe("NewChallengeDialog", () => {
       expect(box.closest("label")!.className.split(" ")).toContain("touch:min-h-11");
     }
     expect(within(dialog).getByRole("button", { name: "Create challenge" }).className.split(" ")).toContain("touch:min-h-11");
+  });
+
+  describe("albums", () => {
+    const both = ["Family", "Iceland 2024 by Dana"];
+
+    it("offers only the albums every ticked player is in, and all of them again without other players", async () => {
+      playersIn({ "u-bob": ["a1", "a2"], "u-carol": ["a1"] });
+      renderDialog({ albums, trips });
+      const dialog = await loadedDialog();
+      const tick = (name: RegExp) => userEvent.click(within(dialog).getByRole("checkbox", { name }));
+      expect(offeredAlbums(dialog)).toEqual(both);
+
+      await tick(/carol@example\.test/);
+      await waitFor(() => expect(offeredAlbums(dialog)).toEqual(["Family"]));
+      await tick(/Bob/);
+      expect(mockApi.listAlbums).toHaveBeenLastCalledWith({ memberIds: ["u-carol", "u-bob"], signal: expect.any(AbortSignal) });
+      await waitFor(() => expect(mockApi.listAlbums).toHaveBeenCalledTimes(2));
+      expect(offeredAlbums(dialog)).toEqual(["Family"]);
+
+      // Carol unticked: Bob's albums. Bob unticked too: every album, without asking.
+      await tick(/carol@example\.test/);
+      expect(mockApi.listAlbums).toHaveBeenLastCalledWith({ memberIds: ["u-bob"], signal: expect.any(AbortSignal) });
+      await waitFor(() => expect(offeredAlbums(dialog)).toEqual(both));
+      await tick(/Bob/);
+      expect(offeredAlbums(dialog)).toEqual(both);
+      expect(mockApi.listAlbums).toHaveBeenCalledTimes(3);
+      // The trips are the caller's own and stay.
+      expect(within(dialog).getByRole("checkbox", { name: "Tatra" })).toBeInTheDocument();
+      expect(within(dialog).queryByRole("status")).toBeNull();
+    });
+
+    it("unticks an album a ticked player is not in, says so, and does not tick it again", async () => {
+      playersIn({ "u-bob": ["a1"] });
+      renderDialog({ albums });
+      const dialog = await loadedDialog();
+      const items = within(dialog).getByRole("group", { name: "Items" });
+      const bob = within(dialog).getByRole("checkbox", { name: /Bob/ });
+      await userEvent.click(within(items).getByRole("checkbox", { name: /Iceland 2024/ }));
+      await userEvent.click(within(items).getByRole("checkbox", { name: /Family/ }));
+
+      await userEvent.click(bob);
+      expect(await within(dialog).findByRole("status")).toHaveTextContent(
+        /^Unticked “Iceland 2024”: not every player is in it\.$/,
+      );
+      expect(offeredAlbums(dialog)).toEqual(["Family"]);
+      expect(within(items).getByRole("checkbox", { name: /Family/ })).toBeChecked();
+
+      // Back on the list without Bob, unticked, and the note goes with it.
+      await userEvent.click(bob);
+      expect(offeredAlbums(dialog)).toEqual(both);
+      expect(within(items).getByRole("checkbox", { name: /Iceland 2024/ })).not.toBeChecked();
+      expect(within(dialog).queryByRole("status")).toBeNull();
+
+      // Bob again: nothing ticked leaves, so nothing is said.
+      await userEvent.click(bob);
+      await waitFor(() => expect(offeredAlbums(dialog)).toEqual(["Family"]));
+      expect(within(dialog).queryByRole("status")).toBeNull();
+
+      await userEvent.click(within(dialog).getByRole("button", { name: "Create challenge" }));
+      expect(mockApi.createChallenge).toHaveBeenCalledWith("Cheerful Cheetah", ["u-bob"], { album_id: ["a1"] });
+    });
+
+    it("unticks albums the Game page's filters ticked too, and says when no album is left", async () => {
+      playersIn({ "u-bob": [] });
+      const filters = { ...emptyFilters, albumIds: ["a1", "a2"], fromDate: "2024-05-01" };
+      renderDialog({ albums, filters });
+      const dialog = await loadedDialog();
+      await userEvent.click(within(dialog).getByRole("checkbox", { name: /Bob/ }));
+
+      const notes = await within(dialog).findAllByRole("status");
+      expect(notes.map((n) => n.textContent)).toEqual([
+        "Unticked “Family” and “Iceland 2024”: not every player is in them.",
+        "None of your albums has every player in it.",
+      ]);
+      expect(offeredAlbums(dialog)).toEqual([]);
+      await userEvent.click(within(dialog).getByRole("button", { name: "Create challenge" }));
+      // The other filters stay as they were.
+      expect(mockApi.createChallenge).toHaveBeenCalledWith("Cheerful Cheetah", ["u-bob"], { from_date: "2024-05-01" });
+    });
+
+    it("keeps every album, and the ticks, when the lookup fails", async () => {
+      mockApi.listAlbums.mockRejectedValue(new ApiError("GET /albums failed: 500", 500));
+      renderDialog({ albums, filters: { ...emptyFilters, albumIds: ["a2"] } });
+      const dialog = await loadedDialog();
+      await userEvent.click(within(dialog).getByRole("checkbox", { name: /Bob/ }));
+
+      expect(await within(dialog).findByRole("status")).toHaveTextContent(
+        "Could not check which albums every player is in, so all of yours are listed.",
+      );
+      expect(offeredAlbums(dialog)).toEqual(both);
+      expect(within(dialog).getByRole("checkbox", { name: /Iceland 2024/ })).toBeChecked();
+      await userEvent.click(within(dialog).getByRole("button", { name: "Create challenge" }));
+      expect(mockApi.createChallenge).toHaveBeenCalledWith("Cheerful Cheetah", ["u-bob"], { album_id: ["a2"] });
+
+      // Without other players there is nothing to look up, so nothing failed.
+      await userEvent.click(within(dialog).getByRole("checkbox", { name: /Bob/ }));
+      expect(within(dialog).queryByRole("status")).toBeNull();
+    });
+
+    it("counts only the answer for the players ticked now, and keeps the albums until it comes", async () => {
+      const forBob = deferred<Album[]>();
+      const forBoth = deferred<Album[]>();
+      mockApi.listAlbums.mockReturnValueOnce(forBob.promise).mockReturnValueOnce(forBoth.promise);
+      renderDialog({ albums });
+      const dialog = await loadedDialog();
+      await userEvent.click(within(dialog).getByRole("checkbox", { name: /Bob/ }));
+      await userEvent.click(within(dialog).getByRole("checkbox", { name: /carol@example\.test/ }));
+
+      const [[first], [second]] = mockApi.listAlbums.mock.calls as [{ memberIds: string[]; signal: AbortSignal }][];
+      expect(first.memberIds).toEqual(["u-bob"]);
+      expect(first.signal.aborted).toBe(true);
+      expect(second.memberIds).toEqual(["u-bob", "u-carol"]);
+      expect(second.signal.aborted).toBe(false);
+      expect(offeredAlbums(dialog)).toEqual(both);
+
+      await act(async () => forBoth.resolve([albums[1]]));
+      expect(offeredAlbums(dialog)).toEqual(["Iceland 2024 by Dana"]);
+      // The answer for Bob alone comes late and changes nothing; neither would its failure.
+      await act(async () => forBob.resolve([albums[0]]));
+      expect(offeredAlbums(dialog)).toEqual(["Iceland 2024 by Dana"]);
+      expect(within(dialog).queryByRole("status")).toBeNull();
+    });
+
+    it("cancels the lookup when it closes, and offers every album again on the next opening", async () => {
+      const pending = deferred<Album[]>();
+      mockApi.listAlbums.mockReturnValueOnce(pending.promise);
+      const { rerender, props } = renderDialog({ albums });
+      await loadedDialog();
+      await userEvent.click(screen.getByRole("checkbox", { name: /Bob/ }));
+      const [[{ signal }]] = mockApi.listAlbums.mock.calls as [{ signal: AbortSignal }][];
+
+      rerender(dialogElement({ ...props, open: false }));
+      expect(signal.aborted).toBe(true);
+      await act(async () => pending.reject(new DOMException("The operation was aborted.", "AbortError")));
+      expect(console.error).not.toHaveBeenCalled();
+
+      rerender(dialogElement({ ...props, open: true }));
+      const dialog = await loadedDialog();
+      expect(offeredAlbums(dialog)).toEqual(both);
+      expect(within(dialog).queryByRole("status")).toBeNull();
+      expect(mockApi.listAlbums).toHaveBeenCalledTimes(1);
+    });
   });
 });

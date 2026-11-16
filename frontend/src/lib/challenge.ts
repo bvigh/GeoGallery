@@ -1,8 +1,8 @@
 // The pure parts of the Game's challenges: how a player is named and drawn, how the players rank,
-// and every sentence the challenge views say.
+// which albums a new challenge offers, and every sentence the challenge views say.
 
 import { formatCount } from "@/lib/numbers";
-import type { ChallengeGuess, ChallengeMember, ChallengeSummary } from "@/types";
+import type { Album, ChallengeGuess, ChallengeMember, ChallengeSummary, FilterState } from "@/types";
 
 // The backend's challengeItemCount: a challenge is made of this many rounds.
 export const CHALLENGE_ROUNDS = 5;
@@ -12,6 +12,10 @@ export const MAX_OTHER_PLAYERS = 19;
 export const CHALLENGE_GONE = "That challenge is not available: it was deleted, or you are not one of its players.";
 export const ROUND_GONE = "That round is no longer available: its item was deleted, or is no longer shared with you.";
 export const ALREADY_GUESSED = "You have already guessed that round.";
+// The New challenge dialog's notes on its albums: when it could not find out which albums every
+// ticked player is in, and when none of the caller's albums has all of them.
+export const ALBUMS_UNCHECKED = "Could not check which albums every player is in, so all of yours are listed.";
+export const NO_SHARED_ALBUM = "None of your albums has every player in it.";
 
 // Words for a challenge nobody named: an adjective and an animal that start alike. Each row is one
 // letter. Every pair is under the backend's 200 characters.
@@ -196,4 +200,50 @@ export function guessDateNote(guess: Pick<ChallengeGuess, "guess_date" | "date_d
   const days = Math.round(guess.date_diff_days);
   if (days === 0) return `Guessed ${guess.guess_date}, the right day`;
   return `Guessed ${guess.guess_date}, ${formatCount(days)} ${days === 1 ? "day" : "days"} off`;
+}
+
+// The New challenge dialog's own filters, and the albums it offers among them.
+export interface ChallengeFilters {
+  filters: FilterState;
+  // The albums offered while other players are ticked: the caller's albums that every one of them
+  // is in too, as the server listed them. null offers every album of the caller's.
+  albums: Album[] | null;
+  // Ticked albums a player was not in: unticked when that player was ticked, and named in the
+  // dialog's note for as long as they are not offered again.
+  unticked: Album[];
+}
+
+/**
+ * The dialog's filters once it offers `albums`, the server's answer for the ticked players, or
+ * null for every album of the caller's (`all`): nobody else is ticked, or the answer failed. A
+ * ticked album that is no longer offered is unticked, and named until it is offered again. Nothing
+ * is ticked again by itself. With every album offered, none is named.
+ */
+export function offerAlbums(current: ChallengeFilters, albums: Album[] | null, all: Album[]): ChallengeFilters {
+  if (albums === null) return { ...current, albums: null, unticked: [] };
+  const offered = new Set(albums.map((a) => a.id));
+  // A ticked album was on the list offered before, or came with the Game page's filters.
+  const known = new Map([...all, ...(current.albums ?? [])].map((a) => [a.id, a]));
+  const dropped = current.filters.albumIds.filter((id) => !offered.has(id));
+  const unticked = [...current.unticked];
+  for (const id of dropped) {
+    const album = known.get(id);
+    if (album && !unticked.some((a) => a.id === id)) unticked.push(album);
+  }
+  return {
+    filters:
+      dropped.length === 0
+        ? current.filters
+        : { ...current.filters, albumIds: current.filters.albumIds.filter((id) => offered.has(id)) },
+    albums,
+    unticked: unticked.filter((a) => !offered.has(a.id)),
+  };
+}
+
+// What the dialog says of the albums offerAlbums unticked; null when it unticked none.
+export function untickedAlbumsNote(albums: Pick<Album, "name">[]): string | null {
+  if (albums.length === 0) return null;
+  const names = albums.map((a) => `“${a.name}”`);
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return `Unticked ${list}: not every player is in ${names.length === 1 ? "it" : "them"}.`;
 }

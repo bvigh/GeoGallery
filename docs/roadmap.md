@@ -88,8 +88,17 @@ Data repairs on the existing deployments are operator work, not issues: the far 
 | #42 | Admin: storage use per user, trip and album | M |
 | #43 | Share media by link | L, design |
 | #44 | No-login demo | M, design |
+| #81 | Challenge dialog: offer only the albums every chosen player is in | S |
+| #82 | Challenge results: open a round's photo or video full size | M |
+| #83 | Challenge pool: only items in albums every player is in | S, design |
+| #84 | Challenge dialog: show how many items every player can see before creating | M |
+| #85 | Game: spread free rounds over places and periods like a challenge's | M, design |
+| #86 | Challenge draw: keep an item's use count after its challenge is deleted | S, design |
+| #87 | Challenge results: spread pins that land on one spot | S |
 
 #39 is built for people with an account: a challenge's players are picked from the user list, its five items are drawn from what all of them can already see, and its link (`/game/<id>`) opens it for them alone. Its last point, challenges for people without an account, is share links (#43) and waits for that decision.
+
+#81 to #87 are what #39's pull request (#80) left. #81 and #83 are one rule seen from the dialog and from the server; #83 closes the limit #80 accepted. #86 waits for evidence that deleting finished challenges brings repeats.
 
 ## Public release
 
@@ -123,6 +132,7 @@ Each needs a design note before it can be estimated.
 - Per-user settings (#25) → default mute (#38).
 - Labels (#34) → search (#35).
 - Location suggestions (#40) → keyframe suggestions (#41).
+- Albums in the challenge dialog (#81, built) and the pool's album rule (#83) go together; the count before creating (#84) follows the pool's rule.
 - Lint fix (#21) → CI (#47).
 - Track overlay (#32) → trip video (#55), perhaps.
 - "Why here?" (#61) → Checks page (#62), track overlay (#32), clock check (#63).
