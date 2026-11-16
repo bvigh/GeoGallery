@@ -573,6 +573,7 @@ Also out of scope so far: API token scopes, user deletion/export, multi-issuer l
   - shifts: two items an hour apart shifted by an hour, a burst, undated items skipped, refusals (past the storable years, another user's, a shared or a missing item) writing nothing, duplicates collapsed, the `trips` summary's order;
   - another user's items and points at the same instants untouched; two concurrent shifts whose clearings need each other's rows both apply once;
   - `RunGPSMatcherAround`: only the owner's unlocated and interpolated rows within the window (its edge in, a second past it out), never another user's, a write bound to the row as listed
+- `internal/handlers/media_location_integration_test.go` — a location set by hand (`PATCH /api/media/{id}/location`) through the router: the item's `manual` point, and the owner's interpolated items whose bracket the new point enters placed again (one before it, one after it), not one a second past the match window, not an item with an `exif` location, and nothing of another user's (their item and point at the same instant)
 - `internal/handlers/upload_album_integration_test.go` — upload `?album_id` refused before the body is read, new files and duplicates added (duplicates never reach S3), `registerMedia` returns the existing ID, a capture time JSON cannot carry stored as `NULL`
 - Use `testing` + [testify](https://github.com/stretchr/testify) (`assert`/`require`). Test files live alongside source.
 - Pure logic tests use no external deps. Handler tests use `net/http/httptest`.
