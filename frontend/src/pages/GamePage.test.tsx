@@ -5,13 +5,32 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { api, ApiError } from "@/api/client";
 import { GamePage } from "@/pages/GamePage";
 import type { FilterPanel } from "@/components/map/FilterPanel";
+import type { ChallengeView } from "@/components/game/ChallengeView";
+import type { NewChallengeDialog } from "@/components/game/NewChallengeDialog";
+import { BACK_DEPTH_KEY } from "@/lib/history";
 import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
 import { emptyFilters } from "@/lib/filters";
-import type { Album } from "@/types";
+import { AuthContext } from "@/components/auth/AuthContext";
+import type { Album, ChallengeSummary, CurrentUser } from "@/types";
 
 vi.mock("@/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/client")>();
-  return { ...actual, api: { get: vi.fn(), post: vi.fn(), getKeyframes: vi.fn(), listAlbums: vi.fn() } };
+  return {
+    ...actual,
+    api: {
+      get: vi.fn(),
+      post: vi.fn(),
+      getKeyframes: vi.fn(),
+      listAlbums: vi.fn(),
+      listChallenges: vi.fn(),
+      listUsers: vi.fn(),
+      createChallenge: vi.fn(),
+      getChallenge: vi.fn(),
+      guessChallenge: vi.fn(),
+      deleteChallenge: vi.fn(),
+      leaveChallenge: vi.fn(),
+    },
+  };
 });
 
 // The latest props GamePage rendered FilterPanel with.
@@ -21,6 +40,24 @@ vi.mock("@/components/map/FilterPanel", () => ({
   FilterPanel: (props: ComponentProps<typeof FilterPanel>) => {
     panel.props = props;
     return null;
+  },
+}));
+// The challenge view and the dialog have their own tests; here they record what the page gives them.
+const challengeUi = vi.hoisted(() => ({
+  view: null as ComponentProps<typeof ChallengeView> | null,
+  dialog: null as ComponentProps<typeof NewChallengeDialog> | null,
+}));
+
+vi.mock("@/components/game/ChallengeView", () => ({
+  ChallengeView: (props: ComponentProps<typeof ChallengeView>) => {
+    challengeUi.view = props;
+    return <div data-testid="challenge-view" data-id={props.challengeId} />;
+  },
+}));
+vi.mock("@/components/game/NewChallengeDialog", () => ({
+  NewChallengeDialog: (props: ComponentProps<typeof NewChallengeDialog>) => {
+    challengeUi.dialog = props;
+    return props.open ? <div data-testid="new-challenge" /> : null;
   },
 }));
 vi.mock("@/components/viewer/Panorama360", () => ({ default: () => null }));
@@ -79,12 +116,31 @@ vi.mock("react-leaflet", async () => {
   };
 });
 
-const mockApi = api as unknown as {
-  get: ReturnType<typeof vi.fn>;
-  post: ReturnType<typeof vi.fn>;
-  getKeyframes: ReturnType<typeof vi.fn>;
-  listAlbums: ReturnType<typeof vi.fn>;
-};
+const mockApi = api as unknown as Record<
+  | "get"
+  | "post"
+  | "getKeyframes"
+  | "listAlbums"
+  | "listChallenges"
+  | "listUsers"
+  | "createChallenge"
+  | "getChallenge"
+  | "guessChallenge"
+  | "deleteChallenge"
+  | "leaveChallenge",
+  ReturnType<typeof vi.fn>
+>;
+
+const me: CurrentUser = { id: "u-me", email: "me@example.test", display_name: "Me Myself", role: "user" };
+
+// The page's dialogs and the challenge view read the signed-in user.
+function renderPage() {
+  return render(
+    <AuthContext.Provider value={me}>
+      <GamePage />
+    </AuthContext.Provider>,
+  );
+}
 
 const sampleAlbums: Album[] = [
   {
@@ -131,7 +187,7 @@ const oneRound = roundOf("photo");
 
 // Starts a round and places a guess on the map, leaving Submit enabled.
 async function startAndGuess() {
-  render(<GamePage />);
+  renderPage();
   await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
   const submit = await screen.findByRole("button", { name: "Submit" });
   act(() => guessMap.click!({ latlng: { lat: 64.1, lng: -21.9 } }));
@@ -148,12 +204,17 @@ describe("GamePage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     panel.props = null;
+    challengeUi.view = null;
+    challengeUi.dialog = null;
     guessMap.click = null;
     leaflet.reset();
     leaflet.size = { x: 1200, y: 800 };
     leaflet.container = document.createElement("div");
     mockApi.listAlbums.mockResolvedValue(sampleAlbums);
     mockApi.getKeyframes.mockResolvedValue([]);
+    mockApi.listChallenges.mockResolvedValue([]);
+    mockApi.listUsers.mockResolvedValue([]);
+    window.history.replaceState(null, "", "/game");
   });
 
   afterEach(() => {
@@ -176,7 +237,7 @@ describe("GamePage", () => {
     }
 
     async function startRound() {
-      render(<GamePage />);
+      renderPage();
       await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
       await screen.findByRole("button", { name: "Submit" });
     }
@@ -234,14 +295,14 @@ describe("GamePage", () => {
 
   it("passes albums to FilterPanel", async () => {
     mockApi.get.mockImplementation(noRounds);
-    render(<GamePage />);
+    renderPage();
     await waitFor(() => expect(panel.props?.albums).toEqual(sampleAlbums));
     expect(panel.props?.activeCount).toBe(0);
   });
 
   it("sends no filter params with the default filters", async () => {
     mockApi.get.mockImplementation(noRounds);
-    render(<GamePage />);
+    renderPage();
     await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
     await screen.findByText("No geolocated media yet");
     expect(mockApi.get).toHaveBeenCalledWith("/game/round", {});
@@ -249,7 +310,7 @@ describe("GamePage", () => {
 
   it("sends collection, owner and media type filters to /game/round", async () => {
     mockApi.get.mockImplementation(noRounds);
-    render(<GamePage />);
+    renderPage();
     await waitFor(() => expect(panel.props).not.toBeNull());
 
     act(() => {
@@ -281,7 +342,7 @@ describe("GamePage", () => {
       if (path === "/trips") return Promise.resolve([]);
       return Promise.reject(new ApiError("GET /game/round failed: 404", 404));
     });
-    render(<GamePage />);
+    renderPage();
     expect(screen.queryByText("No geolocated media yet")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
     expect(await screen.findByText("No geolocated media yet")).toBeInTheDocument();
@@ -290,7 +351,7 @@ describe("GamePage", () => {
 
   it("drops the empty-state notice once the filters change", async () => {
     mockApi.get.mockImplementation(noRounds);
-    render(<GamePage />);
+    renderPage();
     await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
     await screen.findByText("No geolocated media yet");
 
@@ -347,7 +408,7 @@ describe("GamePage", () => {
   describe("video keys", () => {
     async function startVideoRound() {
       mockApi.get.mockImplementation(roundOf("video"));
-      const { container } = render(<GamePage />);
+      const { container } = renderPage();
       await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
       await screen.findByRole("button", { name: "Submit" });
       return container.querySelector("video")!;
@@ -382,7 +443,7 @@ describe("GamePage", () => {
 
     it("leaves the keys alone on a photo round", async () => {
       mockApi.get.mockImplementation(oneRound);
-      render(<GamePage />);
+      renderPage();
       await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
       await screen.findByRole("button", { name: "Submit" });
 
@@ -444,7 +505,7 @@ describe("GamePage", () => {
       ["video", "bottom-16"],
     ])("sits clear of the controls of a %s round", async (mediaType, bottom) => {
       mockApi.get.mockImplementation(roundOf(mediaType));
-      render(<GamePage />);
+      renderPage();
       await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
       await screen.findByRole("button", { name: "Submit" });
       expect(guessOverlay()).toHaveClass(bottom);
@@ -455,7 +516,7 @@ describe("GamePage", () => {
 
   it("shows a photo round in a zoomable image", async () => {
     mockApi.get.mockImplementation(oneRound);
-    render(<GamePage />);
+    renderPage();
     await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
     const img = await screen.findByRole("img", { name: "guess this" });
     expect(img).toHaveAttribute("src", round.url);
@@ -464,7 +525,7 @@ describe("GamePage", () => {
 
   it("shows the whole frame of a video round", async () => {
     mockApi.get.mockImplementation(roundOf("video"));
-    const { container } = render(<GamePage />);
+    const { container } = renderPage();
     await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
     await screen.findByRole("button", { name: "Submit" });
     const video = container.querySelector("video");
@@ -738,6 +799,236 @@ describe("GamePage", () => {
       // The resize listener left with the result map.
       act(() => leaflet.fire("resize"));
       expect(leaflet.map.fitBounds).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("challenges", () => {
+    const CHALLENGE = "0b6f3c1e-5d1a-4c47-9a8e-2f0d7b9c4e11";
+
+    function summary(extra: Partial<ChallengeSummary>): ChallengeSummary {
+      return {
+        id: CHALLENGE,
+        name: "Family five",
+        owner_id: "u-me",
+        owner_name: "Me Myself",
+        is_owner: true,
+        created_at: "2026-11-01T10:00:00Z",
+        member_count: 3,
+        item_count: 5,
+        played: 0,
+        score: 0,
+        finished: false,
+        ...extra,
+      };
+    }
+
+    const mine = summary({});
+    const theirs = summary({
+      id: "c-theirs",
+      name: "Iceland",
+      owner_id: "u-alice",
+      owner_name: "Alice",
+      is_owner: false,
+      member_count: 2,
+      played: 2,
+      score: 7800,
+    });
+    const done = summary({ id: "c-done", name: "Old one", member_count: 1, played: 5, score: 18240, finished: true });
+
+    function rows(): HTMLElement[] {
+      return within(screen.getByRole("list", { name: "Challenges" })).queryAllByRole("listitem");
+    }
+
+    // The browser's back (-1) or forward (1) button: resolves once the popstate has been handled.
+    async function traverse(delta: number) {
+      await act(async () => {
+        const popped = new Promise((resolve) => window.addEventListener("popstate", resolve, { once: true }));
+        window.history.go(delta);
+        await popped;
+      });
+    }
+
+    // Lets a traversal the history module started (leaving an entry nobody owns) land.
+    async function settleHistory() {
+      await act(async () => {
+        for (let round = 0; round < 12; round++) await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+
+    beforeEach(() => {
+      mockApi.get.mockImplementation(noRounds);
+      mockApi.listChallenges.mockResolvedValue([mine, theirs, done]);
+      mockApi.deleteChallenge.mockResolvedValue(undefined);
+      mockApi.leaveChallenge.mockResolvedValue(undefined);
+      vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+
+    it("lists the caller's challenges with whose they are, the players and where the caller stands", async () => {
+      renderPage();
+      await screen.findByRole("button", { name: "Family five" });
+      expect(rows().map((r) => r.textContent)).toEqual([
+        "Family fiveDeletePlayYours · 3 playersNot played yet",
+        "IcelandLeaveContinueby Alice · 2 players2 of 5 played · 7,800 pts",
+        "Old oneDeleteResultsYours · 1 playerFinished · 18,240 pts",
+      ]);
+      expect(screen.getByRole("button", { name: "Play: Family five" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Continue: Iceland" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Results: Old one" })).toBeInTheDocument();
+      expect(screen.queryByTestId("challenge-view")).toBeNull();
+    });
+
+    it("says so when there are none", async () => {
+      mockApi.listChallenges.mockResolvedValue([]);
+      renderPage();
+      expect(await screen.findByText("No challenges yet. Make one, or ask someone to add you to theirs.")).toBeInTheDocument();
+      expect(rows()).toHaveLength(0);
+    });
+
+    it("says so when the list cannot be loaded, and still plays a free round", async () => {
+      mockApi.listChallenges.mockRejectedValue(new Error("offline"));
+      mockApi.get.mockImplementation(oneRound);
+      renderPage();
+      expect(await screen.findByRole("alert")).toHaveTextContent("Could not load the challenges");
+      await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
+      expect(await screen.findByRole("button", { name: "Submit" })).toBeInTheDocument();
+    });
+
+    it.each(["Iceland", "Continue: Iceland"])("opens a challenge from its card (%s)", async (name) => {
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name }));
+      expect(screen.getByTestId("challenge-view")).toHaveAttribute("data-id", "c-theirs");
+    });
+
+    it("reloads the list when the challenge closes: the caller's standing has moved on", async () => {
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: "Play: Family five" }));
+      expect(mockApi.listChallenges).toHaveBeenCalledTimes(1);
+
+      mockApi.listChallenges.mockResolvedValue([summary({ played: 5, score: 20000, finished: true })]);
+      act(() => challengeUi.view!.onClose());
+      expect(screen.queryByTestId("challenge-view")).toBeNull();
+      expect(await screen.findByRole("button", { name: "Results: Family five" })).toBeInTheDocument();
+      expect(mockApi.listChallenges).toHaveBeenCalledTimes(2);
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("says why a challenge closed by itself, until another one is opened and closed", async () => {
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: "Play: Family five" }));
+      act(() => challengeUi.view!.onClose("That challenge is not available."));
+      expect(await screen.findByRole("alert")).toHaveTextContent("That challenge is not available.");
+
+      await userEvent.click(screen.getByRole("button", { name: "Continue: Iceland" }));
+      act(() => challengeUi.view!.onClose());
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("opens the challenge the URL names at once, before the list is in", async () => {
+      mockApi.listChallenges.mockReturnValue(new Promise(() => {}));
+      window.history.replaceState(null, "", `/game/${CHALLENGE}`);
+      renderPage();
+      expect(screen.getByTestId("challenge-view")).toHaveAttribute("data-id", CHALLENGE);
+    });
+
+    it("opens no challenge for a malformed ID in the URL", async () => {
+      window.history.replaceState(null, "", "/game/42");
+      renderPage();
+      await screen.findByRole("button", { name: "Family five" });
+      expect(screen.queryByTestId("challenge-view")).toBeNull();
+    });
+
+    it("opens a challenge again when forward lands on its entry", async () => {
+      renderPage();
+      await screen.findByRole("button", { name: "Family five" });
+      // The challenge's entry after back closed it. The stand-in owns no entry, so the history
+      // module leaves it again afterwards; the real view takes it over (ChallengeView.test.tsx).
+      window.history.pushState({ [BACK_DEPTH_KEY]: 1 }, "", `/game/${CHALLENGE}`);
+      await traverse(-1);
+      expect(screen.queryByTestId("challenge-view")).toBeNull();
+      await traverse(1);
+      expect(screen.getByTestId("challenge-view")).toHaveAttribute("data-id", CHALLENGE);
+      await settleHistory();
+    });
+
+    it("deletes the caller's own challenge after a confirmation, and reloads the list", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: "Delete Family five" }));
+      expect(confirm).toHaveBeenCalledWith(
+        'Delete challenge "Family five"? Every player\'s guesses and scores in it are deleted. The media stay.',
+      );
+      expect(mockApi.deleteChallenge).not.toHaveBeenCalled();
+
+      confirm.mockReturnValue(true);
+      mockApi.listChallenges.mockResolvedValue([theirs]);
+      await userEvent.click(screen.getByRole("button", { name: "Delete Family five" }));
+      expect(mockApi.deleteChallenge).toHaveBeenCalledWith(CHALLENGE);
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Family five" })).toBeNull());
+      expect(mockApi.listChallenges).toHaveBeenCalledTimes(2);
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("leaves someone else's challenge after a confirmation, and reloads the list", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      renderPage();
+      mockApi.listChallenges.mockResolvedValue([mine]);
+      await userEvent.click(await screen.findByRole("button", { name: "Leave Iceland" }));
+      expect(confirm).toHaveBeenCalledWith('Leave "Iceland"? Your guesses and your score in it are deleted.');
+      expect(mockApi.leaveChallenge).toHaveBeenCalledWith("c-theirs");
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Iceland" })).toBeNull());
+      expect(screen.queryByRole("button", { name: "Leave Family five" })).toBeNull();
+    });
+
+    it.each([
+      { action: "Delete Family five", call: "deleteChallenge" as const, status: 404, message: "That challenge was already deleted." },
+      { action: "Delete Family five", call: "deleteChallenge" as const, status: 500, message: "Could not delete the challenge" },
+      { action: "Leave Iceland", call: "leaveChallenge" as const, status: 404, message: "You are no longer in that challenge." },
+      { action: "Leave Iceland", call: "leaveChallenge" as const, status: 500, message: "Could not leave the challenge" },
+    ])("says why $action failed with a $status, and reloads the list", async ({ action, call, status, message }) => {
+      vi.spyOn(window, "confirm").mockReturnValue(true);
+      mockApi[call].mockRejectedValue(new ApiError(`failed: ${status}`, status));
+      renderPage();
+      await userEvent.click(await screen.findByRole("button", { name: action }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
+      expect(mockApi.listChallenges).toHaveBeenCalledTimes(2);
+    });
+
+    it("opens the new challenge dialog on the page's filters and collections, and opens what it makes", async () => {
+      const trips = [
+        { id: "t1", name: "Tatra", start_date: "2024-07-01", end_date: "2024-07-09", media_count: 9, cover_key: null, user_edited: true },
+      ];
+      mockApi.get.mockImplementation((path: string) => (path === "/trips" ? Promise.resolve(trips) : noRounds(path)));
+      renderPage();
+      await screen.findByRole("button", { name: "Family five" });
+      expect(challengeUi.dialog!.open).toBe(false);
+      expect(screen.getByText(/You choose the players and what the items are drawn from when you make one\./)).toBeInTheDocument();
+      const filters = { ...emptyFilters, owner: "shared" as const, albumIds: ["a1"] };
+      act(() => panel.props!.onChange(filters));
+
+      await userEvent.click(screen.getByRole("button", { name: "New challenge…" }));
+      expect(screen.getByTestId("new-challenge")).toBeInTheDocument();
+      // The dialog's own filters start from these and choose among the same trips and albums.
+      expect(challengeUi.dialog!.filters).toEqual(filters);
+      expect(challengeUi.dialog!.trips).toEqual(trips);
+      expect(challengeUi.dialog!.albums).toEqual(sampleAlbums);
+
+      const created = summary({ id: "c-new", name: "New one" });
+      mockApi.listChallenges.mockResolvedValue([created, mine]);
+      act(() => {
+        challengeUi.dialog!.onCreated(created);
+        challengeUi.dialog!.onOpenChange(false);
+      });
+      expect(screen.queryByTestId("new-challenge")).toBeNull();
+      expect(screen.getByTestId("challenge-view")).toHaveAttribute("data-id", "c-new");
+      expect(await screen.findByRole("button", { name: "New one" })).toBeInTheDocument();
+    });
+
+    it("gives the challenge buttons a 44 px target on touch", async () => {
+      renderPage();
+      await screen.findByRole("button", { name: "Family five" });
+      for (const name of ["New challenge…", "Play: Family five", "Delete Family five", "Leave Iceland"]) {
+        expect(screen.getByRole("button", { name }).className.split(" ")).toContain("touch:min-h-11");
+      }
     });
   });
 });

@@ -798,4 +798,149 @@ describe("api client", () => {
       expect(assign).toHaveBeenCalledWith("/api/auth/login?return_to=" + encodeURIComponent("/trips?x=1"));
     });
   });
+
+  describe("challenges", () => {
+    const summary = { id: "c1", name: "Family five", is_owner: true, played: 0, finished: false };
+    const noBody = () => ({ status: 204, ok: true, json: async () => { throw new Error("no body"); } });
+    const scored = { actual_lat: 47.5, actual_lng: 19, distance_km: 3.2, total_score: 4800 };
+
+    it.each([
+      {
+        name: "listChallenges()",
+        call: () => api.listChallenges(),
+        reply: response(200, [summary]),
+        url: "/api/challenges",
+        method: undefined,
+        body: undefined,
+        want: [summary],
+      },
+      {
+        name: "createChallenge() with the Game's filters in the query",
+        call: () => api.createChallenge("Family five", ["u2", "u3"], { owner: "mine", album_id: ["a1", "a2"], from_date: "" }),
+        reply: response(201, summary),
+        url: "/api/challenges?owner=mine&album_id=a1&album_id=a2",
+        method: "POST",
+        body: { name: "Family five", member_ids: ["u2", "u3"] },
+        want: summary,
+      },
+      {
+        name: "createChallenge() alone and without filters",
+        call: () => api.createChallenge("Solo", [], {}),
+        reply: response(201, summary),
+        url: "/api/challenges",
+        method: "POST",
+        body: { name: "Solo", member_ids: [] },
+        want: summary,
+      },
+      {
+        name: "guessChallenge() with a date",
+        call: () => api.guessChallenge("c1", 3, { lat: 47.2, lng: 19.1 }, "2024-05-11"),
+        reply: response(200, scored),
+        url: "/api/challenges/c1/guess",
+        method: "POST",
+        body: { position: 3, guess_lat: 47.2, guess_lng: 19.1, guess_date: "2024-05-11" },
+        want: scored,
+      },
+      {
+        name: "guessChallenge() without a date",
+        call: () => api.guessChallenge("c1", 1, { lat: -33.9, lng: 151.2 }, ""),
+        reply: response(200, scored),
+        url: "/api/challenges/c1/guess",
+        method: "POST",
+        body: { position: 1, guess_lat: -33.9, guess_lng: 151.2, guess_date: "" },
+        want: scored,
+      },
+      {
+        name: "deleteChallenge()",
+        call: () => api.deleteChallenge("c1"),
+        reply: noBody(),
+        url: "/api/challenges/c1",
+        method: "DELETE",
+        body: undefined,
+        want: undefined,
+      },
+      {
+        name: "leaveChallenge() accepts a 204",
+        call: () => api.leaveChallenge("c1"),
+        reply: noBody(),
+        url: "/api/challenges/c1/leave",
+        method: "POST",
+        body: undefined,
+        want: undefined,
+      },
+    ])("$name", async ({ call, reply, url, method, body, want }) => {
+      fetchMock.mockResolvedValue(reply);
+      await expect(call()).resolves.toEqual(want);
+      const [gotUrl, init] = fetchMock.mock.calls[0];
+      expect(gotUrl).toBe(url);
+      expect(init.method).toBe(method);
+      if (body === undefined) {
+        expect(init.body).toBeUndefined();
+      } else {
+        expect(init.headers).toEqual({ "Content-Type": "application/json" });
+        expect(JSON.parse(init.body)).toEqual(body);
+      }
+    });
+
+    it("listChallenges() turns a null list into []", async () => {
+      fetchMock.mockResolvedValue(response(200, null));
+      await expect(api.listChallenges()).resolves.toEqual([]);
+    });
+
+    it("getChallenge() passes the abort signal to fetch", async () => {
+      const signal = new AbortController().signal;
+      const body = { ...summary, members: [], round: null, results: [] };
+      fetchMock.mockResolvedValue(response(200, body));
+      await expect(api.getChallenge("c1", signal)).resolves.toEqual(body);
+      expect(fetchMock).toHaveBeenCalledWith("/api/challenges/c1", { signal });
+    });
+
+    it("getChallenge() rejects with the abort", async () => {
+      const abort = new DOMException("aborted", "AbortError");
+      fetchMock.mockRejectedValue(abort);
+      await expect(api.getChallenge("c1", new AbortController().signal)).rejects.toBe(abort);
+    });
+
+    it.each([
+      { status: 409, reason: "Only 3 located items match the filters and can be seen by every player. A challenge needs 5." },
+      { status: 400, reason: "a challenge has at most 20 players" },
+    ])("createChallenge() carries the reason of a $status", async ({ status, reason }) => {
+      fetchMock.mockResolvedValue({ ...response(status), text: async () => reason + "\n" });
+      const error = await api.createChallenge("x", ["u2"], { owner: "mine" }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status, reason, message: `POST /challenges?owner=mine failed: ${status}` });
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it("createChallenge() has no reason for an unknown player or a server error", async () => {
+      const text = vi.fn(async () => "user not found");
+      fetchMock.mockResolvedValue({ ...response(404), text });
+      await expect(api.createChallenge("x", ["u9"], {})).rejects.toMatchObject({ status: 404, reason: null });
+      fetchMock.mockResolvedValue({ ...response(500), text });
+      await expect(api.createChallenge("x", [], {})).rejects.toMatchObject({ status: 500, reason: null });
+      expect(text).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { name: "getChallenge() for someone who does not play", call: () => api.getChallenge("c9"), status: 404, message: "GET /challenges/c9 failed: 404" },
+      { name: "guessChallenge() on a round guessed before", call: () => api.guessChallenge("c1", 1, { lat: 1, lng: 2 }, ""), status: 409, message: "POST /challenges/c1/guess failed: 409" },
+      { name: "guessChallenge() on a round that is gone", call: () => api.guessChallenge("c1", 2, { lat: 1, lng: 2 }, ""), status: 404, message: "POST /challenges/c1/guess failed: 404" },
+      { name: "deleteChallenge() as a player", call: () => api.deleteChallenge("c1"), status: 403, message: "DELETE /challenges/c1 failed: 403" },
+      { name: "leaveChallenge() as the owner", call: () => api.leaveChallenge("c1"), status: 400, message: "POST /challenges/c1/leave failed: 400" },
+    ])("$name rejects with the status", async ({ call, status, message }) => {
+      fetchMock.mockResolvedValue(response(status));
+      await expect(call()).rejects.toMatchObject({ status, message });
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { name: "getChallenge()", call: () => api.getChallenge("c1") },
+      { name: "guessChallenge()", call: () => api.guessChallenge("c1", 1, { lat: 1, lng: 2 }, "") },
+      { name: "leaveChallenge()", call: () => api.leaveChallenge("c1") },
+    ])("$name redirects to login on 401", async ({ call }) => {
+      fetchMock.mockResolvedValue(response(401));
+      await expect(call()).rejects.toMatchObject({ status: 401 });
+      expect(assign).toHaveBeenCalledWith("/api/auth/login?return_to=" + encodeURIComponent("/trips?x=1"));
+    });
+  });
 });

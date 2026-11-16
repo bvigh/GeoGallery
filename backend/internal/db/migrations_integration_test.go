@@ -742,3 +742,64 @@ func TestMigration000014_MediaTimeEdit(t *testing.T) {
 	migrateTo(t, m, 14)
 	assertTimeEdit()
 }
+
+var challengeTables = []string{"challenges", "challenge_members", "challenge_items", "challenge_scores"}
+
+// Migration 15 adds the four challenge tables and touches nothing else: up, down with the tables
+// populated, and up again.
+func TestMigration000015_Challenges(t *testing.T) {
+	dsn := testdb.NewEmpty(t)
+	m := newMigrator(t, dsn)
+	migrateTo(t, m, 6)
+	seedLegacyData(t, dsn)
+	migrateTo(t, m, 14)
+	assertNoChallengeTables := func() {
+		withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+			for _, table := range challengeTables {
+				assert.False(t, tableExists(ctx, t, conn, table), "table %s", table)
+			}
+			var n int
+			require.NoError(t, conn.QueryRow(ctx, `SELECT COUNT(*) FROM media`).Scan(&n))
+			assert.Equal(t, 1, n, "the media rows are untouched")
+		})
+	}
+	assertNoChallengeTables()
+
+	migrateTo(t, m, 15)
+	assertEmptyChallengeTables := func() {
+		withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+			for _, table := range challengeTables {
+				require.True(t, tableExists(ctx, t, conn, table), "table %s", table)
+				var n int
+				require.NoError(t, conn.QueryRow(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n))
+				assert.Zero(t, n, "table %s starts empty", table)
+			}
+		})
+	}
+	assertEmptyChallengeTables()
+
+	// One challenge on the legacy media row, with a guess: the down migration must drop populated tables.
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		var id string
+		require.NoError(t, conn.QueryRow(ctx, `
+			INSERT INTO challenges (owner_id, name, max_dist_km, bounds_south, bounds_west, bounds_north, bounds_east)
+			VALUES ($1, 'Legacy', 1, 47, 19, 47.5, 19.5) RETURNING id`, legacyOwnerID).Scan(&id))
+		_, err := conn.Exec(ctx, `INSERT INTO challenge_members (challenge_id, user_id) VALUES ($1, $2)`, id, legacyOwnerID)
+		require.NoError(t, err)
+		tag, err := conn.Exec(ctx, `
+			INSERT INTO challenge_items (challenge_id, position, media_id, location, gps_confidence)
+			SELECT $1, 1, id, ST_SetSRID(ST_MakePoint(19.04, 47.5), 4326), 1 FROM media`, id)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), tag.RowsAffected())
+		_, err = conn.Exec(ctx, `
+			INSERT INTO challenge_scores (challenge_id, position, user_id, guess, distance_km, location_score, total_score)
+			VALUES ($1, 1, $2, ST_SetSRID(ST_MakePoint(19, 47), 4326), 55.7, 0, 0)`, id, legacyOwnerID)
+		require.NoError(t, err)
+	})
+
+	migrateTo(t, m, 14)
+	assertNoChallengeTables()
+
+	migrateTo(t, m, 15)
+	assertEmptyChallengeTables()
+}

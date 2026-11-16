@@ -96,7 +96,7 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	maxDistKm, bounds, err := h.measureFilteredSet(r.Context(), conds, args)
+	maxDistKm, bounds, err := measureMediaSet(r.Context(), h.db, conds, args)
 	if err != nil {
 		slog.Warn("game: measuring the filtered set failed, using defaults", "err", err)
 		maxDistKm, bounds = 1.0, nil
@@ -115,10 +115,11 @@ func (h *GameHandler) NewRound(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// measureFilteredSet returns the longest distance across the set and its bounds for the guess map
-// (nil if the set emptied since the round was picked). It reuses NewRound's conds and args, so it
-// expects media aliased as m.
-func (h *GameHandler) measureFilteredSet(ctx context.Context, conds []string, args []any) (float64, *[4]float64, error) {
+// measureMediaSet returns the longest distance across the located media that match conds, and
+// their bounds for the guess map (nil for an empty set, as when it emptied since a round was
+// picked). conds and args are buildMediaFilter's, with whatever the caller added, so media is
+// aliased as m. A round is scored on this scale, and a challenge keeps it for all its players.
+func measureMediaSet(ctx context.Context, db gameDB, conds []string, args []any) (float64, *[4]float64, error) {
 	// ST_LongestLine finds the two farthest points (degree-space, fast via convex hull).
 	// Casting the resulting linestring to geography gives geodesic length in meters.
 	// The bounds are plain degrees too: a set across the antimeridian gets a box around the world.
@@ -139,7 +140,7 @@ func (h *GameHandler) measureFilteredSet(ctx context.Context, conds []string, ar
 	`, strings.Join(conds, " AND "))
 	var maxDist float64
 	var south, west, north, east *float64
-	if err := h.db.QueryRow(ctx, sql, args...).Scan(&maxDist, &south, &west, &north, &east); err != nil {
+	if err := db.QueryRow(ctx, sql, args...).Scan(&maxDist, &south, &west, &north, &east); err != nil {
 		return 1.0, nil, err
 	}
 	if maxDist < 1.0 {
@@ -226,36 +227,53 @@ func (h *GameHandler) SubmitGuess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	distKm := geo.HaversineKm(req.GuessLat, req.GuessLng, actual.Lat, actual.Lng)
-	maxDistKm := req.MaxDistKm
+	result := scoreGuess(guessAnswer{
+		lat: actual.Lat, lng: actual.Lng, takenAt: actual.TakenAt, confidence: actual.GpsConfidence,
+	}, req.GuessLat, req.GuessLng, req.GuessDate, req.MaxDistKm)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// guessAnswer is what a guess is scored against: where the item is, when it was taken (taken_at as
+// Postgres prints it, nil without one) and how far its location can be trusted.
+type guessAnswer struct {
+	lat, lng   float64
+	takenAt    *string
+	confidence float64
+}
+
+// scoreGuess scores one guess, for a free round and for a challenge's round alike. The location
+// score is relative to maxDistKm (at least 1). A date counts only when the item has one and
+// guessDate reads as YYYY-MM-DD; the total is then the mean of the two scores.
+func scoreGuess(a guessAnswer, guessLat, guessLng float64, guessDate string, maxDistKm float64) guessResult {
 	if maxDistKm < 1.0 {
 		maxDistKm = 1.0
 	}
-	locScore := locationScore(distKm, maxDistKm, actual.GpsConfidence)
-
+	distKm := geo.HaversineKm(guessLat, guessLng, a.lat, a.lng)
+	locScore := locationScore(distKm, maxDistKm, a.confidence)
 	result := guessResult{
-		ActualLat:     actual.Lat,
-		ActualLng:     actual.Lng,
-		ActualDate:    actual.TakenAt,
+		ActualLat:     a.lat,
+		ActualLng:     a.lng,
+		ActualDate:    a.takenAt,
 		DistanceKm:    distKm,
 		LocationScore: locScore,
 		TotalScore:    locScore,
 	}
-
-	if actual.TakenAt != nil && req.GuessDate != "" {
-		actualT, err1 := time.Parse("2006-01-02", (*actual.TakenAt)[:10])
-		guessT, err2 := time.Parse("2006-01-02", req.GuessDate)
-		if err1 == nil && err2 == nil {
-			diffDays := math.Abs(actualT.Sub(guessT).Hours() / 24)
-			ts := timeScore(diffDays)
-			result.DateDiffDays = &diffDays
-			result.TimeScore = &ts
-			result.TotalScore = (locScore + ts) / 2
-		}
+	if a.takenAt == nil || guessDate == "" || len(*a.takenAt) < len(time.DateOnly) {
+		return result
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	actualT, err1 := time.Parse(time.DateOnly, (*a.takenAt)[:len(time.DateOnly)])
+	guessT, err2 := time.Parse(time.DateOnly, guessDate)
+	if err1 != nil || err2 != nil {
+		return result
+	}
+	diffDays := math.Abs(actualT.Sub(guessT).Hours() / 24)
+	ts := timeScore(diffDays)
+	result.DateDiffDays = &diffDays
+	result.TimeScore = &ts
+	result.TotalScore = (locScore + ts) / 2
+	return result
 }
 
 const toleranceScaleKm = 10.0

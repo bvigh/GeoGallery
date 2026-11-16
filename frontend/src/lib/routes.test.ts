@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { galleryRoute, parseRoute, routeUrl, tabRoute, type Route } from "@/lib/routes";
+import { challengeRoute, galleryRoute, parseRoute, routeUrl, tabRoute, type Route } from "@/lib/routes";
 
 const TRIP = "0b6f3c1e-5d1a-4c47-9a8e-2f0d7b9c4e11";
 const ITEM = "7c2e9d40-1b3a-4f6e-8d5c-a9e1f0b2c3d4";
@@ -16,6 +16,7 @@ describe("parseRoute", () => {
     [`/trips/${TRIP}`, "", galleryRoute("trips", TRIP)],
     [`/trips/${TRIP}`, `?item=${ITEM}`, galleryRoute("trips", TRIP, ITEM)],
     [`/albums/${TRIP}`, `?item=${ITEM}`, galleryRoute("albums", TRIP, ITEM)],
+    [`/game/${TRIP}`, "", challengeRoute(TRIP)],
   ])("reads %s%s", (pathname, search, route) => {
     expect(parseRoute(pathname, search)).toEqual(route);
   });
@@ -29,7 +30,10 @@ describe("parseRoute", () => {
     ["a malformed item", `/albums/${TRIP}`, "?item=42", galleryRoute("albums", TRIP)],
     ["upper-case IDs", `/albums/${TRIP.toUpperCase()}`, `?item=${ITEM.toUpperCase()}`, galleryRoute("albums", TRIP, ITEM)],
     ["parts after the ID", `/trips/${TRIP}/more`, `?x=1&item=${ITEM}`, galleryRoute("trips", TRIP, ITEM)],
-    ["an ID on a tab without galleries", `/game/${TRIP}`, `?item=${ITEM}`, tabRoute("game")],
+    ["an ID on a tab without views", `/upload/${TRIP}`, `?item=${ITEM}`, tabRoute("upload")],
+    ["an item on a challenge, which has none", `/game/${TRIP}`, `?item=${ITEM}`, challengeRoute(TRIP)],
+    ["a malformed challenge ID", "/game/42", "", tabRoute("game")],
+    ["an upper-case challenge ID", `/game/${TRIP.toUpperCase()}`, "", challengeRoute(TRIP)],
     ["an item without a gallery", "/albums", `?item=${ITEM}`, tabRoute("albums")],
   ])("reads %s leniently", (_name, pathname, search, route) => {
     expect(parseRoute(pathname, search)).toEqual(route);
@@ -43,12 +47,19 @@ describe("routeUrl", () => {
     [tabRoute("admin"), "/admin"],
     [galleryRoute("trips", TRIP), `/trips/${TRIP}`],
     [galleryRoute("albums", TRIP, ITEM), `/albums/${TRIP}?item=${ITEM}`],
+    [tabRoute("game"), "/game"],
+    [challengeRoute(TRIP), `/game/${TRIP}`],
   ])("writes %o as %s", (route, url) => {
     expect(routeUrl(route)).toBe(url);
   });
 
   it("reads back what it writes", () => {
-    for (const route of [tabRoute("upload"), galleryRoute("albums", TRIP), galleryRoute("trips", TRIP, ITEM)]) {
+    for (const route of [
+      tabRoute("upload"),
+      galleryRoute("albums", TRIP),
+      galleryRoute("trips", TRIP, ITEM),
+      challengeRoute(TRIP),
+    ]) {
       const url = new URL(routeUrl(route), "http://localhost");
       expect(parseRoute(url.pathname, url.search)).toEqual(route);
     }

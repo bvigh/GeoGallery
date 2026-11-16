@@ -96,6 +96,7 @@ func newTestRouter(t *testing.T) http.Handler {
 		gpsTracks:  handlers.NewGPSTrackHandler(nil, time.Hour),
 		gpsMatcher: handlers.NewGPSMatcherHandler(nil, time.Hour),
 		albums:     handlers.NewAlbumHandler(nil),
+		challenges: handlers.NewChallengeHandler(nil, nil),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
 		provenance: handlers.NewProvenanceHandler(nil, nil, time.Hour, ingest.CameraZone{}),
 		checks:     handlers.NewChecksHandler(refusingPool(t), time.Hour),
@@ -172,6 +173,25 @@ func TestRouter_AuthWiring(t *testing.T) {
 		{"session adds album member", http.MethodPost, "/api/albums/" + badID + "/members", false, userSession, nil, http.StatusNotFound},
 		{"session removes album member", http.MethodDelete, "/api/albums/" + badID + "/members/" + badID, false, userSession, nil, http.StatusNotFound},
 		{"anonymous albums", http.MethodGet, "/api/albums", false, "", nil, http.StatusUnauthorized},
+
+		// Playing a challenge is open to tokens; making, deleting and leaving one need a session.
+		// The challenge handler has no DB here: a malformed ID is 404 and a body is checked before
+		// the database, so these statuses show a request got past the auth middleware.
+		{"token opens challenge, malformed id", http.MethodGet, "/api/challenges/" + badID, true, "", nil, http.StatusNotFound},
+		{"token guesses, malformed id", http.MethodPost, "/api/challenges/" + badID + "/guess", true, "", nil, http.StatusNotFound},
+		{"token guesses, no body", http.MethodPost, "/api/challenges/" + mediaID + "/guess", true, "", nil, http.StatusBadRequest},
+		{"session guesses, no body", http.MethodPost, "/api/challenges/" + mediaID + "/guess", false, userSession, nil, http.StatusBadRequest},
+		{"token creates challenge", http.MethodPost, "/api/challenges", true, "", nil, http.StatusForbidden},
+		{"token deletes challenge", http.MethodDelete, "/api/challenges/" + mediaID, true, "", nil, http.StatusForbidden},
+		{"token leaves challenge", http.MethodPost, "/api/challenges/" + mediaID + "/leave", true, "", nil, http.StatusForbidden},
+		{"session creates challenge, no body", http.MethodPost, "/api/challenges", false, userSession, nil, http.StatusBadRequest},
+		{"session creates challenge, malformed filter", http.MethodPost, "/api/challenges?owner=everyone", false, userSession, nil, http.StatusBadRequest},
+		{"session deletes challenge, malformed id", http.MethodDelete, "/api/challenges/" + badID, false, userSession, nil, http.StatusNotFound},
+		{"session leaves challenge, malformed id", http.MethodPost, "/api/challenges/" + badID + "/leave", false, userSession, nil, http.StatusNotFound},
+		{"anonymous challenges", http.MethodGet, "/api/challenges", false, "", nil, http.StatusUnauthorized},
+		{"anonymous challenge", http.MethodGet, "/api/challenges/" + mediaID, false, "", nil, http.StatusUnauthorized},
+		{"anonymous guess", http.MethodPost, "/api/challenges/" + mediaID + "/guess", false, "", nil, http.StatusUnauthorized},
+		{"anonymous challenge create", http.MethodPost, "/api/challenges", false, "", nil, http.StatusUnauthorized},
 
 		// Camera clock rules are open to tokens. Without a DB these statuses come from the handler's
 		// input checks; the token reaching the DB is in clock_rules_routes_integration_test.go.
