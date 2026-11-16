@@ -38,7 +38,7 @@ Mostly frontend. Small enough to ship as two or three bundled PRs.
 | #20 | Integration test: a manual location re-places nearby interpolated items | XS |
 | #21 | Fix `npm run lint` | S |
 
-#20 answers an open question. Setting a location by hand does move nearby items, by design. The new manual track point re-places every interpolated item of the owner within `GPS_MATCH_WINDOW_HOURS`. Items with an EXIF or manual location are left alone.
+#20 answers an open question. Setting a location by hand does move nearby items, by design. The new manual track point re-places every interpolated item of the owner within `GPS_MATCH_WINDOW_HOURS`. Items with an EXIF or manual location are left alone. An integration test now pins it (`media_location_integration_test.go`).
 
 ## M2: Time and place correctness
 
