@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -45,6 +44,7 @@ type ExifData struct {
 	WidthPx     *int
 	HeightPx    *int
 	Raw         RawExif
+	Pano        Pano // from the XMP, not the EXIF: what the photo says about its projection
 }
 
 // RawExif is what the file said about its capture time, including what takenAt could not use or
@@ -196,10 +196,10 @@ var exifTagsRead = map[string]string{
 }
 
 // ExtractExif reads the EXIF block of the image at the start of r, which may be only the head of
-// the file. Anything that is not a supported image gives an empty result. zone holds the timezone
-// camera clocks are assumed to show (the batch's, the owner's or CAMERA_TIMEZONE; nil Loc means
-// UTC), the camera rules and the owner's clock rules. takenAt explains how the capture time is read, and Raw keeps what it read it
-// from.
+// the file, and the projection its XMP names (readPano). Anything that is not a supported image
+// gives an empty result. zone holds the timezone camera clocks are assumed to show (the batch's,
+// the owner's or CAMERA_TIMEZONE; nil Loc means UTC), the camera rules and the owner's clock rules.
+// takenAt explains how the capture time is read, and Raw keeps what it read it from.
 func ExtractExif(r io.ReadSeeker, zone CameraZone) ExifData {
 	tags, err := readExifTags(r)
 	var result ExifData
@@ -218,6 +218,7 @@ func ExtractExif(r io.ReadSeeker, zone CameraZone) ExifData {
 	}
 	result.WidthPx = tags.dimension("ExifImageWidth")
 	result.HeightPx = tags.dimension("ExifImageHeight")
+	result.Pano = readPano(r)
 
 	return result
 }
@@ -240,22 +241,27 @@ func readExifTags(r io.ReadSeeker) (exifTags, error) {
 // decodeExif walks the EXIF of the image at the start of r within the limits above, and gives handle
 // every tag that want accepts. Anything that is not a supported image is walked over with no error.
 func decodeExif(r io.ReadSeeker, want func(imagemeta.TagInfo) bool, handle func(imagemeta.TagInfo)) error {
-	format, ok := imageFormat(r)
-	if !ok {
-		return nil
-	}
-	_, err := imagemeta.Decode(imagemeta.Options{
-		R:               r,
-		ImageFormat:     format,
+	return decode(r, imagemeta.Options{
 		Sources:         imagemeta.EXIF,
-		LimitNumTags:    exifTagLimit,
-		LimitTagSize:    exifTagSizeLimit,
 		ShouldHandleTag: want,
 		HandleTag: func(t imagemeta.TagInfo) error {
 			handle(t)
 			return nil
 		},
 	})
+}
+
+// decode runs imagemeta with opts on the image at the start of r, within the limits above: every
+// decode of a file goes through here. A TIFF keeps its XMP in an IFD0 tag, so reading only the XMP
+// walks IFD0 too. Anything that is not a supported image is walked over with no error.
+func decode(r io.ReadSeeker, opts imagemeta.Options) error {
+	format, ok := imageFormat(r)
+	if !ok {
+		return nil
+	}
+	opts.R, opts.ImageFormat = r, format
+	opts.LimitNumTags, opts.LimitTagSize = exifTagLimit, exifTagSizeLimit
+	_, err := imagemeta.Decode(opts)
 	return err
 }
 
@@ -629,14 +635,21 @@ func finishTags(tags []Tag) []Tag {
 	return clean[:min(len(clean), maxListedTags)]
 }
 
-// DetectMediaType returns "photo", "video", "photo_360", or "video_360".
-// 360° detection uses two signals, either of which is sufficient:
-//  1. Filename contains "360", "pano", "panorama", or "spherical"
-//  2. EXIF dimensions are present and aspect ratio is within 5% of 2:1 with
-//     width ≥ 3000px (rules out accidental landscape crops)
-func DetectMediaType(e ExifData, filename, ext string) string {
+// DetectMediaType returns "photo", "video", "photo_360" or "video_360": the extension tells a video
+// from a photo, and what the file says about its projection makes it 360°.
+//  1. The XMP decides when it names a projection (GPano:ProjectionType). Only an equirectangular
+//     image of the whole sphere is 360°. Another projection, such as a phone's cylindrical
+//     panorama, or a part of a sphere is flat: the 360° viewers wrap the image round the whole
+//     sphere.
+//  2. Otherwise the frame does (isSphereFrame).
+//
+// The file name is never read. Its keywords made flat files 360°: "360" turns up in dates and
+// counters (20190713_143602.jpg, P1036012.JPG), and a phone's "PANO" is a flat panorama. An
+// Insta360 name is no sign either: a reframed export keeps the name of the 360° clip it was cut
+// from.
+func DetectMediaType(e ExifData, ext string) string {
 	isVideo := IsVideoExt(ext)
-	if is360(e, filename) {
+	if is360(e) {
 		if isVideo {
 			return "video_360"
 		}
@@ -648,11 +661,10 @@ func DetectMediaType(e ExifData, filename, ext string) string {
 	return "photo"
 }
 
-// DetectMediaTypeFromProbe applies a VideoProbeResult to override 360°
-// detection for videos where EXIF dimensions are absent. Equirectangular
-// spherical mapping metadata takes precedence; the 2:1 aspect ratio check
-// is used as a fallback when that tag is absent.
-func DetectMediaTypeFromProbe(e ExifData, filename, ext string, probe VideoProbeResult) string {
+// DetectMediaTypeFromProbe is DetectMediaType for a video that ffprobe read. Its spherical metadata
+// (side data "Spherical Mapping", equirectangular) makes it 360°; otherwise the probed frame stands
+// in for EXIF dimensions the video does not have.
+func DetectMediaTypeFromProbe(e ExifData, ext string, probe VideoProbeResult) string {
 	if probe.Equirectangular {
 		return "video_360"
 	}
@@ -660,7 +672,7 @@ func DetectMediaTypeFromProbe(e ExifData, filename, ext string, probe VideoProbe
 		e.WidthPx = &probe.WidthPx
 		e.HeightPx = &probe.HeightPx
 	}
-	return DetectMediaType(e, filename, ext)
+	return DetectMediaType(e, ext)
 }
 
 func IsVideoExt(ext string) bool {
@@ -671,18 +683,32 @@ func IsVideoExt(ext string) bool {
 	return false
 }
 
-func is360(e ExifData, filename string) bool {
-	base := strings.ToLower(strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename)))
-	for _, kw := range []string{"360", "pano", "panorama", "spherical"} {
-		if strings.Contains(base, kw) {
-			return true
-		}
+func is360(e ExifData) bool {
+	if e.Pano.Projection != "" {
+		return strings.EqualFold(e.Pano.Projection, "equirectangular") && !e.Pano.Partial
 	}
-	if e.WidthPx != nil && e.HeightPx != nil && *e.HeightPx > 0 && *e.WidthPx >= 3000 {
-		ratio := float64(*e.WidthPx) / float64(*e.HeightPx)
-		if ratio >= 1.95 && ratio <= 2.05 {
-			return true
-		}
+	return isSphereFrame(e.WidthPx, e.HeightPx)
+}
+
+// The frame of an equirectangular image of the whole sphere: twice as wide as it is high. In one
+// real library every one of 401 360° photos and videos was exactly 2:1, while phone panoramas came
+// as close as 2.03:1. The floor keeps out smaller 2:1 frames, such as a crop or a screenshot.
+const (
+	sphereRatioPercent = 1 // how far from 2:1 a frame's ratio may be, in percent
+	sphereMinWidth     = 3000
+)
+
+// isSphereFrame reports whether a frame is at least sphereMinWidth pixels wide and its ratio within
+// sphereRatioPercent of 2:1. |w/h − 2| ≤ 2·percent/100 is |w − 2h|·100 ≤ 2h·percent, which is
+// exact in whole numbers.
+func isSphereFrame(width, height *int) bool {
+	if width == nil || height == nil || *height <= 0 || *width < sphereMinWidth {
+		return false
 	}
-	return false
+	w, h := int64(*width), int64(*height)
+	off := w - 2*h
+	if off < 0 {
+		off = -off
+	}
+	return off*100 <= 2*h*sphereRatioPercent
 }

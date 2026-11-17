@@ -192,9 +192,9 @@ func (r *MediaRegistrar) registerMedia(
 		if err != nil {
 			return registerResult{}, err
 		}
-		mediaType = ingest.DetectMediaTypeFromProbe(exifData, filename, ext, probe)
+		mediaType = ingest.DetectMediaTypeFromProbe(exifData, ext, probe)
 	} else {
-		mediaType = ingest.DetectMediaType(exifData, filename, ext)
+		mediaType = ingest.DetectMediaType(exifData, ext)
 	}
 
 	var uploadBody io.Reader

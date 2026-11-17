@@ -19,10 +19,14 @@ func FuzzExtractExif(f *testing.F) {
 		Make: "samsung", Model: "SM-S921B", DateTimeOriginal: "2024:06:01 12:13:14", OffsetTimeOriginal: "+02:00",
 		GPS: &exiftest.GPS{Lat: 47.4979, Lng: 19.0402, Time: time.Date(2024, 6, 1, 10, 13, 14, 0, time.UTC)},
 	}
+	// A photo sphere, so the fuzzer reaches the XMP of every format that has one.
+	sphere := exiftest.Photo{Make: "Arashi Vision", Model: "insta360 x5", DateTimeOriginal: "2025:06:01 12:13:14",
+		XMP: exiftest.GPanoPacket(sphereProps...)}
 	for _, seed := range [][]byte{
 		exiftest.JPEG(photo), exiftest.TIFF(photo), exiftest.PNG(photo), exiftest.WebP(photo), exiftest.HEIF(photo),
 		exiftest.JPEG(exiftest.Photo{DateTime: "2009:04:15 10:20:30", BrokenExifIFD: true}),
 		exiftest.JPEG(exiftest.Photo{Make: photo.Make, Model: photo.Model, DateTimeOriginal: photo.DateTimeOriginal}), // read by the clock rule below
+		exiftest.JPEG(sphere), exiftest.TIFF(sphere), exiftest.WebP(sphere), exiftest.HEIF(sphere),
 	} {
 		f.Add(seed)
 	}

@@ -16,47 +16,90 @@ import (
 	"github.com/bvigh/geogallery/internal/ingest/exiftest/crafted"
 )
 
-func TestDetectMediaType_Filename360_IsPhoto360(t *testing.T) {
-	result := DetectMediaType(ExifData{}, "photo360.jpg", ".jpg")
-	assert.Equal(t, "photo_360", result)
+// frame is ExifData with only a frame, w by h pixels.
+func frame(w, h int) ExifData {
+	return ExifData{WidthPx: &w, HeightPx: &h}
 }
 
-func TestDetectMediaType_StandardJpg_IsPhoto(t *testing.T) {
-	result := DetectMediaType(ExifData{}, "image.jpg", ".jpg")
-	assert.Equal(t, "photo", result)
+// withPano is e with what its XMP says about the projection.
+func withPano(e ExifData, projection string, partial bool) ExifData {
+	e.Pano = Pano{Projection: projection, Partial: partial}
+	return e
 }
 
-func TestDetectMediaType_PanoMov_IsVideo360(t *testing.T) {
-	result := DetectMediaType(ExifData{}, "pano.mov", ".mov")
-	assert.Equal(t, "video_360", result)
+func TestDetectMediaType(t *testing.T) {
+	width := 6000
+	tests := []struct {
+		name string
+		exif ExifData
+		ext  string
+		want string
+	}{
+		// The XMP decides when it names a projection.
+		{"a photo sphere's XMP", withPano(ExifData{}, "equirectangular", false), ".jpg", "photo_360"},
+		{"a photo sphere's XMP in a frame that is not 2:1", withPano(frame(4000, 3000), "equirectangular", false), ".jpg", "photo_360"},
+		{"the projection in capitals", withPano(ExifData{}, "Equirectangular", false), ".jpg", "photo_360"},
+		{"part of a sphere is flat, in a 2:1 frame too", withPano(frame(6000, 3000), "equirectangular", true), ".jpg", "photo"},
+		{"a phone's cylindrical panorama is flat", withPano(frame(8000, 2500), "cylindrical", false), ".jpg", "photo"},
+		{"another projection is flat in a 2:1 frame", withPano(frame(6000, 3000), "cylindrical", false), ".jpg", "photo"},
+		{"a projection the viewers do not know is flat", withPano(ExifData{}, "cubemap", false), ".jpg", "photo"},
+
+		// Otherwise the frame.
+		{"an Insta360 X5 photo's frame", frame(11904, 5952), ".jpg", "photo_360"},
+		{"a 2:1 frame at the floor", frame(3000, 1500), ".jpg", "photo_360"},
+		{"a 2:1 frame below the floor", frame(2998, 1499), ".jpg", "photo"},
+		{"a 2:1 screenshot", frame(2160, 1080), ".jpg", "photo"},
+		{"wider than 2:1, within 1%", frame(6000, 2971), ".jpg", "photo_360"},
+		{"wider than 2:1, past 1%", frame(6000, 2969), ".jpg", "photo"},
+		{"narrower than 2:1, within 1%", frame(5941, 3000), ".jpg", "photo_360"},
+		{"narrower than 2:1, past 1%", frame(5939, 3000), ".jpg", "photo"},
+		{"a phone panorama at 2.03:1", frame(3840, 1888), ".jpg", "photo"},
+		{"a 4:3 photo", frame(4000, 3000), ".jpg", "photo"},
+		{"a 16:9 frame", frame(3840, 2160), ".jpg", "photo"},
+		{"no frame", ExifData{}, ".jpg", "photo"},
+		{"a width alone", ExifData{WidthPx: &width}, ".jpg", "photo"},
+		{"a zero height", frame(6000, 0), ".jpg", "photo"},
+		{"a negative height", frame(6000, -3000), ".jpg", "photo"},
+
+		// The extension tells a video from a photo.
+		{"a 2:1 video", frame(5760, 2880), ".mp4", "video_360"},
+		{"a 2:1 video in capitals", frame(5760, 2880), ".MOV", "video_360"},
+		{"a 16:9 video", frame(1920, 1080), ".mp4", "video"},
+		{"a video without a frame", ExifData{}, ".mov", "video"},
+		{"an AVI", ExifData{}, ".avi", "video"},
+		{"a Matroska video", ExifData{}, ".mkv", "video"},
+		{"a 3GP video", ExifData{}, ".3gp", "video"},
+		{"a HEIC photo", ExifData{}, ".heic", "photo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, DetectMediaType(tt.exif, tt.ext))
+		})
+	}
 }
 
-func TestDetectMediaType_Mp4_IsVideo(t *testing.T) {
-	result := DetectMediaType(ExifData{}, "clip.mp4", ".mp4")
-	assert.Equal(t, "video", result)
-}
-
-func TestDetectMediaType_3gp_IsVideo(t *testing.T) {
-	result := DetectMediaType(ExifData{}, "clip.3gp", ".3gp")
-	assert.Equal(t, "video", result)
-}
-
-func TestDetectMediaType_NonSquareRatio_IsPhoto(t *testing.T) {
-	w, h := 3000, 1600
-	e := ExifData{WidthPx: &w, HeightPx: &h}
-
-	result := DetectMediaType(e, "image.jpg", ".jpg")
-
-	assert.Equal(t, "photo", result)
-}
-
-func TestDetectMediaType_2to1Ratio_IsPhoto360(t *testing.T) {
-	w, h := 4000, 2000
-	e := ExifData{WidthPx: &w, HeightPx: &h}
-
-	result := DetectMediaType(e, "image.jpg", ".jpg")
-
-	assert.Equal(t, "photo_360", result)
+func TestDetectMediaTypeFromProbe(t *testing.T) {
+	tests := []struct {
+		name  string
+		probe VideoProbeResult
+		want  string
+	}{
+		{"spherical metadata", VideoProbeResult{WidthPx: 5760, HeightPx: 2880, Equirectangular: true}, "video_360"},
+		{"spherical metadata in a frame that is not 2:1", VideoProbeResult{WidthPx: 3840, HeightPx: 2160, Equirectangular: true}, "video_360"},
+		{"a 2:1 frame without metadata", VideoProbeResult{WidthPx: 5760, HeightPx: 2880}, "video_360"},
+		{"a 2:1 frame below the floor", VideoProbeResult{WidthPx: 1920, HeightPx: 960}, "video"},
+		{"a reframed export of a 360° clip", VideoProbeResult{WidthPx: 1920, HeightPx: 1080}, "video"},
+		{"a 4K video", VideoProbeResult{WidthPx: 3840, HeightPx: 2160}, "video"},
+		{"nothing probed", VideoProbeResult{}, "video"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, DetectMediaTypeFromProbe(ExifData{}, ".mp4", tt.probe))
+		})
+	}
+	t.Run("an EXIF frame outranks the probed one", func(t *testing.T) {
+		assert.Equal(t, "video", DetectMediaTypeFromProbe(frame(1920, 1080), ".mp4", VideoProbeResult{WidthPx: 5760, HeightPx: 2880}))
+	})
 }
 
 func mustZone(t *testing.T, name string) *time.Location {
