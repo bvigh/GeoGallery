@@ -4,6 +4,7 @@ import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 import type { OrientationKeyframe } from "@/types";
 import { videoDecodeFailed } from "@/lib/video";
 import { listenVideoKeys } from "@/lib/videoKeys";
+import { startVideo, useVideosStartMuted } from "@/lib/videoSound";
 import VideoDecodeNotice from "./VideoDecodeNotice";
 import ViewerHeader from "./ViewerHeader";
 import { createTapDetector } from "./gestures";
@@ -117,10 +118,14 @@ export default function Video360({
   useEffect(() => { keyframesRef.current = keyframes; }, [keyframes]);
   const tapToPlayRef = useRef(tapToPlay);
   useEffect(() => { tapToPlayRef.current = tapToPlay; }, [tapToPlay]);
+  // Read as each video starts: a setting that loads or changes later leaves the one playing alone.
+  const startMuted = useVideosStartMuted();
+  const startMutedRef = useRef(startMuted);
+  useEffect(() => { startMutedRef.current = startMuted; }, [startMuted]);
   const mountRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [playing, setPlaying] = useState(true);
-  const [muted, setMuted] = useState(true);
+  const [muted, setMuted] = useState(startMuted);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   // The url whose picture the browser cannot decode; a new url starts unflagged.
@@ -196,9 +201,16 @@ export default function Video360({
     video.crossOrigin = "anonymous";
     video.src = url;
     video.loop = true;
-    video.muted = true; // start muted for autoplay
     video.playsInline = true;
-    video.play().catch(() => {});
+    // Muted or with sound as the user's setting says. A browser that allows no sound yet gets it
+    // muted, and one that refuses even that leaves it paused: the bar then says so.
+    let live = true;
+    startVideo(video, startMutedRef.current).then((nowMuted) => {
+      if (!live) return;
+      setMuted(nowMuted);
+      setPlaying(!video.paused);
+    });
+    setMuted(video.muted);
 
     const onLoadedMetadata = () => setDuration(video.duration);
     const onPlay = () => setPlaying(true);
@@ -301,6 +313,7 @@ export default function Video360({
     animate();
 
     return () => {
+      live = false;
       if (captureRef) captureRef.current = null;
       if (captureTimeRef) captureTimeRef.current = null;
       if (controlRef) controlRef.current = null;

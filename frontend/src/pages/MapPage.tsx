@@ -11,6 +11,7 @@ import { useCurrentUser } from "@/components/auth/AuthContext";
 import { AlbumMenu } from "@/components/albums/AlbumMenu";
 import Panorama360 from "../components/viewer/Panorama360";
 import Video360 from "../components/viewer/Video360";
+import { FullSizeVideo } from "@/components/viewer/FullSizeVideo";
 import VideoDecodeNotice from "../components/viewer/VideoDecodeNotice";
 import { useVideoDecodeCheck } from "@/lib/video";
 import { useCloseOnBack } from "@/lib/history";
@@ -156,7 +157,8 @@ function FullscreenOverlay({
         />
       ) : (
         <div className="relative" onClick={(e) => e.stopPropagation()}>
-          <video
+          <FullSizeVideo
+            key={url}
             ref={videoRef}
             src={url}
             controls

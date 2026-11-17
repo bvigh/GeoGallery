@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { OrientationKeyframe } from "@/types";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { VideoSoundContext } from "@/lib/videoSound";
 import Video360 from "./Video360";
 import { shortToCameraFov } from "./sphereMath";
 import {
@@ -256,6 +257,88 @@ describe("Video360", () => {
     fireEvent.keyDown(document.body, { key: "m" });
     expect(video.muted).toBe(true);
     expect(screen.getByRole("button", { name: "Unmute" })).toBeInTheDocument();
+  });
+
+  describe("video sound", () => {
+    // The browser's answer to a play() with sound before the page has had a click or a key.
+    const noSoundYet = () => new DOMException("play() with sound needs a user gesture", "NotAllowedError");
+
+    // Video360 under a video sound setting: known (true or false) or not yet (null).
+    function underSetting(startMuted: boolean | null) {
+      return (
+        <VideoSoundContext.Provider value={{ startMuted, report: () => {} }}>
+          <Video360 url="https://s3.example/v360" onClose={() => {}} contained />
+        </VideoSoundContext.Provider>
+      );
+    }
+
+    it("starts with sound when the setting says so, and the control bar follows", async () => {
+      render(underSetting(false));
+      await act(async () => {});
+      expect(play).toHaveBeenCalledOnce();
+      expect(video.muted).toBe(false);
+      expect(screen.getByRole("button", { name: "Mute" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+
+      fireEvent.keyDown(document.body, { key: "m" });
+      expect(video.muted).toBe(true);
+      expect(screen.getByRole("button", { name: "Unmute" })).toBeInTheDocument();
+    });
+
+    it("plays muted when the browser allows no sound yet, as after opening a link", async () => {
+      const playing = play.getMockImplementation()!;
+      play.mockImplementation(function (this: HTMLMediaElement) {
+        return this.muted ? playing.call(this) : Promise.reject(noSoundYet());
+      });
+      render(underSetting(false));
+      await act(async () => {});
+      expect(play).toHaveBeenCalledTimes(2);
+      expect(video.muted).toBe(true);
+      expect(video.paused).toBe(false);
+      expect(screen.getByRole("button", { name: "Unmute" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+
+      // The sound is a key away.
+      fireEvent.keyDown(document.body, { key: "m" });
+      expect(video.muted).toBe(false);
+    });
+
+    it("offers Play when the browser refuses even a muted start", async () => {
+      play.mockImplementation(() => Promise.reject(noSoundYet()));
+      render(underSetting(true));
+      await act(async () => {});
+      expect(play).toHaveBeenCalledOnce();
+      expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Unmute" })).toBeInTheDocument();
+    });
+
+    it("leaves a video already playing alone when the setting loads or changes", async () => {
+      const { rerender } = render(underSetting(null));
+      await act(async () => {});
+      const playing = video;
+      expect(playing.muted).toBe(true);
+
+      rerender(underSetting(false));
+      await act(async () => {});
+      expect(video).toBe(playing);
+      expect(playing.muted).toBe(true);
+      expect(play).toHaveBeenCalledOnce();
+      expect(screen.getByRole("button", { name: "Unmute" })).toBeInTheDocument();
+    });
+
+    it("starts the next video as the setting says now", async () => {
+      const { rerender } = render(underSetting(true));
+      await act(async () => {});
+      rerender(
+        <VideoSoundContext.Provider value={{ startMuted: false, report: () => {} }}>
+          <Video360 url="https://s3.example/next360" onClose={() => {}} contained />
+        </VideoSoundContext.Provider>
+      );
+      await act(async () => {});
+      expect(video.src).toBe("https://s3.example/next360");
+      expect(video.muted).toBe(false);
+      expect(screen.getByRole("button", { name: "Mute" })).toBeInTheDocument();
+    });
   });
 
   it("keeps Space and M after a drag on the seek bar", () => {

@@ -7,7 +7,7 @@ import { MapPage, MediaPreview } from "./MapPage";
 import type { FilterPanel } from "@/components/map/FilterPanel";
 import type { EvidenceViewProps } from "@/components/evidence/EvidenceView";
 import { AuthContext } from "@/components/auth/AuthContext";
-import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
+import { stubMediaPlayback, withVideoSound } from "@/components/viewer/viewerTestUtils";
 import { emptyFilters } from "@/lib/filters";
 import { browserTimeZone, formatInstant } from "@/lib/time";
 import { BACK_DEPTH_KEY } from "@/lib/history";
@@ -130,8 +130,10 @@ function page(active?: boolean) {
   );
 }
 
-function renderPage(active?: boolean) {
-  const result = render(page(active));
+// startMuted: the user's video sound setting, once the app has it (videos start muted until then).
+function renderPage(active?: boolean, { startMuted }: { startMuted?: boolean } = {}) {
+  const result =
+    startMuted === undefined ? render(page(active)) : render(page(active), { wrapper: withVideoSound(startMuted) });
   return { ...result, setActive: (a: boolean) => result.rerender(page(a)) };
 }
 
@@ -986,9 +988,9 @@ describe("MapPage", () => {
       await settle();
     });
 
-    async function select(items: MediaItem[], button = "select cluster") {
+    async function select(items: MediaItem[], button = "select cluster", startMuted?: boolean) {
       serveMedia(items);
-      renderPage();
+      renderPage(undefined, { startMuted });
       await userEvent.click(await screen.findByRole("button", { name: button }));
     }
 
@@ -1162,13 +1164,35 @@ describe("MapPage", () => {
       expect(pause).toHaveBeenCalledOnce();
       expect(play).toHaveBeenCalledOnce();
 
-      fireEvent.keyDown(video, { key: "m" });
+      // Muted to start: no setting says otherwise here.
       expect(video.muted).toBe(true);
-      fireEvent.keyDown(document.body, { key: "m" });
+      fireEvent.keyDown(video, { key: "m" });
       expect(video.muted).toBe(false);
+      fireEvent.keyDown(document.body, { key: "m" });
+      expect(video.muted).toBe(true);
       play.mockRestore();
       pause.mockRestore();
     });
+
+    it.each([true, false])(
+      "starts every video as the video sound setting says (muted: %s), whatever M did to the one before",
+      async (startMuted) => {
+        const videos = [makeItem("v1"), makeItem("v2")].map((item) => ({ ...item, media_type: "video" as const }));
+        await select(videos, "select cluster", startMuted);
+        await openFullscreen();
+        const dialog = screen.getByRole("dialog");
+        const first = dialog.querySelector("video")!;
+        expect(first).toHaveAttribute("src", "https://s3.example/v1");
+        expect(first.muted).toBe(startMuted);
+        expect(first.autoplay).toBe(true);
+
+        fireEvent.keyDown(document.body, { key: "m" });
+        expect(first.muted).toBe(!startMuted);
+        await userEvent.click(within(dialog).getByRole("button", { name: "Next" }));
+        await waitFor(() => expect(dialog.querySelector("video")).toHaveAttribute("src", "https://s3.example/v2"));
+        expect(dialog.querySelector("video")!.muted).toBe(startMuted);
+      }
+    );
 
     it.each([
       ["photo_360", "panorama"],

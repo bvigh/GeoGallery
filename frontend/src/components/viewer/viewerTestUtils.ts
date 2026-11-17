@@ -1,7 +1,9 @@
 // Shared by the 360° viewer tests. jsdom has no WebGL, no layout and no pointer capture.
+import { createElement, type ReactNode } from "react";
 import { act } from "@testing-library/react";
 import { vi } from "vitest";
 import type * as THREE from "three";
+import { VideoSoundContext } from "@/lib/videoSound";
 
 // jsdom has no media playback. Like a real element, `paused` follows these two. Undo with
 // vi.restoreAllMocks() or mockRestore().
@@ -14,6 +16,14 @@ export function stubMediaPlayback() {
     Object.defineProperty(this, "paused", { value: true, configurable: true });
   });
   return { play, pause };
+}
+
+// A render wrapper: a full-size player's videos start as `startMuted` says, as they do once
+// VideoSoundProvider has the user's setting. Without it they start muted, as the app's do until then.
+export function withVideoSound(startMuted: boolean) {
+  return function VideoSoundWrapper({ children }: { children: ReactNode }) {
+    return createElement(VideoSoundContext.Provider, { value: { startMuted, report: () => {} } }, children);
+  };
 }
 
 // What the fake renderer last drew with, and the renderer's lifecycle calls in order.

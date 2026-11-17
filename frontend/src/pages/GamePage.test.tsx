@@ -8,7 +8,7 @@ import type { FilterPanel } from "@/components/map/FilterPanel";
 import type { ChallengeView } from "@/components/game/ChallengeView";
 import type { NewChallengeDialog } from "@/components/game/NewChallengeDialog";
 import { BACK_DEPTH_KEY } from "@/lib/history";
-import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
+import { stubMediaPlayback, withVideoSound } from "@/components/viewer/viewerTestUtils";
 import { emptyFilters } from "@/lib/filters";
 import { AuthContext } from "@/components/auth/AuthContext";
 import type { Album, ChallengeSummary, CurrentUser } from "@/types";
@@ -134,12 +134,14 @@ const mockApi = api as unknown as Record<
 const me: CurrentUser = { id: "u-me", email: "me@example.test", display_name: "Me Myself", role: "user" };
 
 // The page's dialogs and the challenge view read the signed-in user.
-function renderPage() {
-  return render(
+// startMuted: the user's video sound setting, once the app has it (videos start muted until then).
+function renderPage({ startMuted }: { startMuted?: boolean } = {}) {
+  const ui = (
     <AuthContext.Provider value={me}>
       <GamePage />
-    </AuthContext.Provider>,
+    </AuthContext.Provider>
   );
+  return startMuted === undefined ? render(ui) : render(ui, { wrapper: withVideoSound(startMuted) });
 }
 
 const sampleAlbums: Album[] = [
@@ -406,9 +408,9 @@ describe("GamePage", () => {
   });
 
   describe("video keys", () => {
-    async function startVideoRound() {
+    async function startVideoRound(startMuted?: boolean) {
       mockApi.get.mockImplementation(roundOf("video"));
-      const { container } = renderPage();
+      const { container } = renderPage({ startMuted });
       await userEvent.click(screen.getByRole("button", { name: "Start Round" }));
       await screen.findByRole("button", { name: "Submit" });
       return container.querySelector("video")!;
@@ -424,11 +426,24 @@ describe("GamePage", () => {
       expect(pause).toHaveBeenCalledOnce();
       expect(play).toHaveBeenCalledOnce();
 
-      fireEvent.keyDown(video, { key: "m" });
+      // Muted to start: no setting says otherwise here.
       expect(video.muted).toBe(true);
-      fireEvent.keyDown(document.body, { key: "m" });
+      fireEvent.keyDown(video, { key: "m" });
       expect(video.muted).toBe(false);
+      fireEvent.keyDown(document.body, { key: "m" });
+      expect(video.muted).toBe(true);
     });
+
+    it.each([true, false])(
+      "gives the round's video the sound the video sound setting says (muted: %s), still waiting for its play button",
+      async (startMuted) => {
+        const { play } = stubMediaPlayback();
+        const video = await startVideoRound(startMuted);
+        expect(video.muted).toBe(startMuted);
+        expect(video.autoplay).toBe(false);
+        expect(play).not.toHaveBeenCalled();
+      }
+    );
 
     it("leaves Space and M to the date field", async () => {
       const { play } = stubMediaPlayback();
@@ -438,7 +453,7 @@ describe("GamePage", () => {
       fireEvent.keyDown(date, { code: "Space", key: " " });
       fireEvent.keyDown(date, { key: "m" });
       expect(play).not.toHaveBeenCalled();
-      expect(video.muted).toBe(false);
+      expect(video.muted).toBe(true);
     });
 
     it("leaves the keys alone on a photo round", async () => {

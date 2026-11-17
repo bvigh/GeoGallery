@@ -21,7 +21,11 @@ const mockApi = api as unknown as {
 };
 
 function settings(zone: string | null, server = "Europe/Warsaw"): UserSettings {
-  return { camera_timezone: zone, defaults: { camera_timezone: server } };
+  return {
+    camera_timezone: zone,
+    videos_start_muted: null,
+    defaults: { camera_timezone: server, videos_start_muted: false },
+  };
 }
 
 const zoneSelect = () => screen.getByLabelText("Zone") as HTMLSelectElement;

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "@/api/client";
 import Panorama360 from "@/components/viewer/Panorama360";
 import Video360 from "@/components/viewer/Video360";
+import { FullSizeVideo } from "@/components/viewer/FullSizeVideo";
 import VideoDecodeNotice from "@/components/viewer/VideoDecodeNotice";
 import ViewerHeader, { SPHERE_HINT } from "@/components/viewer/ViewerHeader";
 import { ZoomableImage } from "@/components/viewer/ZoomableImage";
@@ -69,7 +70,7 @@ function RoundItemMedia({ result, title, onClose }: { result: ChallengeRoundResu
   if (result.media_type?.startsWith("video")) {
     return (
       <>
-        <video
+        <FullSizeVideo
           ref={videoRef}
           src={url}
           controls

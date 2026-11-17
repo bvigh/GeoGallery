@@ -6,7 +6,7 @@ import { api, ApiError } from "@/api/client";
 import { MediaGalleryOverlay } from "@/components/MediaGalleryOverlay";
 import { AuthContext } from "@/components/auth/AuthContext";
 import type { EvidenceViewProps } from "@/components/evidence/EvidenceView";
-import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
+import { stubMediaPlayback, withVideoSound } from "@/components/viewer/viewerTestUtils";
 import { formatInstant } from "@/lib/time";
 import { BACK_DEPTH_KEY } from "@/lib/history";
 import { FOLLOWUP_FAILED, FOLLOWUP_FAILED_SHIFT, SHIFT_OUTCOME_UNKNOWN } from "@/lib/timeEdit";
@@ -246,13 +246,15 @@ const shared = makeItem("shared", { taken_at: "2025-06-02T10:00:00Z", owner_id: 
 
 type Props = ComponentProps<typeof MediaGalleryOverlay>;
 
-function renderOverlay(props: Partial<Props> = {}) {
+// startMuted: the user's video sound setting, once the app has it (videos start muted until then).
+function renderOverlay(props: Partial<Props> = {}, { startMuted }: { startMuted?: boolean } = {}) {
   const all: Props = { title: "Iceland", params: { album_id: "a1" }, onClose: vi.fn(), ...props };
-  const view = render(
+  const ui = (
     <AuthContext.Provider value={me}>
       <MediaGalleryOverlay {...all} />
     </AuthContext.Provider>
   );
+  const view = startMuted === undefined ? render(ui) : render(ui, { wrapper: withVideoSound(startMuted) });
   return { ...view, props: all };
 }
 
@@ -744,13 +746,35 @@ describe("MediaGalleryOverlay", () => {
       expect(pause).toHaveBeenCalledOnce();
       expect(play).toHaveBeenCalledOnce();
 
-      fireEvent.keyDown(video, { key: "m" });
+      // Muted to start: no setting says otherwise here.
       expect(video.muted).toBe(true);
-      fireEvent.keyDown(document.body, { key: "m" });
+      fireEvent.keyDown(video, { key: "m" });
       expect(video.muted).toBe(false);
+      fireEvent.keyDown(document.body, { key: "m" });
+      expect(video.muted).toBe(true);
       play.mockRestore();
       pause.mockRestore();
     });
+
+    it.each([true, false])(
+      "starts every video as the video sound setting says (muted: %s), whatever M did to the one before",
+      async (startMuted) => {
+        const next = makeItem("next", { media_type: "video", taken_at: "2025-06-02T10:00:00Z" });
+        mockApi.listMedia.mockResolvedValue([flat, next]);
+        mockApi.getMediaUrl.mockImplementation((id: string) => Promise.resolve(`https://s3.example/${id}`));
+        const { container } = renderOverlay({}, { startMuted });
+        await waitFor(() => expect(container.querySelector("video")).toHaveAttribute("src", "https://s3.example/flat"));
+        const first = container.querySelector("video")!;
+        expect(first.muted).toBe(startMuted);
+        expect(first.autoplay).toBe(true);
+
+        fireEvent.keyDown(document.body, { key: "m" });
+        expect(first.muted).toBe(!startMuted);
+        fireEvent.keyDown(document.body, { key: "ArrowRight" });
+        await waitFor(() => expect(container.querySelector("video")).toHaveAttribute("src", "https://s3.example/next"));
+        expect(container.querySelector("video")!.muted).toBe(startMuted);
+      }
+    );
 
     it("leaves the video alone while the location editor covers it", async () => {
       const { play, pause } = stubMediaPlayback();
@@ -760,7 +784,7 @@ describe("MediaGalleryOverlay", () => {
       fireEvent.keyDown(document.body, { code: "Space", key: " " });
       fireEvent.keyDown(document.body, { key: "m" });
       expect(play).not.toHaveBeenCalled();
-      expect(video.muted).toBe(false);
+      expect(video.muted).toBe(true);
       play.mockRestore();
       pause.mockRestore();
     });
@@ -1415,7 +1439,7 @@ describe("MediaGalleryOverlay", () => {
         fireEvent.keyDown(document.body, { key: "m" });
         fireEvent.keyDown(document.body, { key: "ArrowRight" });
         expect(play).not.toHaveBeenCalled();
-        expect(video.muted).toBe(false);
+        expect(video.muted).toBe(true);
         expect(getPosition("1 / 2")).toBeInTheDocument();
 
         await userEvent.keyboard("{Escape}");
@@ -1725,7 +1749,7 @@ describe("MediaGalleryOverlay", () => {
       await userEvent.keyboard(" m");
       expect(play).not.toHaveBeenCalled();
       expect(pause).not.toHaveBeenCalled();
-      expect(container.querySelector("video")!.muted).toBe(false);
+      expect(container.querySelector("video")!.muted).toBe(true);
       play.mockRestore();
       pause.mockRestore();
     });
