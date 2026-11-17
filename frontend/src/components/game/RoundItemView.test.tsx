@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ComponentProps } from "react";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/api/client";
@@ -155,7 +155,8 @@ describe("RoundItemView", () => {
       // On its default view until the keyframes come.
       expect(within(view).getByTestId("video360")).toHaveAttribute("data-keyframes", "0");
       expect(mockApi.getKeyframes).toHaveBeenCalledWith("v9");
-      expect(await within(view).findByTestId("video360")).toHaveAttribute("data-keyframes", "2");
+      // The stand-in is already there, so findByTestId would not wait: wait for the attribute itself.
+      await waitFor(() => expect(within(view).getByTestId("video360")).toHaveAttribute("data-keyframes", "2"));
       expect(spheres.video!.keyframes).toEqual(keyframes);
       expect(view).toHaveTextContent(`Round 1's 360° video · ${SPHERE_HINT}`);
     });
