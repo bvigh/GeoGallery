@@ -8,7 +8,16 @@ import { useCurrentUser } from "@/components/auth/AuthContext";
 import type { CurrentUser } from "@/types";
 
 vi.mock("@/api/client", () => ({
-  api: { me: vi.fn(), logout: vi.fn() },
+  api: {
+    me: vi.fn(),
+    logout: vi.fn(),
+    // The app loads the video sound setting once signed in.
+    getSettings: vi.fn(async () => ({
+      camera_timezone: null,
+      videos_start_muted: null,
+      defaults: { camera_timezone: "UTC", videos_start_muted: false },
+    })),
+  },
 }));
 
 vi.mock("@/pages/MapPage", () => ({ MapPage: () => <div data-testid="map-page" /> }));

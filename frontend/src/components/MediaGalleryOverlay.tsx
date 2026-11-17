@@ -33,6 +33,7 @@ import { MiniMapOverlay, type MiniMapSize } from "@/components/map/MiniMapOverla
 import { TOP_MARKER_Z_INDEX_OFFSET } from "@/components/map/markers";
 import Panorama360 from "@/components/viewer/Panorama360";
 import Video360 from "@/components/viewer/Video360";
+import { FullSizeVideo } from "@/components/viewer/FullSizeVideo";
 import VideoDecodeNotice from "@/components/viewer/VideoDecodeNotice";
 import { ZoomableImage } from "@/components/viewer/ZoomableImage";
 import { browserTimeZone, formatInstant } from "@/lib/time";
@@ -680,7 +681,7 @@ export function MediaGalleryOverlay({
     if (currentItem.media_type === "video") {
       return (
         <>
-          <video
+          <FullSizeVideo
             key={currentItem.id}
             ref={videoRef}
             src={currentUrl}

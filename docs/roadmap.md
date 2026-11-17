@@ -80,6 +80,8 @@ Data repairs on the existing deployments are operator work, not issues: the far 
 | #37 | Comments on media | M, design |
 | #38 | Default mute setting for videos | S |
 
+#38 is built: Settings → "Video sound" starts every full-size player's video muted or with sound, with sound by default. 360° videos follow it too; they used to start muted, so they could play before the page had a click. A browser that allows no sound yet still starts one muted.
+
 ## M4: Sharing and social
 
 | Issue | Item | Size |

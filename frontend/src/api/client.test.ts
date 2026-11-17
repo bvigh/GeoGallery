@@ -686,7 +686,11 @@ describe("api client", () => {
   });
 
   describe("settings", () => {
-    const settings = { camera_timezone: "Asia/Tokyo", defaults: { camera_timezone: "Europe/Warsaw" } };
+    const settings = {
+      camera_timezone: "Asia/Tokyo",
+      videos_start_muted: null,
+      defaults: { camera_timezone: "Europe/Warsaw", videos_start_muted: false },
+    };
 
     it("getSettings() reads the caller's settings", async () => {
       fetchMock.mockResolvedValue(response(200, settings));
@@ -701,6 +705,12 @@ describe("api client", () => {
       expect(url).toBe("/api/me/settings");
       expect(init).toMatchObject({ method: "PATCH", headers: { "Content-Type": "application/json" } });
       expect(JSON.parse(init.body)).toEqual({ camera_timezone: null });
+    });
+
+    it("updateSettings() sends the video sound", async () => {
+      fetchMock.mockResolvedValue(response(200, { ...settings, videos_start_muted: true }));
+      await expect(api.updateSettings({ videos_start_muted: true })).resolves.toMatchObject({ videos_start_muted: true });
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ videos_start_muted: true });
     });
 
     it("updateSettings() carries the reason of a 400", async () => {

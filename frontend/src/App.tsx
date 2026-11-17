@@ -7,6 +7,7 @@ import { UploadPage } from "@/pages/UploadPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { AuthGate } from "@/components/auth/AuthGate";
+import { VideoSoundProvider } from "@/components/settings/VideoSoundProvider";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useCurrentUser } from "@/components/auth/AuthContext";
 import { api } from "@/api/client";
@@ -162,7 +163,9 @@ export default function App() {
   return (
     <ErrorBoundary>
       <AuthGate>
-        <Shell />
+        <VideoSoundProvider>
+          <Shell />
+        </VideoSoundProvider>
       </AuthGate>
     </ErrorBoundary>
   );

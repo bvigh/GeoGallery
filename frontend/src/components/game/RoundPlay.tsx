@@ -5,6 +5,7 @@ import type { GameRound, OrientationKeyframe } from "@/types";
 import { api } from "@/api/client";
 import Panorama360 from "@/components/viewer/Panorama360";
 import Video360 from "@/components/viewer/Video360";
+import { FullSizeVideo } from "@/components/viewer/FullSizeVideo";
 import VideoDecodeNotice from "@/components/viewer/VideoDecodeNotice";
 import { ZoomableImage } from "@/components/viewer/ZoomableImage";
 import { useVideoDecodeCheck } from "@/lib/video";
@@ -190,7 +191,7 @@ export function RoundPlay({ round, onSubmit, error = null }: Props) {
       ) : round.media_type.startsWith("video") ? (
         <>
           {/* contain, not cover: on a phone cover crops away much of the frame, and the clues with it. */}
-          <video
+          <FullSizeVideo
             ref={videoRef}
             src={round.url}
             controls

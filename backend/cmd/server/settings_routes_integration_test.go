@@ -51,17 +51,25 @@ func TestRouter_SettingsAcceptTokens(t *testing.T) {
 			name = "token"
 		}
 		t.Run(name, func(t *testing.T) {
+			settings := func(zone, muted string) string {
+				return `{"camera_timezone":` + zone + `,"videos_start_muted":` + muted +
+					`,"defaults":{"camera_timezone":"Europe/Warsaw","videos_start_muted":false}}`
+			}
 			rec := send(t, token, http.MethodGet, "")
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-			assert.JSONEq(t, `{"camera_timezone":null,"defaults":{"camera_timezone":"Europe/Warsaw"}}`, rec.Body.String())
+			assert.JSONEq(t, settings("null", "null"), rec.Body.String())
 
 			rec = send(t, token, http.MethodPatch, `{"camera_timezone":"Asia/Tokyo"}`)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-			assert.JSONEq(t, `{"camera_timezone":"Asia/Tokyo","defaults":{"camera_timezone":"Europe/Warsaw"}}`, rec.Body.String())
+			assert.JSONEq(t, settings(`"Asia/Tokyo"`, "null"), rec.Body.String())
 
-			rec = send(t, token, http.MethodPatch, `{"camera_timezone":null}`)
+			rec = send(t, token, http.MethodPatch, `{"videos_start_muted":true}`)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-			assert.JSONEq(t, `{"camera_timezone":null,"defaults":{"camera_timezone":"Europe/Warsaw"}}`, rec.Body.String())
+			assert.JSONEq(t, settings(`"Asia/Tokyo"`, "true"), rec.Body.String())
+
+			rec = send(t, token, http.MethodPatch, `{"camera_timezone":null,"videos_start_muted":null}`)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.JSONEq(t, settings("null", "null"), rec.Body.String())
 		})
 	}
 }

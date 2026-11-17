@@ -192,13 +192,16 @@ export interface TimeReport {
 // applies, and those defaults.
 export interface UserSettings {
   camera_timezone: string | null; // the IANA zone the caller's camera clocks show
+  // Whether a video the caller opens full size starts muted (true) or with sound (false).
+  videos_start_muted: boolean | null;
   defaults: {
     camera_timezone: string; // the server's: the IANA name, or the literal "server zone (unset)"
+    videos_start_muted: boolean;
   };
 }
 
 // A PATCH body: the settings to change, null returning one to its default.
-export type UserSettingsPatch = Partial<Pick<UserSettings, "camera_timezone">>;
+export type UserSettingsPatch = Partial<Pick<UserSettings, "camera_timezone" | "videos_start_muted">>;
 
 // media.time_edit: the owner's last change of taken_at through PATCH /api/media/{id}/taken-at
 // ("set") or POST /api/media/shift-time ("shift"). capture_evidence still says how the file's own

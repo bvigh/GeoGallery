@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/api/client";
 import { RoundItemView } from "@/components/game/RoundItemView";
 import { SPHERE_HINT } from "@/components/viewer/ViewerHeader";
-import { stubMediaPlayback } from "@/components/viewer/viewerTestUtils";
+import { stubMediaPlayback, withVideoSound } from "@/components/viewer/viewerTestUtils";
 import { ITEM_NOT_SHARED, type RoundItemState } from "@/lib/challenge";
 import { BACK_DEPTH_KEY } from "@/lib/history";
 import type { ChallengeRoundResult, OrientationKeyframe } from "@/types";
@@ -72,12 +72,14 @@ const shown = (r: ChallengeRoundResult): RoundItemState => ({ status: "shown", r
 
 type Props = ComponentProps<typeof RoundItemView>;
 
-function renderView(props: Partial<Props> = {}) {
+// startMuted: the user's video sound setting, once the app has it (videos start muted until then).
+function renderView(props: Partial<Props> = {}, { startMuted }: { startMuted?: boolean } = {}) {
   const onClose = vi.fn();
   const onRetry = vi.fn();
-  const view = render(
-    <RoundItemView number={1} mediaType="photo" state={shown(result())} onRetry={onRetry} onClose={onClose} {...props} />,
+  const ui = (
+    <RoundItemView number={1} mediaType="photo" state={shown(result())} onRetry={onRetry} onClose={onClose} {...props} />
   );
+  const view = startMuted === undefined ? render(ui) : render(ui, { wrapper: withVideoSound(startMuted) });
   return { ...view, onClose, onRetry };
 }
 
@@ -181,14 +183,23 @@ describe("RoundItemView", () => {
       expect(play).toHaveBeenCalledTimes(1);
       fireEvent.keyDown(window, { key: " ", code: "Space" });
       expect(pause).toHaveBeenCalledTimes(1);
-      fireEvent.keyDown(window, { key: "m" });
+      // Muted to start: no setting says otherwise here.
       expect(video.muted).toBe(true);
+      fireEvent.keyDown(window, { key: "m" });
+      expect(video.muted).toBe(false);
 
       expect(within(view).queryByRole("alert")).toBeNull();
       Object.defineProperty(video, "readyState", { value: 2, configurable: true });
       Object.defineProperty(video, "videoWidth", { value: 0, configurable: true });
       fireEvent.loadedData(video);
       expect(within(view).getByRole("alert")).toHaveTextContent("This browser can't decode this video's picture.");
+    });
+
+    it.each([true, false])("starts a flat video as the video sound setting says (muted: %s)", (startMuted) => {
+      renderView({ mediaType: "video", state: shown(result({ media_type: "video" })) }, { startMuted });
+      const video = dialog("Round 1's video").querySelector("video")!;
+      expect(video.muted).toBe(startMuted);
+      expect(video.autoplay).toBe(true);
     });
 
     it("draws nothing of the answer or the guesses over the item: its title and Close alone", () => {

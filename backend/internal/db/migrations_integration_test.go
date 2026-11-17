@@ -803,3 +803,46 @@ func TestMigration000015_Challenges(t *testing.T) {
 	migrateTo(t, m, 15)
 	assertEmptyChallengeTables()
 }
+
+// Migration 16 adds the second per-user setting, users.videos_start_muted: NULL (the server's
+// default) for every existing user, true or false once chosen, and nothing else.
+func TestMigration000016_UserVideosStartMuted(t *testing.T) {
+	dsn := testdb.NewEmpty(t)
+	m := newMigrator(t, dsn)
+	migrateTo(t, m, 15)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.False(t, columnExists(ctx, t, conn, "users", "videos_start_muted"))
+		_, err := conn.Exec(ctx, `UPDATE users SET camera_timezone = 'Asia/Tokyo' WHERE id = $1`, legacyOwnerID)
+		require.NoError(t, err)
+	})
+
+	migrateTo(t, m, 16)
+	assertVideosStartMuted := func() {
+		withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+			assert.True(t, columnExists(ctx, t, conn, "users", "videos_start_muted"))
+			var muted *bool
+			var zone *string
+			require.NoError(t, conn.QueryRow(ctx,
+				`SELECT videos_start_muted, camera_timezone FROM users WHERE id = $1`, legacyOwnerID).Scan(&muted, &zone))
+			assert.Nil(t, muted, "an existing user keeps the server's default")
+			assert.Equal(t, "Asia/Tokyo", *zone, "the camera zone setting is untouched")
+
+			for _, v := range []bool{true, false} {
+				_, err := conn.Exec(ctx, `UPDATE users SET videos_start_muted = $2 WHERE id = $1`, legacyOwnerID, v)
+				require.NoError(t, err)
+			}
+		})
+	}
+	assertVideosStartMuted()
+
+	migrateTo(t, m, 15)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.False(t, columnExists(ctx, t, conn, "users", "videos_start_muted"))
+		var zone string
+		require.NoError(t, conn.QueryRow(ctx, `SELECT camera_timezone FROM users WHERE id = $1`, legacyOwnerID).Scan(&zone))
+		assert.Equal(t, "Asia/Tokyo", zone, "the down migration keeps the users and their other settings")
+	})
+
+	migrateTo(t, m, 16)
+	assertVideosStartMuted()
+}

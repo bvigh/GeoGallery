@@ -16,7 +16,10 @@ async function startVideoRound(page: Page): Promise<Locator> {
   );
   await page.route("**/e2e-clip.webm", (route) => route.fulfill({ path: CLIP, contentType: "video/webm" }));
 
+  // Videos start muted until the app has bob's video sound setting: the default, with sound.
+  const settings = page.waitForResponse((r) => r.url().endsWith("/api/me/settings") && r.ok());
   await page.goto("/");
+  await settings;
   await page.getByRole("button", { name: "Game", exact: true }).click();
   await page.getByRole("button", { name: "Start Round" }).click();
 

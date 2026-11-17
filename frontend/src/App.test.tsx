@@ -6,16 +6,29 @@ import { BACK_DEPTH_KEY } from "@/lib/history";
 import App from "@/App";
 
 vi.mock("@/api/client", () => ({
-  api: { me: vi.fn(), logout: vi.fn() },
+  api: {
+    me: vi.fn(),
+    logout: vi.fn(),
+    getSettings: vi.fn(async () => ({
+      camera_timezone: null,
+      videos_start_muted: null,
+      defaults: { camera_timezone: "UTC", videos_start_muted: false },
+    })),
+  },
 }));
 // Pages that throw while rendering, as a Leaflet or three.js error in a fullscreen view would.
 const crash = vi.hoisted(() => ({ map: false, game: false }));
-vi.mock("@/pages/MapPage", () => ({
-  MapPage: ({ active }: { active: boolean }) => {
-    if (crash.map) throw new Error("map crashed");
-    return <div data-testid="map-page" data-active={String(active)} />;
-  },
-}));
+// The map page also says how its videos would start.
+vi.mock("@/pages/MapPage", async () => {
+  const { useVideosStartMuted } = await import("@/lib/videoSound");
+  return {
+    MapPage: ({ active }: { active: boolean }) => {
+      const startMuted = useVideosStartMuted();
+      if (crash.map) throw new Error("map crashed");
+      return <div data-testid="map-page" data-active={String(active)} data-videos-start-muted={String(startMuted)} />;
+    },
+  };
+});
 vi.mock("@/pages/TripsPage", () => ({ TripsPage: () => null }));
 vi.mock("@/pages/AlbumsPage", () => ({ AlbumsPage: () => <div data-testid="albums-page" /> }));
 vi.mock("@/pages/GamePage", () => ({
@@ -31,6 +44,7 @@ vi.mock("@/pages/AdminPage", () => ({ AdminPage: () => null }));
 const mockApi = api as unknown as {
   me: ReturnType<typeof vi.fn>;
   logout: ReturnType<typeof vi.fn>;
+  getSettings: ReturnType<typeof vi.fn>;
 };
 
 // The URL picks the tab, so every test starts on the map's.
@@ -425,5 +439,51 @@ describe("App error boundaries", () => {
     expect(screen.getByTestId("albums-page")).toBeInTheDocument();
     // The map's fallback stays in the hidden map container.
     expect(screen.getByRole("alert", { hidden: true }).parentElement).toHaveClass("hidden");
+  });
+});
+
+describe("App video sound", () => {
+  const settings = (muted: boolean | null) => ({
+    camera_timezone: null,
+    videos_start_muted: muted,
+    defaults: { camera_timezone: "UTC", videos_start_muted: false },
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockApi.me.mockResolvedValue({ id: "u1", email: "a@b.c", display_name: "Alice", role: "user" });
+  });
+
+  it.each([
+    ["the user's choice, muted", settings(true), "true"],
+    ["the user's choice, with sound", settings(false), "false"],
+    ["the server's default", settings(null), "false"],
+  ])("loads the setting once signed in, and the pages' videos start as it says: %s", async (_name, answer, want) => {
+    mockApi.getSettings.mockResolvedValue(answer);
+    render(<App />);
+    const map = await screen.findByTestId("map-page");
+    await waitFor(() => expect(map).toHaveAttribute("data-videos-start-muted", want));
+    expect(mockApi.getSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts videos muted until the setting is known, and when it cannot be", async () => {
+    let fail: (e: Error) => void = () => {};
+    mockApi.getSettings.mockReturnValue(new Promise((_resolve, reject) => (fail = reject)));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    render(<App />);
+    const map = await screen.findByTestId("map-page");
+    expect(map).toHaveAttribute("data-videos-start-muted", "true");
+
+    await act(async () => fail(new Error("GET /me/settings failed: 500")));
+    expect(map).toHaveAttribute("data-videos-start-muted", "true");
+    expect(warn).toHaveBeenCalledWith("Could not load the video sound setting:", expect.any(Error));
+    warn.mockRestore();
+  });
+
+  it("asks for no setting before the user has signed in", async () => {
+    mockApi.me.mockResolvedValue(null);
+    render(<App />);
+    expect(await screen.findByRole("link", { name: "Sign in" })).toBeInTheDocument();
+    expect(mockApi.getSettings).not.toHaveBeenCalled();
   });
 });

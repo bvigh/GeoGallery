@@ -62,7 +62,11 @@ describe("SettingsPage", () => {
     mockApi.revokeToken.mockResolvedValue(undefined);
     mockApi.listCameraClockRules.mockResolvedValue([]);
     mockApi.listCameras.mockResolvedValue([]);
-    mockApi.getSettings.mockResolvedValue({ camera_timezone: null, defaults: { camera_timezone: "Europe/Warsaw" } });
+    mockApi.getSettings.mockResolvedValue({
+      camera_timezone: null,
+      videos_start_muted: null,
+      defaults: { camera_timezone: "Europe/Warsaw", videos_start_muted: false },
+    });
   });
 
   afterEach(() => {
@@ -97,11 +101,13 @@ describe("SettingsPage", () => {
       },
     ]);
     render(<SettingsPage />);
-    // In this order: tokens, then the zone a capture time falls back to, then the clock rules that outrank it.
+    // In this order: tokens, then the zone a capture time falls back to, then the clock rules that
+    // outrank it, then how videos start.
     expect(screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
       "API tokens",
       "Camera time zone",
       "Camera clocks",
+      "Video sound",
     ]);
     expect(await screen.findByRole("option", { name: "Server default (Europe/Warsaw)" })).toBeInTheDocument();
     expect(await screen.findByText("cron")).toBeInTheDocument();

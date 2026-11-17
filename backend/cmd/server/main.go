@@ -556,7 +556,8 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 			r.Get("/cameras", h.clockRules.Cameras)
 
 			// The caller's own settings. The camera zone only changes how their future uploads are
-			// dated, and is not location history, so tokens may use these.
+			// dated and the video sound how their videos start; neither is location history, so
+			// tokens may use these.
 			r.Get("/me/settings", h.settings.Get)
 			r.Patch("/me/settings", h.settings.Update)
 
