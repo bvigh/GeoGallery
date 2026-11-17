@@ -482,6 +482,10 @@ func TestFormatRetimeChange(t *testing.T) {
 			handlers.RetimeChange{MediaID: "m", Filename: "a.jpg", Old: old, New: old.Add(-time.Hour), Zone: ingest.ZoneClockRule,
 				ClockRule: &ingest.ClockRule{Make: "Acme\r", Model: "X 1", OffsetMin: 0}},
 			`2022-08-06T14:33:49Z -> 2022-08-06T13:33:49Z  -1h0m0s  clock_rule("Acme\r" X 1 UTC+00:00)  -  m  a.jpg`},
+		{"a time from the file name says so in place of its zone",
+			handlers.RetimeChange{MediaID: "m", Filename: "2012-08-24_18-14-24_124.jpg", Old: time.Date(2022, 12, 13, 17, 5, 23, 860_000_000, time.UTC),
+				New: time.Date(2012, 8, 24, 16, 14, 24, 0, time.UTC), Src: "filename", Zone: ingest.ZoneCamera},
+			"2022-12-13T17:05:23.86Z -> 2012-08-24T16:14:24Z  -90312h50m59.86s  filename  -  m  2012-08-24_18-14-24_124.jpg"},
 		{"a stored time with milliseconds keeps them",
 			handlers.RetimeChange{MediaID: "m", Filename: "a.jpg", Old: old.Add(123 * time.Millisecond), New: old.Add(-2 * time.Hour), Zone: ingest.ZoneCamera},
 			"2022-08-06T14:33:49.123Z -> 2022-08-06T12:33:49Z  -2h0m0.123s  camera  -  m  a.jpg"},
@@ -522,10 +526,10 @@ func TestRunScan(t *testing.T) {
 	cancel()
 	// The scan's time report is printed as it comes, after the counts, whatever the outcome.
 	report := handlers.TimeReport{CameraZone: "Europe/Warsaw", CameraZoneFrom: "server", FileDateNames: []string{}}
-	const reportOut = "by_source: exif_original=0 exif_ifd0=0 container=0 mtime=0 none=0\n" +
+	const reportOut = "by_source: exif_original=0 exif_ifd0=0 container=0 filename=0 mtime=0 none=0\n" +
 		"by_zone: gps=0 clock_rule=0 offset=0 camera=0 camera_zone=\"Europe/Warsaw\" camera_zone_from=server\n"
 	everySource := handlers.TimeReport{
-		BySource:       handlers.TimeSourceCounts{ExifOriginal: 6, ExifIFD0: 4, Container: 3, Mtime: 2, None: 1},
+		BySource:       handlers.TimeSourceCounts{ExifOriginal: 6, ExifIFD0: 4, Container: 3, Filename: 5, Mtime: 2, None: 1},
 		ByZone:         handlers.TimeZoneCounts{GPS: 1, ClockRule: 2, Offset: 3, Camera: 4},
 		CameraZone:     "Asia/Tokyo",
 		CameraZoneFrom: "batch",
@@ -570,22 +574,22 @@ func TestRunScan(t *testing.T) {
 			false, "", "user is unclaimed"},
 		{"uppercase id normalised", context.Background(), "ACTIVE-USER", handlers.ScanResult{Ingested: 1, TimeReport: report}, nil,
 			true, "ingested=1 skipped=0 failed=0\n" + reportOut, ""},
-		{"every source and zone rule counted", context.Background(), "active-user", handlers.ScanResult{Ingested: 16, TimeReport: everySource}, nil,
-			true, "ingested=16 skipped=0 failed=0\n" +
-				"by_source: exif_original=6 exif_ifd0=4 container=3 mtime=2 none=1\n" +
+		{"every source and zone rule counted", context.Background(), "active-user", handlers.ScanResult{Ingested: 21, TimeReport: everySource}, nil,
+			true, "ingested=21 skipped=0 failed=0\n" +
+				"by_source: exif_original=6 exif_ifd0=4 container=3 filename=5 mtime=2 none=1\n" +
 				"by_zone: gps=1 clock_rule=2 offset=3 camera=4 camera_zone=\"Asia/Tokyo\" camera_zone_from=batch\n", ""},
 		{"a camera zone at UTC all year warns", context.Background(), "ACTIVE-USER", handlers.ScanResult{Ingested: 1, TimeReport: assumedUTC}, nil,
 			true, "ingested=1 skipped=0 failed=0\n" +
-				"by_source: exif_original=1 exif_ifd0=0 container=0 mtime=0 none=0\n" +
+				"by_source: exif_original=1 exif_ifd0=0 container=0 filename=0 mtime=0 none=0\n" +
 				"by_zone: gps=0 clock_rule=0 offset=0 camera=1 camera_zone=\"server zone (unset)\" camera_zone_from=server\n" +
-				"warning: the EXIF times of 1 file(s) were read in camera zone \"server zone (unset)\", which is UTC all year. " +
+				"warning: the EXIF or file name times of 1 file(s) were read in camera zone \"server zone (unset)\", which is UTC all year. " +
 				"If your camera clocks show another zone, set CAMERA_TIMEZONE to it (e.g. Europe/Warsaw) or the user's camera zone in Settings, " +
 				"then run `server retime --user active-user` to list the times that would move, and again with --apply to move them.\n", ""},
 		{"the user's camera zone at UTC warns, naming Settings", context.Background(), "active-user", handlers.ScanResult{Ingested: 1, TimeReport: userUTC}, nil,
 			true, "ingested=1 skipped=0 failed=0\n" +
-				"by_source: exif_original=1 exif_ifd0=0 container=0 mtime=0 none=0\n" +
+				"by_source: exif_original=1 exif_ifd0=0 container=0 filename=0 mtime=0 none=0\n" +
 				"by_zone: gps=0 clock_rule=0 offset=0 camera=1 camera_zone=\"UTC\" camera_zone_from=user\n" +
-				"warning: the EXIF times of 1 file(s) were read in camera zone \"UTC\", which is UTC all year. " +
+				"warning: the EXIF or file name times of 1 file(s) were read in camera zone \"UTC\", which is UTC all year. " +
 				"If your camera clocks show another zone, change the user's camera zone in Settings, " +
 				"then run `server retime --user active-user` to list the times that would move, and again with --apply to move them.\n", ""},
 	}

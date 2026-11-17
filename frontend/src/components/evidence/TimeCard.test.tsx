@@ -117,6 +117,14 @@ describe("TimeCard", () => {
       expect(screen.getByText("A modified time is often a copy or download time.")).toBeInTheDocument();
     });
 
+    it("shows a time from the file name with the zone it was read in", () => {
+      const named = makeEvidence({ src: "filename", wall: null, offset_used_min: 120, name_wall: "2012-08-24 18:14:24", camera_zone: "Europe/Warsaw" });
+      render(card("a", { time: { evidence: named } }));
+      expect(chips()).toEqual(["File name's date and time", "Europe/Warsaw; nothing in the file confirms this"]);
+      expect(cameraRow()).toBe("2012-08-24 18:14:24 +02:00 · assumed");
+      expect(screen.getByText("Phones and apps name a file by when it was taken, and copies keep the name.")).toBeInTheDocument();
+    });
+
     it("warns when the time was read as UTC by fallback", () => {
       render(card("a", { time: { evidence: makeEvidence({ camera_zone: "server zone (unset)", camera_zone_utc_fallback: true }) } }));
       expect(screen.getByText(/This time was read as UTC/)).toBeInTheDocument();
@@ -487,7 +495,7 @@ describe("TimeCard", () => {
       await advance(0);
       expect(
         screen.getByText(
-          "No capture time could be read from this file. This reader understands EXIF in JPEG and TIFF only. The stored time is the one you set by hand."
+          "No capture time could be read from this file, nor a date and time from its name. This reader understands EXIF in JPEG, TIFF, PNG, WebP and HEIC. The stored time is the one you set by hand."
         )
       ).toBeInTheDocument();
       expect(screen.queryByText(/This is the file's modified date/)).not.toBeInTheDocument();

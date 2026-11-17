@@ -80,7 +80,7 @@ func (f *clockRuleFixture) stored(t *testing.T, id string) (string, map[string]a
 		`SELECT taken_at, capture_evidence FROM media WHERE id = $1`, id).Scan(&takenAt, &raw))
 	var evidence map[string]any
 	require.NoError(t, json.Unmarshal(raw, &evidence))
-	assert.Len(t, evidence, 24, "every key is always present")
+	assert.Len(t, evidence, 25, "every key is always present")
 	return takenAt.UTC().Format(time.RFC3339), evidence
 }
 

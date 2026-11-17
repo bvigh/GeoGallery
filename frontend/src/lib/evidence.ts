@@ -274,6 +274,10 @@ const TIME_ORIGIN: Record<CaptureSource, TimeOriginChip> = {
   exif_original: { text: "EXIF capture time", note: null },
   exif_ifd0: { text: "EXIF general date, may be an edit time", note: null },
   container: { text: "Video container time", note: null },
+  filename: {
+    text: "File name's date and time",
+    note: "Phones and apps name a file by when it was taken, and copies keep the name.",
+  },
   mtime: { text: "File modified time, may be wrong", note: "A modified time is often a copy or download time." },
   none: { text: "No capture time", note: null },
 };
@@ -447,6 +451,8 @@ export function cameraClock(
         return wallClock(evidence.wall, evidence.offset_used_min, evidence.zone);
       case "container":
         return NO_WALL_CLOCK_VIDEO;
+      case "filename":
+        return wallClock(evidence.name_wall ?? null, evidence.offset_used_min, evidence.zone);
       case "mtime":
         return edited
           ? { text: "No wall clock in the file.", word: null }
@@ -459,7 +465,9 @@ export function cameraClock(
   const rule = reread.rule_today;
   if (!rule) return { text: reread.file.wall_clock ?? "No wall clock.", word: null };
   if (rule.source === "container") return NO_WALL_CLOCK_VIDEO;
-  return wallClock(reread.file.wall_clock, rule.offset_min, rule.zone_rule);
+  // The origin chip says that a time from the name is the name's.
+  const wall = rule.source === "filename" ? (reread.file.name_wall ?? null) : reread.file.wall_clock;
+  return wallClock(wall, rule.offset_min, rule.zone_rule);
 }
 
 // One check of the file re-read, or null for an id this version has no sentence for.
@@ -517,8 +525,8 @@ function rereadFinding(
         : "This video may have been re-encoded at upload, so its time may not be checkable against the file.";
     case "no_file_time": {
       const read = isVideo(mediaType)
-        ? "No capture time could be read from this video's container."
-        : "No capture time could be read from this file. This reader understands EXIF in JPEG and TIFF only.";
+        ? "No capture time could be read from this video's container, nor a date and time from its name."
+        : "No capture time could be read from this file, nor a date and time from its name. This reader understands EXIF in JPEG, TIFF, PNG, WebP and HEIC.";
       if (edit) return `${read} The stored time is the one you ${editVerb(edit)} by hand.`;
       return evidence?.src === "mtime" ? `${read} The stored time is the file's modified date.` : read;
     }

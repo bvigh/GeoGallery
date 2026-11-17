@@ -14,8 +14,8 @@ type TimeReport struct {
 	// CameraZoneFrom says who named it: "batch" (this upload or scan), "user" (the owner's
 	// setting) or "server" (CAMERA_TIMEZONE, or the server's own zone).
 	CameraZoneFrom string `json:"camera_zone_from"`
-	// AssumedZoneIsUTC is true when a file was read in the camera zone, that zone is UTC all year
-	// and the upload or scan did not name it: CAMERA_TIMEZONE unset on a server running in UTC, or
+	// AssumedZoneIsUTC is true when a file's EXIF time or name was read in the camera zone, that zone
+	// is UTC all year and the upload or scan did not name it: CAMERA_TIMEZONE unset on a server running in UTC, or
 	// the owner's setting or CAMERA_TIMEZONE set to UTC. Few camera clocks show UTC, so such a
 	// file's time is likely an hour or more off. A zone named for the batch was chosen for those
 	// very files, so it is not warned about.
@@ -32,12 +32,13 @@ type TimeSourceCounts struct {
 	ExifOriginal int `json:"exif_original"`
 	ExifIFD0     int `json:"exif_ifd0"`
 	Container    int `json:"container"`
+	Filename     int `json:"filename"`
 	Mtime        int `json:"mtime"`
 	None         int `json:"none"`
 }
 
-// TimeZoneCounts counts new files dated from EXIF by the rule that gave the wall clock its offset
-// (capture_evidence.zone).
+// TimeZoneCounts counts new files dated from EXIF or from their name by the rule that gave the wall
+// clock its offset (capture_evidence.zone). A name is always read in the camera zone.
 type TimeZoneCounts struct {
 	GPS       int `json:"gps"`
 	ClockRule int `json:"clock_rule"`
@@ -65,6 +66,8 @@ func (r *TimeReport) add(filename string, res registerResult) {
 		r.BySource.ExifIFD0++
 	case captureSrcContainer:
 		r.BySource.Container++
+	case captureSrcFilename:
+		r.BySource.Filename++
 	case captureSrcMtime:
 		r.BySource.Mtime++
 		r.FileDateNames = append(r.FileDateNames, filename)

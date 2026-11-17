@@ -239,14 +239,14 @@ func (r *MediaRegistrar) registerMedia(
 		return registerResult{}, err
 	}
 
-	takenAt := exifData.TakenAt
-	if takenAt == nil {
-		takenAt = probe.CreatedAt
+	// The name is read whatever won, so the evidence keeps what it says.
+	name, named := ingest.FilenameTime(filename, zone)
+	reading := captureReading{exif: exifData, probe: probe, mtime: fallbackMtime}
+	if named {
+		reading.name = &name
 	}
-	if takenAt == nil {
-		takenAt = fallbackMtime
-	}
-	evidence := newCaptureEvidence(exifData, probe, fallbackMtime, zone)
+	takenAt := reading.takenAt()
+	evidence := newCaptureEvidence(reading, zone)
 	if takenAt != nil && !jsonCanCarry(*takenAt) {
 		slog.Warn("register: capture time outside the years JSON can carry, storing none", "filename", filename, "year", takenAt.UTC().Year())
 		takenAt = nil
@@ -330,9 +330,34 @@ const (
 	captureSrcExifOriginal = "exif_original"
 	captureSrcExifIFD0     = "exif_ifd0"
 	captureSrcContainer    = "container"
+	captureSrcFilename     = "filename"
 	captureSrcMtime        = "mtime"
 	captureSrcNone         = "none"
 )
+
+// captureReading is everything a capture time can come from, in the order registerMedia takes it
+// (captureSource): the EXIF, the video container (probe is empty for a photo), the file name and the
+// file's modified time, which the caller gives.
+type captureReading struct {
+	exif  ingest.ExifData
+	probe ingest.VideoProbeResult
+	name  *ingest.NameTime // nil when the name holds no date and time
+	mtime *time.Time
+}
+
+// takenAt is the capture time the first source that has one gives, nil when none does.
+func (c captureReading) takenAt() *time.Time {
+	switch {
+	case c.exif.TakenAt != nil:
+		return c.exif.TakenAt
+	case c.probe.CreatedAt != nil:
+		return c.probe.CreatedAt
+	case c.name != nil:
+		return &c.name.At
+	default:
+		return c.mtime
+	}
+}
 
 // captureEvidence is media.capture_evidence: how taken_at was derived, with the inputs that lost.
 // Those are computed at ingest and cannot be recovered later. Every key is always present.
@@ -356,28 +381,33 @@ type captureEvidence struct {
 	// CameraZoneFrom says who named CameraZone: "batch" (the upload or scan), "user" (the owner's
 	// setting) or "server" (CAMERA_TIMEZONE, or the server's own zone). Rows recorded before
 	// per-user zones lack the key, and were read in the server's.
-	CameraZoneFrom        string   `json:"camera_zone_from"`
-	CameraZoneUTCFallback bool     `json:"camera_zone_utc_fallback"`
-	Make                  *string  `json:"make"`
-	Model                 *string  `json:"model"`
-	ExifPartial           bool     `json:"exif_partial"`
-	CreationTime          *string  `json:"creation_time"`
-	FileMtime             *string  `json:"file_mtime"`
-	DurationS             *float64 `json:"duration_s"`
-	Encoder               *string  `json:"encoder"`
-	Codec                 *string  `json:"codec"`
-	Transcoded            bool     `json:"transcoded"`
+	CameraZoneFrom        string  `json:"camera_zone_from"`
+	CameraZoneUTCFallback bool    `json:"camera_zone_utc_fallback"`
+	Make                  *string `json:"make"`
+	Model                 *string `json:"model"`
+	ExifPartial           bool    `json:"exif_partial"`
+	CreationTime          *string `json:"creation_time"`
+	// NameWall is the date and time the file name holds ("2006-01-02 15:04:05"), whichever source
+	// won; null when it holds none. Rows recorded before names were read lack the key.
+	NameWall   *string  `json:"name_wall"`
+	FileMtime  *string  `json:"file_mtime"`
+	DurationS  *float64 `json:"duration_s"`
+	Encoder    *string  `json:"encoder"`
+	Codec      *string  `json:"codec"`
+	Transcoded bool     `json:"transcoded"`
 }
 
-// newCaptureEvidence records how registerMedia derived taken_at. mtime is the caller's fallback
-// time. A wall tag that exists but does not parse records the origin that actually applied, while
-// Wall still shows its text. zone is the one the EXIF was read with; its clock rules are not
-// recorded, only the one that applied (e.ClockRule).
-func newCaptureEvidence(e ingest.ExifData, probe ingest.VideoProbeResult, mtime *time.Time, zone ingest.CameraZone) captureEvidence {
+// newCaptureEvidence records how registerMedia derived taken_at from c. A wall tag that exists but
+// does not parse records the origin that actually applied, while Wall still shows its text. zone is
+// the one the EXIF and the name were read with; its clock rules are not recorded, only the one that
+// applied (e.ClockRule). A time from the name was read in the camera zone, so its zone is
+// ingest.ZoneCamera.
+func newCaptureEvidence(c captureReading, zone ingest.CameraZone) captureEvidence {
+	e, probe, mtime := c.exif, c.probe, c.mtime
 	ev := captureEvidence{
 		V:                     1,
 		By:                    "ingest",
-		Src:                   captureSource(e, probe, mtime),
+		Src:                   captureSource(c),
 		Wall:                  nilIfEmpty(e.Raw.WallClock),
 		GPSUTC:                rfc3339UTC(e.Raw.GPSStamp),
 		OffsetTag:             nilIfEmpty(e.Raw.OffsetTag),
@@ -399,29 +429,42 @@ func newCaptureEvidence(e ingest.ExifData, probe ingest.VideoProbeResult, mtime 
 		seconds := e.Raw.WallMinusGPS.Seconds()
 		ev.WallMinusGPSS = &seconds
 	}
-	if e.TakenAt != nil {
-		zoneRule := e.TakenAtZone
-		ev.Zone = &zoneRule
-		_, seconds := e.TakenAt.Zone()
-		minutes := seconds / 60
-		ev.OffsetUsedMin = &minutes
-		if zoneRule == ingest.ZoneClockRule {
+	if c.name != nil {
+		ev.NameWall = &c.name.Wall
+	}
+	switch ev.Src {
+	case captureSrcExifOriginal, captureSrcExifIFD0:
+		ev.setZone(e.TakenAtZone, *e.TakenAt)
+		if e.TakenAtZone == ingest.ZoneClockRule {
 			ev.ClockRule = newEvidenceClockRule(e.ClockRule)
 		}
+	case captureSrcFilename:
+		ev.setZone(ingest.ZoneCamera, c.name.At)
 	}
 	return ev
 }
 
-// captureSource names what produced taken_at, in the order registerMedia picks it.
-func captureSource(e ingest.ExifData, probe ingest.VideoProbeResult, mtime *time.Time) string {
+// setZone records the rule that gave a wall clock its offset, and the offset it gave at.
+func (c *captureEvidence) setZone(rule string, at time.Time) {
+	c.Zone = &rule
+	_, seconds := at.Zone()
+	minutes := seconds / 60
+	c.OffsetUsedMin = &minutes
+}
+
+// captureSource names what produced taken_at, in the order registerMedia picks it
+// (captureReading.takenAt).
+func captureSource(c captureReading) string {
 	switch {
-	case e.TakenAt != nil && e.Raw.WallTag == ingest.WallTagIFD0:
+	case c.exif.TakenAt != nil && c.exif.Raw.WallTag == ingest.WallTagIFD0:
 		return captureSrcExifIFD0
-	case e.TakenAt != nil:
+	case c.exif.TakenAt != nil:
 		return captureSrcExifOriginal
-	case probe.CreatedAt != nil:
+	case c.probe.CreatedAt != nil:
 		return captureSrcContainer
-	case mtime != nil:
+	case c.name != nil:
+		return captureSrcFilename
+	case c.mtime != nil:
 		return captureSrcMtime
 	default:
 		return captureSrcNone
@@ -430,7 +473,7 @@ func captureSource(e ingest.ExifData, probe ingest.VideoProbeResult, mtime *time
 
 // timeDropped records that no taken_at was stored although a source gave one, because JSON could not
 // carry its year (jsonCanCarry). No source applied, so none is named, nor a zone or a clock rule,
-// while the inputs stay: wall, creation_time and file_mtime still show what was refused.
+// while the inputs stay: wall, creation_time, name_wall and file_mtime still show what was refused.
 func (c captureEvidence) timeDropped() captureEvidence {
 	c.Src = captureSrcNone
 	c.Zone = nil

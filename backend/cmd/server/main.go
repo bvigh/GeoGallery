@@ -269,14 +269,14 @@ func runScan(ctx context.Context, stdout io.Writer, scan scanFunc, users []auth.
 	return nil
 }
 
-// writeTimeReport prints how the ingested files were dated: by source, then EXIF times by the rule
-// that gave their offset, with the camera zone and who named it. It warns when EXIF times were read in
-// a camera zone that is UTC all year and that the scan did not name (--tz), which few camera clocks
-// show, and says how to repair them.
+// writeTimeReport prints how the ingested files were dated: by source, then EXIF and file name times
+// by the rule that gave their offset, with the camera zone and who named it. It warns when times were
+// read in a camera zone that is UTC all year and that the scan did not name (--tz), which few camera
+// clocks show, and says how to repair them.
 func writeTimeReport(w io.Writer, r handlers.TimeReport, userID string) {
 	src, zone := r.BySource, r.ByZone
-	fmt.Fprintf(w, "by_source: exif_original=%d exif_ifd0=%d container=%d mtime=%d none=%d\n",
-		src.ExifOriginal, src.ExifIFD0, src.Container, src.Mtime, src.None)
+	fmt.Fprintf(w, "by_source: exif_original=%d exif_ifd0=%d container=%d filename=%d mtime=%d none=%d\n",
+		src.ExifOriginal, src.ExifIFD0, src.Container, src.Filename, src.Mtime, src.None)
 	fmt.Fprintf(w, "by_zone: gps=%d clock_rule=%d offset=%d camera=%d camera_zone=%q camera_zone_from=%s\n",
 		zone.GPS, zone.ClockRule, zone.Offset, zone.Camera, r.CameraZone, r.CameraZoneFrom)
 	if r.AssumedZoneIsUTC {
@@ -284,7 +284,7 @@ func writeTimeReport(w io.Writer, r handlers.TimeReport, userID string) {
 		if r.CameraZoneFrom == ingest.CameraZoneFromUser {
 			set = "change the user's camera zone in Settings"
 		}
-		fmt.Fprintf(w, "warning: the EXIF times of %d file(s) were read in camera zone %q, which is UTC all year. "+
+		fmt.Fprintf(w, "warning: the EXIF or file name times of %d file(s) were read in camera zone %q, which is UTC all year. "+
 			"If your camera clocks show another zone, %s, "+
 			"then run `server retime --user %s` to list the times that would move, and again with --apply to move them.\n",
 			zone.Camera, r.CameraZone, set, userID)
@@ -327,13 +327,15 @@ func runRetime(ctx context.Context, stdout io.Writer, retime retimeFunc, users [
 //	2019-03-13T18:28:15Z -> 2019-03-13T17:28:15Z  -1h0m0s  clock_rule(Panasonic DC-TZ200 UTC+02:00)  interpolated  <id>  P1033627.JPG
 //
 // The zone names where the new offset came from, and for a clock rule the rule's camera and
-// offset. The gps_source is the item's before the change ("-" without a location). The file name
+// offset. A time from the file name, which is always read in the camera zone, says filename there. The gps_source is the item's before the change ("-" without a location). The file name
 // comes last, so a space in it cannot shift the columns before it. Text a user chose (the file name,
 // the rule's camera) is quoted when it holds a control character, so it can neither break the line
 // nor reach the terminal raw.
 func formatRetimeChange(c handlers.RetimeChange) string {
 	zone := c.Zone
-	if c.Zone == ingest.ZoneClockRule && c.ClockRule != nil {
+	if c.FromName() {
+		zone = "filename"
+	} else if c.Zone == ingest.ZoneClockRule && c.ClockRule != nil {
 		zone = fmt.Sprintf("%s(%s %s %s)", c.Zone, printable(c.ClockRule.Make), printable(c.ClockRule.Model),
 			formatUTCOffset(c.ClockRule.OffsetMin))
 	}

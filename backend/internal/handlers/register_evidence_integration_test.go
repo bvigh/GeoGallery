@@ -59,6 +59,12 @@ func TestRegisterMedia_Integration_StoresEvidence(t *testing.T) {
 			exiftest.Photo{DateTimeOriginal: wall, PixelX: math.MaxUint32, PixelY: 3000}, &mtime,
 			nil, nil, num(3000),
 			map[string]any{"src": "exif_original"}},
+		// The test's name is the file's, with dashes for spaces.
+		{"2012-08-24_18-14-24_124 dates a copy without EXIF",
+			exiftest.Photo{PixelX: 1360, PixelY: 824}, &mtime,
+			nil, num(1360), num(824),
+			map[string]any{"src": "filename", "zone": "camera", "offset_used_min": 0.0, "name_wall": "2012-08-24 18:14:24",
+				"file_mtime": "2001-02-03T04:05:06Z"}},
 		{"a file time no timestamp can hold, when EXIF won",
 			exiftest.Photo{DateTimeOriginal: wall}, &farFuture,
 			nil, nil, nil,
@@ -86,7 +92,7 @@ func TestRegisterMedia_Integration_StoresEvidence(t *testing.T) {
 
 			var got map[string]any
 			require.NoError(t, json.Unmarshal(evidence, &got))
-			assert.Len(t, got, 24, "every key is always present")
+			assert.Len(t, got, 25, "every key is always present")
 			for key, want := range tt.wantEvidence {
 				assert.Equal(t, want, got[key], key)
 			}

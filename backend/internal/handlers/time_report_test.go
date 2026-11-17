@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,12 +97,13 @@ func TestUpload_TimeReport(t *testing.T) {
 			timedFile{"undated.jpg", []byte("no exif: undated"), ""},
 			timedFile{"too-far.jpg", photoTooFar, uploadMtime},
 			timedFile{"a-copied.jpg", []byte("no exif: a"), uploadMtime},
+			timedFile{"20230729_210400.jpg", []byte("no exif: named"), uploadMtime},
 			timedFile{"dup.jpg", []byte("no exif: dup"), uploadMtime},
 		)
 
 		assert.JSONEq(t, `{
-			"by_source": {"exif_original": 4, "exif_ifd0": 1, "container": 0, "mtime": 2, "none": 2},
-			"by_zone": {"gps": 1, "clock_rule": 1, "offset": 1, "camera": 2},
+			"by_source": {"exif_original": 4, "exif_ifd0": 1, "container": 0, "filename": 1, "mtime": 2, "none": 2},
+			"by_zone": {"gps": 1, "clock_rule": 1, "offset": 1, "camera": 3},
 			"camera_zone": "Europe/Warsaw",
 			"camera_zone_from": "server",
 			"assumed_zone_is_utc": false,
@@ -114,7 +116,7 @@ func TestUpload_TimeReport(t *testing.T) {
 		got := uploadTimeReport(t, reg, timedFile{"clip.mp4", writeClip(t, "libx264"), uploadMtime})
 
 		assert.JSONEq(t, `{
-			"by_source": {"exif_original": 0, "exif_ifd0": 0, "container": 1, "mtime": 0, "none": 0},
+			"by_source": {"exif_original": 0, "exif_ifd0": 0, "container": 1, "filename": 0, "mtime": 0, "none": 0},
 			"by_zone": {"gps": 0, "clock_rule": 0, "offset": 0, "camera": 0},
 			"camera_zone": "Europe/Warsaw",
 			"camera_zone_from": "server",
@@ -131,7 +133,7 @@ func TestUpload_TimeReport(t *testing.T) {
 		)
 
 		assert.JSONEq(t, `{
-			"by_source": {"exif_original": 0, "exif_ifd0": 0, "container": 0, "mtime": 0, "none": 0},
+			"by_source": {"exif_original": 0, "exif_ifd0": 0, "container": 0, "filename": 0, "mtime": 0, "none": 0},
 			"by_zone": {"gps": 0, "clock_rule": 0, "offset": 0, "camera": 0},
 			"camera_zone": "server zone (unset)",
 			"camera_zone_from": "server",
@@ -162,13 +164,19 @@ func TestUpload_TimeReportAssumedZoneIsUTC(t *testing.T) {
 		{"UTC, but the photo's GPS clock gave the offset", ingest.CameraZone{Loc: time.UTC, Set: true}, photoGPSClock, "UTC", 0, false},
 		{"UTC, but the photo's offset tag gave it", ingest.CameraZone{Loc: time.UTC, Set: true}, photoOffsetTag, "UTC", 0, false},
 		{"UTC, but no EXIF time", ingest.CameraZone{Loc: time.UTC, Set: true}, []byte("no exif"), "UTC", 0, false},
+		{"unset, on a server in UTC, for a name's time", ingest.CameraZone{Loc: time.UTC, UTCFallback: true}, []byte("no exif"), "server zone (unset)", 1, true},
+		{"UTC in winter only, for a name's summer time", ingest.CameraZone{Loc: london, Set: true}, []byte("no exif"), "Europe/London", 1, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &MediaRegistrar{db: &mockRegistrarDB{}, storage: &mockUploadStorage{}, cameraZone: tt.zone}
 
 			var got TimeReport
-			require.NoError(t, json.Unmarshal([]byte(uploadTimeReport(t, reg, timedFile{"photo.jpg", tt.content, uploadMtime})), &got))
+			name := "photo.jpg"
+			if strings.Contains(tt.name, "a name's") {
+				name = "IMG_20230729_210400.jpg"
+			}
+			require.NoError(t, json.Unmarshal([]byte(uploadTimeReport(t, reg, timedFile{name, tt.content, uploadMtime})), &got))
 
 			assert.Equal(t, tt.wantZone, got.CameraZone)
 			assert.Equal(t, tt.wantCamera, got.ByZone.Camera)
@@ -183,6 +191,7 @@ func TestRunIngestScan_TimeReport(t *testing.T) {
 	writeFile(t, dir, "b.jpg", string(photoInCameraZone))
 	writeFile(t, dir, "c.jpg", "no exif: c")
 	writeFile(t, dir, "a.jpg", "no exif: a")
+	writeFile(t, dir, "d 2012-08-24_18-14-24_124.jpg", "no exif: d")
 	writeFile(t, dir, "dup.jpg", "no exif: dup")
 	writeFile(t, dir, "empty.jpg", "") // registerMedia refuses an empty file
 	zone := ingest.CameraZone{Loc: time.UTC, UTCFallback: true}
@@ -195,10 +204,10 @@ func TestRunIngestScan_TimeReport(t *testing.T) {
 	res, err := RunIngestScan(context.Background(), deps, dir, testOwnerID, nil)
 
 	require.NoError(t, err)
-	assert.Equal(t, ScanResult{Ingested: 3, Skipped: 1, Failed: 1}, scanCounts(res))
+	assert.Equal(t, ScanResult{Ingested: 4, Skipped: 1, Failed: 1}, scanCounts(res))
 	want := newTimeReport(zone)
-	want.BySource = TimeSourceCounts{ExifOriginal: 1, Mtime: 2}
-	want.ByZone = TimeZoneCounts{Camera: 1}
+	want.BySource = TimeSourceCounts{ExifOriginal: 1, Filename: 1, Mtime: 2}
+	want.ByZone = TimeZoneCounts{Camera: 2}
 	want.AssumedZoneIsUTC = true
 	want.FileDateNames = []string{"a.jpg", "c.jpg"}
 	assert.Equal(t, want, res.TimeReport)

@@ -130,10 +130,11 @@ function ResultList({ title, names, error }: { title: string; names: string[]; e
   );
 }
 
-function addCounts<K extends string>(a: Record<K, number>, b: Record<K, number>): Record<K, number> {
-  const sum = { ...a };
-  for (const key of Object.keys(b) as K[]) sum[key] += b[key];
-  return sum;
+// Adds two batches' counts. A count an older backend left out counts as 0.
+function addCounts<T extends Record<string, number | undefined>>(a: T, b: T): T {
+  const sum: Record<string, number | undefined> = { ...a };
+  for (const key of Object.keys(b)) sum[key] = (sum[key] ?? 0) + (b[key] ?? 0);
+  return sum as T;
 }
 
 // One report for all batches of an upload. They reach the same server with the same zone choice, so
@@ -163,9 +164,10 @@ function cameraZonePart(cameraZone: string, from: CameraZoneFrom | undefined): s
   }
 }
 
-// "38 from EXIF (10 GPS clock, 20 photo offset, 8 assumed camera zone Europe/Warsaw), 2 from file
-// date": what dated the new files, sources and zone rules in the order ingest tries them. Empty when
-// no file was new.
+// "38 from EXIF (10 GPS clock, 20 photo offset, 8 assumed camera zone Europe/Warsaw), 3 from file name
+// (assumed camera zone Europe/Warsaw), 2 from file date": what dated the new files, sources and zone
+// rules in the order ingest tries them. A name is always read in the camera zone, which by_zone counts
+// with the EXIF times read in it. Empty when no file was new.
 function captureTimesLine({
   by_source: source,
   by_zone: zone,
@@ -174,15 +176,18 @@ function captureTimesLine({
 }: TimeReport): string {
   const counted = (parts: [count: number, text: string][]) =>
     parts.filter(([count]) => count > 0).map(([count, text]) => `${formatCount(count)} ${text}`);
+  const named = source.filename ?? 0;
+  const zonePart = cameraZonePart(cameraZone, from);
   const rules = counted([
     [zone.gps, "GPS clock"],
     [zone.clock_rule, "camera clock rule"],
     [zone.offset, "photo offset"],
-    [zone.camera, cameraZonePart(cameraZone, from)],
+    [zone.camera - named, zonePart],
   ]);
   return counted([
     [source.exif_original + source.exif_ifd0, rules.length > 0 ? `from EXIF (${rules.join(", ")})` : "from EXIF"],
     [source.container, "from video container"],
+    [named, `from file name (${zonePart})`],
     [source.mtime, "from file date"],
     [source.none, "with no capture time"],
   ]).join(", ");

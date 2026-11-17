@@ -430,7 +430,7 @@ func TestRunRetime_Integration_ClockRule(t *testing.T) {
 	// What ingest recorded before the rule: the camera zone, with the file time that lost.
 	mtime := time.Date(2019, 3, 14, 7, 0, 0, 0, time.UTC)
 	ingested := func(object []byte) []byte {
-		return newCaptureEvidence(ingest.ExtractExif(bytes.NewReader(object), deps.cameraZone), ingest.VideoProbeResult{}, &mtime, deps.cameraZone).encode()
+		return newCaptureEvidence(captureReading{exif: ingest.ExtractExif(bytes.NewReader(object), deps.cameraZone), mtime: &mtime}, deps.cameraZone).encode()
 	}
 
 	winterObject := tz("DC-TZ200", "2019:03:13 19:28:15")
@@ -546,8 +546,7 @@ func TestRunRetime_Integration_PanasonicVideo(t *testing.T) {
 	containerEvidence := func(created string) []byte {
 		at := retimeUTC(t, created)
 		duration := 3.0
-		return newCaptureEvidence(ingest.ExifData{}, ingest.VideoProbeResult{CreatedAt: &at, CodecName: "h264", DurationS: &duration},
-			nil, ingest.CameraZone{Loc: mustLoadLocation(t, "Europe/Warsaw"), Set: true}).encode()
+		return newCaptureEvidence(captureReading{exif: ingest.ExifData{}, probe: ingest.VideoProbeResult{CreatedAt: &at, CodecName: "h264", DurationS: &duration}}, ingest.CameraZone{Loc: mustLoadLocation(t, "Europe/Warsaw"), Set: true}).encode()
 	}
 
 	beforeRule := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "P1000001.MP4", mediaType: "video",
@@ -997,7 +996,7 @@ func TestRunRetime_Integration_CameraZoneSetting(t *testing.T) {
 	photo := func(dto string) []byte { return exiftest.JPEG(exiftest.Photo{DateTimeOriginal: dto}) }
 	// What ingest recorded: the zone in effect, and who named it.
 	ingested := func(object []byte, zone ingest.CameraZone) []byte {
-		return newCaptureEvidence(ingest.ExtractExif(bytes.NewReader(object), zone), ingest.VideoProbeResult{}, nil, zone).encode()
+		return newCaptureEvidence(captureReading{exif: ingest.ExtractExif(bytes.NewReader(object), zone)}, zone).encode()
 	}
 	inServerZone := photo("2024:01:10 12:00:00")
 	serverRow := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "a.jpg", object: inServerZone,
@@ -1178,7 +1177,7 @@ func TestRunRetime_Integration_EditAfterListingIsNotOverwritten(t *testing.T) {
 		before := retimeSnapshot(t, pool)
 		change := RetimeChange{MediaID: id, Filename: name, Old: items[0].takenAt, New: *exifData.TakenAt,
 			Zone: exifData.TakenAtZone, GPSSource: items[0].gpsSource}
-		err = applyRetime(ctx, pool, alice, change, exifData, deps.cameraZone, deps.matchWindow)
+		err = applyRetime(ctx, pool, alice, change, captureReading{exif: exifData}, deps.cameraZone, deps.matchWindow)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "the row changed since it was read")
 		assert.Equal(t, before, retimeSnapshot(t, pool), "nothing written")
@@ -1208,4 +1207,141 @@ func TestRunRetime_Integration_EditAfterListingIsNotOverwritten(t *testing.T) {
 		assert.Len(t, store.readKeys(), reads, "the re-run reads nothing")
 		assert.True(t, retimeUTC(t, "2018-10-23T11:50:53Z").Equal(readRetimedMedia(t, pool, id).takenAt))
 	})
+}
+
+// TestRunRetime_Integration_FilenameTime repairs rows stored before ingest read file names: edited
+// copies whose EXIF was stripped, dated by the day they were copied, take the date and time their
+// name holds, in the camera zone, and join the named trip of those days. A row dated from its name
+// follows a new camera zone. Only a time that came from the name or from the file time is replaced,
+// and a video recorded nothing that says which, unless its evidence does.
+func TestRunRetime_Integration_FilenameTime(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	store := newRetimeHeads()
+	alice := createUser(t, pool, "alice")
+	bob := createUser(t, pool, "bob")
+	stripped := exiftest.JPEG(exiftest.Photo{})
+	const copied = "2022-12-13T17:05:23.86Z" // the day the copies were made
+	ingestedWith := func(src, takenAt string, extra map[string]any) []byte {
+		ev := map[string]any{"v": 1, "by": "ingest", "src": src, "camera_zone": "server zone (unset)", "camera_zone_from": "server",
+			"file_mtime": takenAt, "creation_time": nil, "transcoded": false}
+		for k, v := range extra {
+			ev[k] = v
+		}
+		b, err := json.Marshal(ev)
+		require.NoError(t, err)
+		return b
+	}
+	trip := insertTrip(t, pool, alice, "Summer 2012", true, "2012-08-24", "2012-08-28")
+
+	// Rows ingested before migration 10 recorded no evidence: a photo without an EXIF time could only
+	// be dated by its file time.
+	edited := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "2012-08-24_18-14-24_124.jpg", object: stripped, takenAt: copied})
+	located := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "2012-08-25_10-43-33_312.jpg",
+		object:  exiftest.JPEG(exiftest.Photo{GPS: &exiftest.GPS{Lat: 46.5, Lng: 8.0}}),
+		takenAt: "2022-12-13T17:05:24.19Z", gpsSource: "exif", lat: 46.5, lng: 8.0})
+	insertTrack(t, pool, alice, "exif", "2022-12-13T17:05:24.19Z", 46.5, 8.0)
+	// Recorded as dated by the file time, which the stored time still is.
+	recorded := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "20120826_162650.jpg", object: stripped,
+		takenAt: "2022-12-13T17:05:25.02Z", evidence: ingestedWith("mtime", "2022-12-13T17:05:25.02Z", nil)})
+	videoRecorded := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "VID_20120827_101246.mp4", mediaType: "video",
+		object: []byte("not read"), takenAt: "2022-12-13T17:05:26.42Z", evidence: ingestedWith("mtime", "2022-12-13T17:05:26.42Z", nil)})
+	// Dated from its name in UTC, before the owner's zone was known: it follows Warsaw today.
+	namedInUTC := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "IMG_20120827_091022.jpg", object: stripped,
+		takenAt: "2012-08-27T09:10:22Z",
+		evidence: ingestedWith("filename", "2022-12-13T17:05:26.08Z", map[string]any{"zone": "camera", "offset_used_min": 0,
+			"name_wall": "2012-08-27 09:10:22"})})
+
+	// Left alone.
+	movedSince := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "20120828_154313.jpg", object: stripped,
+		takenAt: "2023-01-01T00:00:00Z", evidence: ingestedWith("mtime", "2022-12-13T17:05:27.44Z", nil)})
+	namedMovedSince := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "IMG_20120828_100000.jpg", object: stripped,
+		takenAt:  "2012-08-28T10:07:00Z",
+		evidence: ingestedWith("filename", "2022-12-13T17:05:28Z", map[string]any{"zone": "camera", "offset_used_min": 0})})
+	videoUnrecorded := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "VID_20120825_120000.mp4", mediaType: "video",
+		object: []byte("not read"), takenAt: "2012-08-25T10:00:02Z"})
+	container := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "VID_20120825_130000.mp4", mediaType: "video",
+		object: []byte("not read"), takenAt: "2012-08-25T11:00:02Z",
+		evidence: ingestedWith("container", "2022-12-13T17:05:29Z", map[string]any{"creation_time": "2012-08-25T11:00:02Z"})})
+	exifWins := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "2012-08-24_18-21-56_198.jpg",
+		object:  exiftest.JPEG(exiftest.Photo{DateTimeOriginal: "2012:08:24 18:21:54"}),
+		takenAt: "2012-08-24T16:21:54Z"})
+	dateOnly := insertRetimeRow(t, pool, store, retimeRow{owner: alice, name: "IMG-20120828-WA0001.jpg", object: stripped,
+		takenAt: "2022-12-13T17:05:30Z"})
+	bobsCopy := insertRetimeRow(t, pool, store, retimeRow{owner: bob, name: "2012-08-24_18-14-24_124.jpg", object: stripped, takenAt: copied})
+
+	var changes []RetimeChange
+	res, err := RunRetime(ctx, retimeDeps(t, pool, store), alice, true, collectRetime(&changes))
+	require.NoError(t, err)
+	assert.Equal(t, RetimeResult{Checked: 11, Retimed: 5, Unchanged: 1, NotExif: 3, Mismatch: 2}, res)
+
+	type reported struct{ id, old, new, src, zone string }
+	var got []reported
+	for _, c := range changes {
+		assert.True(t, c.FromName())
+		got = append(got, reported{c.MediaID, c.Old.UTC().Format(time.RFC3339Nano), c.New.UTC().Format(time.RFC3339), c.Src, c.Zone})
+	}
+	assert.Equal(t, []reported{
+		{namedInUTC, "2012-08-27T09:10:22Z", "2012-08-27T07:10:22Z", "filename", "camera"},
+		{edited, copied, "2012-08-24T16:14:24Z", "filename", "camera"},
+		{located, "2022-12-13T17:05:24.19Z", "2012-08-25T08:43:33Z", "filename", "camera"},
+		{recorded, "2022-12-13T17:05:25.02Z", "2012-08-26T14:26:50Z", "filename", "camera"},
+		{videoRecorded, "2022-12-13T17:05:26.42Z", "2012-08-27T08:12:46Z", "filename", "camera"},
+	}, got, "in stored taken_at order")
+	reads := store.readKeys()
+	for _, name := range []string{"VID_20120827_101246.mp4", "VID_20120825_120000.mp4", "VID_20120825_130000.mp4"} {
+		assert.NotContains(t, reads, retimeKey(alice, name), "a video is never read without a rule that dates it from its EXIF")
+	}
+	assert.NotContains(t, reads, retimeKey(bob, "2012-08-24_18-14-24_124.jpg"))
+
+	// The copies join the named trip of their days.
+	for _, id := range []string{edited, located, recorded, videoRecorded, namedInUTC} {
+		m := readRetimedMedia(t, pool, id)
+		require.NotNil(t, m.tripID, id)
+		assert.Equal(t, trip, *m.tripID, id)
+	}
+
+	// The evidence says the time came from the name, read in today's zone, and what it replaced. A row
+	// without evidence recorded no file time; a recorded one keeps it.
+	ev := retimedEvidenceOf(t, pool, edited)
+	assert.Equal(t, "retime", ev["by"])
+	assert.Equal(t, copied, ev["retimed_from"])
+	assert.Equal(t, "filename", ev["src"])
+	assert.Equal(t, "camera", ev["zone"])
+	assert.Equal(t, 120.0, ev["offset_used_min"])
+	assert.Equal(t, "2012-08-24 18:14:24", ev["name_wall"])
+	assert.Equal(t, "Europe/Warsaw", ev["camera_zone"])
+	assert.Nil(t, ev["file_mtime"])
+	assert.Nil(t, ev["wall"])
+	ev = retimedEvidenceOf(t, pool, recorded)
+	assert.Equal(t, "filename", ev["src"])
+	assert.Equal(t, "2022-12-13T17:05:25.02Z", ev["file_mtime"])
+	assert.Equal(t, "2012-08-26 16:26:50", ev["name_wall"])
+
+	// A photo's EXIF position keeps its location, and its track point moves with it.
+	m := readRetimedMedia(t, pool, located)
+	require.NotNil(t, m.gpsSource)
+	assert.Equal(t, "exif", *m.gpsSource)
+	assert.InDelta(t, 46.5, *m.lat, 1e-9)
+	assert.Equal(t, []string{"2012-08-25T08:43:33Z"}, retimeTrackTimes(t, pool, alice, "exif"))
+
+	// Times that did not come from the name or the file time keep them.
+	for id, want := range map[string]string{
+		movedSince: "2023-01-01T00:00:00Z", namedMovedSince: "2012-08-28T10:07:00Z", videoUnrecorded: "2012-08-25T10:00:02Z",
+		container: "2012-08-25T11:00:02Z", exifWins: "2012-08-24T16:21:54Z", dateOnly: "2022-12-13T17:05:30Z",
+	} {
+		assert.True(t, retimeUTC(t, want).Equal(readRetimedMedia(t, pool, id).takenAt), want)
+	}
+	b := readRetimedMedia(t, pool, bobsCopy)
+	assert.True(t, retimeUTC(t, copied).Equal(b.takenAt), "another owner's copy stays")
+	assert.Nil(t, b.evidence)
+
+	// A second run finds nothing to change.
+	before := retimeSnapshot(t, pool)
+	changes = nil
+	res, err = RunRetime(ctx, retimeDeps(t, pool, store), alice, true, collectRetime(&changes))
+	require.NoError(t, err)
+	assert.Equal(t, RetimeResult{Checked: 11, Unchanged: 6, NotExif: 3, Mismatch: 2}, res)
+	assert.Empty(t, changes)
+	assert.Equal(t, before, retimeSnapshot(t, pool))
 }

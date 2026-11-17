@@ -178,7 +178,8 @@ export type CameraZoneFrom = "batch" | "user" | "server";
 // How the capture times of one upload request's new files were read, counted by the values their
 // capture_evidence records. Duplicates and failed files are not counted.
 export interface TimeReport {
-  by_source: Record<CaptureSource, number>;
+  // Older backends omit filename: they never dated a file by its name.
+  by_source: Omit<Record<CaptureSource, number>, "filename"> & { filename?: number };
   by_zone: Record<ZoneRule, number>;
   camera_zone: string; // the IANA name, or the literal "server zone (unset)"
   camera_zone_from?: CameraZoneFrom; // older backends omit it: the server's
@@ -326,7 +327,9 @@ export interface Challenge extends ChallengeSummary {
 // "Why here?": GET /api/media/{id}/provenance and /provenance/file (docs/gps-debugging.md, Step 1).
 // Every instant is RFC 3339 in UTC.
 
-export type CaptureSource = "exif_original" | "exif_ifd0" | "container" | "mtime" | "none";
+// In the order ingest takes them: EXIF, the video container, the date and time in the file name, the
+// file's modified time.
+export type CaptureSource = "exif_original" | "exif_ifd0" | "container" | "filename" | "mtime" | "none";
 export type ZoneRule = "gps" | "offset" | "clock_rule" | "camera";
 export type PlacementState =
   | "current"
@@ -351,8 +354,8 @@ export interface EvidenceClockRule {
 }
 
 // media.capture_evidence: how taken_at was derived, recorded at ingest, or by server retime when
-// that moved taken_at. Every key is always present, except the two added with clock rules, which
-// older rows lack.
+// that moved taken_at. Every key is always present, except those marked optional, which older rows
+// lack.
 export interface CaptureEvidence {
   v: number;
   by: "ingest" | "backfill" | "retime";
@@ -373,6 +376,9 @@ export interface CaptureEvidence {
   model: string | null;
   exif_partial: boolean;
   creation_time: string | null;
+  // The date and time the file name holds, "YYYY-MM-DD HH:MM:SS", whichever source won; rows recorded
+  // before names were read lack it.
+  name_wall?: string | null;
   file_mtime: string | null;
   duration_s: number | null;
   encoder: string | null;
@@ -562,10 +568,11 @@ export interface FileReread {
       encoder: string | null;
       codec: string | null;
     } | null;
+    name_wall?: string | null; // the date and time the file name holds; older backends omit it
   };
   rule_today: {
-    source: "exif_original" | "exif_ifd0" | "container";
-    zone_rule: ZoneRule | null;
+    source: "exif_original" | "exif_ifd0" | "container" | "filename";
+    zone_rule: ZoneRule | null; // "camera" for a time from the file name
     offset_min: number | null; // null for a container time
     zone_name: string | null; // set only when zone_rule is "camera"
     zone_from?: CameraZoneFrom | null; // who named zone_name; set only when zone_rule is "camera"

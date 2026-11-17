@@ -128,8 +128,8 @@ The column is nullable with no default. Existing rows stay `NULL`. The four othe
 | `v` | number | Format version, `1`. |
 | `by` | string | `ingest`. Step 4's backfill writes `backfill`. `server retime` writes `retime` when it moves `taken_at`. |
 | `retimed_from` | RFC 3339 UTC or null | `taken_at` before `server retime` moved it. Null from ingest. |
-| `src` | string | What produced `taken_at`: `exif_original`, `exif_ifd0`, `container`, `mtime` or `none`. Also `none` when the source gave a time whose UTC year JSON cannot carry (outside 1 to 9998): `taken_at` is then `NULL`, the next source is not tried, `zone` and `offset_used_min` are null, and `wall`, `creation_time` and `file_mtime` still show the inputs. |
-| `zone` | string or null | `gps`, `clock_rule`, `offset` or `camera` (`ExifData.TakenAtZone`). Null unless `src` is an EXIF value. |
+| `src` | string | What produced `taken_at`: `exif_original`, `exif_ifd0`, `container`, `filename` (#30: the date and time in the file name), `mtime` or `none`. Also `none` when the source gave a time whose UTC year JSON cannot carry (outside 1 to 9998): `taken_at` is then `NULL`, the next source is not tried, `zone` and `offset_used_min` are null, and `wall`, `creation_time`, `name_wall` and `file_mtime` still show the inputs. |
+| `zone` | string or null | `gps`, `clock_rule`, `offset` or `camera` (`ExifData.TakenAtZone`); `camera` for `filename`, whose wall clock is always read in the camera zone. Null unless `src` is an EXIF value or `filename`. |
 | `wall` | string or null | The EXIF wall clock as written, after `CleanTag`, with no zone. Kept even when it cannot be parsed. |
 | `gps_utc` | RFC 3339 UTC or null | `GPSDateStamp` + `GPSTimeStamp`, recorded whenever the stamp parses, whether or not it was accepted and whether or not the file has a wall clock. |
 | `wall_minus_gps_s` | number or null | Wall clock minus `gps_utc`, before rounding. Null unless both parse. |
@@ -143,6 +143,7 @@ The column is nullable with no default. Existing rows stay `NULL`. The four othe
 | `make`, `model` | string or null | EXIF `Make` and `Model`, after `CleanTag`. |
 | `exif_partial` | boolean | The EXIF decoder stopped at an error after reading some of the tags `ExtractExif` uses, and those were kept. |
 | `creation_time` | RFC 3339 UTC or null | The container's `creation_time`, even when EXIF won. |
+| `name_wall` | string or null | The date and time the file name holds (`ingest.FilenameTime`), `YYYY-MM-DD HH:MM:SS` with no zone, even when an earlier source won; null when the name holds none. Missing from rows recorded before #30. |
 | `file_mtime` | RFC 3339 UTC or null | The fallback time the caller supplied, even when an earlier source won. |
 | `duration_s` | number or null | ffprobe `format.duration`. |
 | `encoder` | string or null | ffprobe `format.tags.encoder`, after `CleanTag`. |
@@ -191,7 +192,7 @@ func (z CameraZone) Name() string
 
 `main.go` builds it from `cfg.CameraTimezone`, `cfg.CameraTimezoneSet` and `cfg.CameraTimezoneFallsBackToUTC()`. It replaces the `*time.Location` argument of `NewMediaHandler` and `NewIngestDeps` and the `cameraZone` field of `MediaRegistrar`; the callers in `cmd/server` and its tests change with them, as does `handlers/register_exif_time_test.go`, which sets the registrar's zone directly and passes nil zones. A zero `CameraZone` reads as UTC, as a nil zone does today. `ExtractExif` keeps its signature and receives `z.Loc`.
 
-**`handlers/register.go`.** The `INSERT` also writes `camera_model`, `width_px`, `height_px`, `duration_sec` and `capture_evidence`. Width and height come from EXIF, else from the probe, where 0 means unknown and is stored as `NULL`. Only a new row gets evidence; the duplicate path returns before any of this. A row's `camera_model` is `NULL` when EXIF has none. Reading a video's model from container tags is not part of Step 1. `src` is decided in the same order as `taken_at`: EXIF only when `ExifData.TakenAt` is non-nil (`exif_original` or `exif_ifd0`, which `WallTag` selects only then), then `container`, then `mtime`, then `none`. A wall tag that exists but does not parse therefore records the origin that actually applied, while `wall` still shows the text. `offset_used_min` is the offset of `ExifData.TakenAt.Zone()` in minutes.
+**`handlers/register.go`.** The `INSERT` also writes `camera_model`, `width_px`, `height_px`, `duration_sec` and `capture_evidence`. Width and height come from EXIF, else from the probe, where 0 means unknown and is stored as `NULL`. Only a new row gets evidence; the duplicate path returns before any of this. A row's `camera_model` is `NULL` when EXIF has none. Reading a video's model from container tags is not part of Step 1. `src` is decided in the same order as `taken_at` (`captureReading`): EXIF only when `ExifData.TakenAt` is non-nil (`exif_original` or `exif_ifd0`, which `WallTag` selects only then), then `container`, then `filename`, then `mtime`, then `none`. A wall tag that exists but does not parse therefore records the origin that actually applied, while `wall` still shows the text. `offset_used_min` is the offset of `ExifData.TakenAt.Zone()` in minutes.
 
 ### Matcher and arithmetic
 
@@ -528,9 +529,11 @@ interface FileReread {
       encoder: string | null;
       codec: string | null;
     } | null;
+    name_wall: string | null;     // the date and time the file name holds (#30)
   };
   rule_today: {
-    source: "exif_original" | "exif_ifd0" | "container";
+    source: "exif_original" | "exif_ifd0" | "container" | "filename"; // the name only when the file
+                                  // gave no time, read in the camera zone (zone_rule "camera")
     zone_rule: "gps" | "clock_rule" | "offset" | "camera" | null;
     offset_min: number | null;    // null for a container time
     zone_name: string | null;     // set only when zone_rule is "camera"
@@ -553,7 +556,7 @@ interface FileReread {
 | Class | Condition | Wording |
 |---|---|---|
 | `unverifiable_transcoded` | `rule_today` is null, and the item is a video that was re-encoded (defined below) | With evidence: "This video was re-encoded at upload, so its time cannot be checked against the file." By the heuristic: "This video may have been re-encoded at upload, so its time may not be checkable against the file." |
-| `no_file_time` | `rule_today` is null | Photo: "No capture time could be read from this file. This reader understands EXIF in JPEG and TIFF only." Video: "No capture time could be read from this video's container." When `capture_evidence.src` is `mtime` and only then, it adds: "The stored time is the file's modified date." |
+| `no_file_time` | `rule_today` is null | Photo: "No capture time could be read from this file, nor a date and time from its name. This reader understands EXIF in JPEG, TIFF, PNG, WebP and HEIC." Video: "No capture time could be read from this video's container, nor a date and time from its name." When `capture_evidence.src` is `mtime` and only then, it adds: "The stored time is the file's modified date." |
 | `stored_has_no_time` | `stored_taken_at` is null | "The file holds a capture time, but this item has none stored. Re-reading does not change that." |
 | `same` | `abs(delta_s) < 1` | "Today's rules agree with the stored time." Never "correct": it is exactly what a repeatable clock error would show. |
 | `whole_offset` | `delta_s` is a multiple of 900 and `abs(delta_s) <= 50400` | "Differs by exactly {delta}. An older rule or a changed setting would explain it." |
@@ -666,7 +669,7 @@ Downsampling keeps one row per format, so a per-source line in a downsampled con
 
 **Zone chip wording.** `gps`: the GPS clock, with its residual. `clock_rule`: "Your rule for {camera}: clock showed UTC+02:00", and for recorded evidence the note "Changing this rule in Settings does not move this time." `offset`: `OffsetTimeOriginal`. `camera`: the zone name and "nothing in the file confirms this", the name followed by ", your camera zone" for the owner's setting (with the note "Changing your camera zone in Settings does not move this time." on recorded evidence) or ", chosen for its upload" for an upload's or a scan's own zone. With `offset_ignored`: "The file declares {tag}, which is ignored for this make." With `camera_zone` unset: "the server's own zone, because `CAMERA_TIMEZONE` is unset", and with `camera_zone_utc_fallback`: a warning that this time was read as UTC.
 
-**Time origin chip.** `exif_original`: "EXIF capture time". `exif_ifd0`: "EXIF general date, may be an edit time". `container`: "Video container time". `mtime`: "File modified time, may be wrong", with the note "A modified time is often a copy or download time." `none`: "No capture time". With no evidence, the chip follows the re-read's `rule_today.source`, and until that loads it reads "not recorded".
+**Time origin chip.** `exif_original`: "EXIF capture time". `exif_ifd0`: "EXIF general date, may be an edit time". `container`: "Video container time". `filename`: "File name's date and time", with the note "Phones and apps name a file by when it was taken, and copies keep the name." (#30; the Camera row shows the name's wall clock with the offset the camera zone gave, "assumed"). `mtime`: "File modified time, may be wrong", with the note "A modified time is often a copy or download time." `none`: "No capture time". With no evidence, the chip follows the re-read's `rule_today.source`, and until that loads it reads "not recorded".
 
 **Bracket kind chip.** A log point: "Log". An `exif` point with `origin.state` `linked`: "Your photo {filename}". A `manual` point that is `linked`: "Your pin on {filename}". `burst`: "{n} items at this second". `orphan`: "A deleted item".
 
@@ -932,7 +935,7 @@ A bracket-pair check counts on the pair's own distance and speed, so it reaches 
 
 ```ts
 interface TimeReport {
-  by_source: Record<string, number>;   // exif_original, exif_ifd0, container, mtime, none
+  by_source: Record<string, number>;   // exif_original, exif_ifd0, container, filename (#30), mtime, none
   by_zone: Record<string, number>;     // gps, offset, camera
   camera_zone: string;                 // the zone name, or "server zone (unset)"
   camera_zone_from: "batch" | "user" | "server"; // who named it (#25)
