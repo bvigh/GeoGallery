@@ -1,6 +1,6 @@
 # GeoGallery roadmap
 
-As of 2026-11-16. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
+As of 2026-11-17. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
 
 Sizes: **XS** < 2 h, **S** ≤ 1 day, **M** 2–4 days, **L** a week or more.
 
@@ -63,7 +63,7 @@ Mostly frontend. Small enough to ship as two or three bundled PRs.
 
 #30 also repairs what is stored: `server retime` gives a file without an EXIF time the date and time its name holds, where its stored time came from the name or the file time, so edited copies whose EXIF was stripped leave the day they were copied.
 
-360° is the owner's decision (#27). Ingest still makes a first guess, and #28 makes that guess better for new files, but a manual choice always wins.
+360° is the owner's decision (#27). Ingest still makes a first guess, but a manual choice always wins. #28 is built: the guess no longer reads the file name, whose keywords ("360" in a date or a counter, a phone's "PANO") made 28 flat photos and 1 flat video 360° on one real library. A photo's XMP (`GPano:ProjectionType`) decides when it names a projection, then a 2:1 frame of at least 3000 px, now within 1%. Insta360's name and make are not used: a reframed export keeps the 360° clip's name. Stored items keep their type until #27.
 
 Data repairs on the existing deployments are operator work, not issues: the far dashcam rows, the Insta360 photos and videos, and checking Hetzner. The esoko week rollover is repaired, by correcting the two source logs and importing them again. They are tracked in local notes kept out of this repository, because they describe personal location history.
 

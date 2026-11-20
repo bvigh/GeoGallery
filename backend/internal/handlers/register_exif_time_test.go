@@ -22,6 +22,7 @@ import (
 
 // Positions of the new columns in the media INSERT's arguments.
 const (
+	insertArgMediaType   = 2
 	insertArgTakenAt     = 7
 	insertArgFileHash    = 9
 	insertArgCameraModel = 10
@@ -399,6 +400,36 @@ func TestRegisterMedia_ColumnsFromExif(t *testing.T) {
 	assert.Equal(t, 4000, *insert[insertArgWidth].(*int))
 	assert.Equal(t, 3000, *insert[insertArgHeight].(*int))
 	assert.Nil(t, insert[insertArgDuration], "a photo has no duration")
+}
+
+// TestRegisterMedia_MediaType stores the media type the file's XMP or frame gives, whatever its name.
+// The names are the kinds that a keyword in the name once made 360°.
+func TestRegisterMedia_MediaType(t *testing.T) {
+	sphere := exiftest.GPanoPacket("ProjectionType=equirectangular", "FullPanoWidthPixels=11904", "CroppedAreaImageWidthPixels=11904")
+	tests := []struct {
+		name     string
+		content  []byte
+		filename string
+		want     string
+	}{
+		{"a photo sphere by its XMP", exiftest.JPEG(exiftest.Photo{Make: "Arashi Vision", Model: "insta360 x5", XMP: sphere}),
+			"IMG_20250601_121314_00_123.jpg", "photo_360"},
+		{"a 2:1 frame without XMP", exiftest.JPEG(exiftest.Photo{PixelX: 6080, PixelY: 3040}), "R0010001.JPG", "photo_360"},
+		{"a cylindrical panorama in a 2:1 frame", exiftest.JPEG(exiftest.Photo{PixelX: 6000, PixelY: 3000,
+			XMP: exiftest.GPanoPacket("ProjectionType=cylindrical")}), "20230729_210400.jpg", "photo"},
+		{"a phone panorama named PANO", exiftest.JPEG(exiftest.Photo{Model: "Mi A2 Lite"}), "PANO_20190713_143602.jpg", "photo"},
+		{"360 in the time of day", exiftest.JPEG(exiftest.Photo{PixelX: 4000, PixelY: 3000}), "20190713_143602.jpg", "photo"},
+		{"360 in a counter", exiftest.JPEG(exiftest.Photo{PixelX: 5184, PixelY: 3888}), "P1036012.JPG", "photo"},
+		{"every old keyword", exiftest.JPEG(exiftest.Photo{}), "360 pano panorama spherical.jpg", "photo"},
+		{"a video named like a 360° clip", []byte("not a video"), "VID_20220708_101530_00_005.mp4", "video"},
+		{"a video named pano", []byte("not a video"), "pano.mov", "video"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			insert := registerFile(t, ingest.CameraZone{Loc: time.UTC, Set: true}, tt.content, tt.filename, nil)
+			assert.Equal(t, tt.want, insert[insertArgMediaType])
+		})
+	}
 }
 
 func TestRegisterMedia_NoCameraModelIsNull(t *testing.T) {

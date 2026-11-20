@@ -5,9 +5,11 @@ package exiftest
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -26,6 +28,16 @@ type Photo struct {
 	// BrokenExifIFD adds a zero-length tag to the Exif IFD, as old Sony cameras write.
 	BrokenExifIFD bool
 	Extra         []RawTag // added to the Exif IFD
+	// XMP is an XMP packet, written where each format keeps it: an APP1 segment after the EXIF one
+	// (JPEG, XMPSegment), IFD0's XMLPacket tag 0x02BC (TIFF), an iTXt chunk (PNG), an XMP chunk
+	// (WebP) or an item of type mime (HEIF).
+	XMP string
+}
+
+// withoutXMP is p for the formats that keep the XMP outside the TIFF structure.
+func (p Photo) withoutXMP() Photo {
+	p.XMP = ""
+	return p
 }
 
 // RawTag is a tag written as given, for what Photo has no field for: an id the decoder has no name
@@ -63,23 +75,67 @@ type entry struct {
 	value []byte
 }
 
-// JPEG returns a JPEG holding p's tags in a little-endian TIFF APP1 segment.
+// JPEG returns a JPEG holding p's tags in a little-endian TIFF APP1 segment, followed by the XMP
+// segment when p has a packet.
 func JPEG(p Photo) []byte {
-	tiff := TIFF(p)
+	tiff := TIFF(p.withoutXMP())
 	var b bytes.Buffer
 	b.Write([]byte{0xFF, 0xD8, 0xFF, 0xE1})
 	_ = binary.Write(&b, binary.BigEndian, uint16(2+6+len(tiff)))
 	b.WriteString("Exif\x00\x00")
 	b.Write(tiff)
+	if p.XMP != "" {
+		b.Write(XMPSegment(p.XMP))
+	}
 	b.Write([]byte{0xFF, 0xD9})
 	return b.Bytes()
 }
 
-// PNG returns a PNG holding p's tags in an eXIf chunk.
+// GPanoNS is the XML namespace of Google's Photo Sphere properties (GPano).
+const GPanoNS = "http://ns.google.com/photos/1.0/panorama/"
+
+// XMPPacket wraps descriptions (rdf:Description elements) in the frame every writer puts round them.
+func XMPPacket(descriptions string) string {
+	return "<?xpacket begin=\"\uFEFF\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n" +
+		`<x:xmpmeta xmlns:x="adobe:ns:meta/">` + "\n" +
+		` <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` + "\n" +
+		"  " + descriptions + "\n" +
+		" </rdf:RDF>\n</x:xmpmeta>\n" +
+		`<?xpacket end="w"?>`
+}
+
+// GPanoPacket returns an XMP packet as Insta360 Studio writes one: the GPano properties as
+// attributes of an rdf:Description. Each prop is "Name=value", the value written as it is.
+func GPanoPacket(props ...string) string {
+	var attrs strings.Builder
+	for _, prop := range props {
+		name, value, _ := strings.Cut(prop, "=")
+		fmt.Fprintf(&attrs, "\n    GPano:%s=\"%s\"", name, value)
+	}
+	return XMPPacket(`<rdf:Description rdf:about="" xmlns:GPano="` + GPanoNS + `"` + attrs.String() + `/>`)
+}
+
+// XMPSegment returns the JPEG APP1 segment that holds an XMP packet.
+func XMPSegment(packet string) []byte {
+	const header = "http://ns.adobe.com/xap/1.0/\x00"
+	if 2+len(header)+len(packet) > math.MaxUint16 {
+		panic("exiftest: the packet does not fit one APP1 segment")
+	}
+	b := binary.BigEndian.AppendUint16([]byte{0xFF, 0xE1}, uint16(2+len(header)+len(packet)))
+	b = append(b, header...)
+	return append(b, packet...)
+}
+
+// PNG returns a PNG holding p's tags in an eXIf chunk, and p's XMP in an uncompressed iTXt chunk
+// with the keyword XMP uses.
 func PNG(p Photo) []byte {
 	b := []byte("\x89PNG\r\n\x1a\n")
 	b = pngChunk(b, "IHDR", make([]byte, 13))
-	b = pngChunk(b, "eXIf", TIFF(p))
+	b = pngChunk(b, "eXIf", TIFF(p.withoutXMP()))
+	if p.XMP != "" {
+		// The keyword, then no compression, no language and no translated keyword.
+		b = pngChunk(b, "iTXt", append([]byte("XML:com.adobe.xmp\x00\x00\x00\x00\x00"), p.XMP...))
+	}
 	return pngChunk(b, "IEND", nil)
 }
 
@@ -91,14 +147,20 @@ func pngChunk(b []byte, name string, data []byte) []byte {
 	return binary.BigEndian.AppendUint32(b, crc32.ChecksumIEEE(b[start:]))
 }
 
-// WebP returns an extended WebP holding p's tags in an EXIF chunk.
+// WebP returns an extended WebP holding p's tags in an EXIF chunk, and p's XMP in an XMP chunk.
 func WebP(p Photo) []byte {
-	const exifFlag = 1 << 3
+	const exifFlag, xmpFlag = 1 << 3, 1 << 2
 	vp8x := make([]byte, 10)
 	vp8x[0] = exifFlag
+	if p.XMP != "" {
+		vp8x[0] |= xmpFlag
+	}
 	body := []byte("WEBP")
 	body = webpChunk(body, "VP8X", vp8x)
-	body = webpChunk(body, "EXIF", TIFF(p))
+	body = webpChunk(body, "EXIF", TIFF(p.withoutXMP()))
+	if p.XMP != "" {
+		body = webpChunk(body, "XMP ", []byte(p.XMP))
+	}
 	b := le.AppendUint32([]byte("RIFF"), uint32(len(body)))
 	return append(b, body...)
 }
@@ -113,35 +175,62 @@ func webpChunk(b []byte, name string, data []byte) []byte {
 	return b
 }
 
+// heifItem is one item of a HEIF file: its type, what follows the type in its infe box (its name,
+// and for a mime item the content type), and its data.
+type heifItem struct {
+	typ, info string
+	data      []byte
+}
+
 // HEIF returns a HEIC holding p's tags in an Exif item, laid out as phones write it: the item
-// starts with the offset of the TIFF header and "Exif\0\0".
+// starts with the offset of the TIFF header and "Exif\0\0". p's XMP is a second item, of type mime
+// with XMP's content type.
 func HEIF(p Photo) []byte {
 	const exifPrefix = "Exif\x00\x00"
-	item := binary.BigEndian.AppendUint32(nil, uint32(len(exifPrefix)))
-	item = append(item, exifPrefix...)
-	item = append(item, TIFF(p)...)
+	exif := binary.BigEndian.AppendUint32(nil, uint32(len(exifPrefix)))
+	exif = append(exif, exifPrefix...)
+	exif = append(exif, TIFF(p.withoutXMP())...)
+	items := []heifItem{{typ: "Exif", info: "\x00", data: exif}}
+	if p.XMP != "" {
+		items = append(items, heifItem{typ: "mime", info: "\x00application/rdf+xml\x00", data: []byte(p.XMP)})
+	}
 
 	ftyp := box("ftyp", []byte("heic\x00\x00\x00\x00mif1heic"))
 	hdlr := box("hdlr", append(make([]byte, 8), []byte("pict\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")...))
-	// infe is version 2: item 1, not protected, type Exif, no name.
-	infe := box("infe", []byte("\x02\x00\x00\x00\x00\x01\x00\x00Exif\x00"))
-	iinf := box("iinf", append([]byte{0, 0, 0, 0, 0, 1}, infe...))
+	iinf := binary.BigEndian.AppendUint16([]byte{0, 0, 0, 0}, uint16(len(items)))
+	for i, item := range items {
+		// infe version 2: the item's ID, not protected, its type, then its name and content type.
+		infe := binary.BigEndian.AppendUint16([]byte{2, 0, 0, 0}, uint16(i+1))
+		infe = append(infe, 0, 0)
+		infe = append(infe, item.typ...)
+		iinf = append(iinf, box("infe", append(infe, item.info...))...)
+	}
 
 	iloc := func(offset uint32) []byte {
-		// Version 0, 4-byte offsets and lengths, no base offset; one item with one extent.
-		v := []byte{0, 0, 0, 0, 0x44, 0x00, 0, 1, 0, 1, 0, 0, 0, 1}
-		v = binary.BigEndian.AppendUint32(v, offset)
-		return box("iloc", binary.BigEndian.AppendUint32(v, uint32(len(item))))
+		// Version 0, 4-byte offsets and lengths, no base offset; one extent per item, in item order.
+		v := binary.BigEndian.AppendUint16([]byte{0, 0, 0, 0, 0x44, 0x00}, uint16(len(items)))
+		for i, item := range items {
+			v = binary.BigEndian.AppendUint16(v, uint16(i+1))
+			v = append(v, 0, 0, 0, 1) // data reference 0, one extent
+			v = binary.BigEndian.AppendUint32(v, offset)
+			v = binary.BigEndian.AppendUint32(v, uint32(len(item.data)))
+			offset += uint32(len(item.data))
+		}
+		return box("iloc", v)
 	}
 	meta := func(offset uint32) []byte {
 		v := append([]byte{0, 0, 0, 0}, hdlr...)
-		v = append(v, iinf...)
+		v = append(v, box("iinf", iinf)...)
 		return box("meta", append(v, iloc(offset)...))
 	}
 
+	var mdat []byte
+	for _, item := range items {
+		mdat = append(mdat, item.data...)
+	}
 	const mdatHeader = 8
 	b := append(ftyp, meta(uint32(len(ftyp)+len(meta(0))+mdatHeader))...)
-	return append(b, box("mdat", item)...)
+	return append(b, box("mdat", mdat)...)
 }
 
 func box(name string, payload []byte) []byte {
@@ -207,6 +296,9 @@ func TIFF(p Photo) []byte {
 	}
 	if p.DateTime != "" {
 		ifd0 = append(ifd0, ascii(0x0132, p.DateTime))
+	}
+	if p.XMP != "" {
+		ifd0 = append(ifd0, entry{0x02BC, typeByte, uint32(len(p.XMP)), []byte(p.XMP)})
 	}
 	if p.DateTimeOriginal != "" {
 		exifIFD = append(exifIFD, ascii(0x9003, p.DateTimeOriginal))
