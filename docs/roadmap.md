@@ -1,6 +1,6 @@
 # GeoGallery roadmap
 
-As of 2026-11-17. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
+As of 2026-11-21. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
 
 Sizes: **XS** < 2 h, **S** ≤ 1 day, **M** 2–4 days, **L** a week or more.
 
@@ -101,6 +101,8 @@ Data repairs on the existing deployments are operator work, not issues: the far 
 | #87 | Challenge results: spread pins that land on one spot | S |
 
 #39 is built for people with an account: a challenge's players are picked from the user list, its five items are drawn from what all of them can already see, and its link (`/game/<id>`) opens it for them alone. Its last point, challenges for people without an account, is share links (#43) and waits for that decision.
+
+#42 is built, with one change from the issue: the Admin page's Storage section gives each user's totals only (items, size, track points, counted on request), and each user sees their own storage per trip and per album in Settings, so trip and album names stay with their owners and album members. Ingest now records each file's size; `server backfill-sizes` reads the sizes of the rows stored before (one HEAD per object), and until it runs those items count as of unknown size.
 
 #81 to #87 are what #39's pull request (#80) left. #81 and #83 are one rule seen from the dialog and from the server; #83 closes the limit #80 accepted. #86 waits for evidence that deleting finished challenges brings repeats. #82 is built: the results open a round's photo or video full size.
 

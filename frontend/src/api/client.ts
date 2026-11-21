@@ -1,4 +1,5 @@
 import type {
+  AdminStorage,
   AdminUser,
   AgreementResponse,
   Album,
@@ -17,6 +18,7 @@ import type {
   GuessResult,
   LibraryCamera,
   MediaItem,
+  MyStorage,
   OrientationKeyframe,
   ProvenanceResponse,
   SetTakenAtResult,
@@ -233,6 +235,19 @@ async function adminSetDisabled(id: string, disabled: boolean): Promise<void> {
 async function adminCreateInvite(role: "user" | "admin"): Promise<string> {
   const data = await post<{ url: string }>("/admin/invites", { role });
   return data.url;
+}
+
+// Each user's storage use and track points, as totals. Counting the points reads the whole track
+// table (seconds on millions of points), so the Admin page asks only when told to; the signal
+// cancels a request the page no longer waits for. A 504 means it took too long.
+function adminStorage(signal?: AbortSignal): Promise<AdminStorage> {
+  return getCancellable<AdminStorage>("/admin/storage", signal);
+}
+
+// The caller's own storage use, in all, per trip and per album. The signal cancels it when the
+// Settings page goes.
+function myStorage(signal?: AbortSignal): Promise<MyStorage> {
+  return getCancellable<MyStorage>("/me/storage", signal);
 }
 
 // The albums the caller belongs to, newest first. With memberIds, only those every one of these
@@ -471,6 +486,8 @@ export const api = {
   adminListUsers,
   adminSetDisabled,
   adminCreateInvite,
+  adminStorage,
+  myStorage,
   listAlbums,
   createAlbum,
   renameAlbum,

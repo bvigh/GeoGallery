@@ -98,6 +98,8 @@ func newTestRouter(t *testing.T) http.Handler {
 		albums:     handlers.NewAlbumHandler(nil),
 		challenges: handlers.NewChallengeHandler(nil, nil),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
+		storage:    handlers.NewAdminStorageHandler(refusingPool(t)),
+		myStorage:  handlers.NewStorageUseHandler(refusingPool(t)),
 		provenance: handlers.NewProvenanceHandler(nil, nil, time.Hour, ingest.CameraZone{}),
 		checks:     handlers.NewChecksHandler(refusingPool(t), time.Hour),
 		clockRules: handlers.NewCameraClockRuleHandler(nil),
@@ -230,6 +232,16 @@ func TestRouter_AuthWiring(t *testing.T) {
 		{"session lists tokens", http.MethodGet, "/api/tokens", false, userSession, nil, http.StatusOK},
 		{"non-admin session admin route", http.MethodGet, "/api/admin/users", false, userSession, nil, http.StatusForbidden},
 		{"admin session admin route", http.MethodGet, "/api/admin/users", false, adminSession, nil, http.StatusOK},
+		// The storage summary covers every user: admins only, never through a token. Its pool
+		// refuses every connection, so the admin session's 500 shows the request reached it.
+		{"admin token storage", http.MethodGet, "/api/admin/storage", true, "", nil, http.StatusForbidden},
+		{"non-admin session storage", http.MethodGet, "/api/admin/storage", false, userSession, nil, http.StatusForbidden},
+		{"admin session storage", http.MethodGet, "/api/admin/storage", false, adminSession, nil, http.StatusInternalServerError},
+		{"anonymous storage", http.MethodGet, "/api/admin/storage", false, "", nil, http.StatusUnauthorized},
+		// The caller's own storage is open to tokens; a 500 from the refusing pool shows it was reached.
+		{"token reads own storage", http.MethodGet, "/api/me/storage", true, "", nil, http.StatusInternalServerError},
+		{"session reads own storage", http.MethodGet, "/api/me/storage", false, userSession, nil, http.StatusInternalServerError},
+		{"anonymous own storage", http.MethodGet, "/api/me/storage", false, "", nil, http.StatusUnauthorized},
 
 		{"cross-site POST rejected", http.MethodPost, "/api/auth/logout", false, "",
 			map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
@@ -318,6 +330,8 @@ func TestRunSubcommand_UsageErrors(t *testing.T) {
 		{"retime --apply without --user", "retime", []string{"--apply"}},
 		{"retime stray argument", "retime", []string{"--user", "u", "extra"}},
 		{"retime unknown flag", "retime", []string{"--user", "u", "--dir", "/x"}},
+		{"backfill-sizes stray argument", "backfill-sizes", []string{"extra"}},
+		{"backfill-sizes takes no user", "backfill-sizes", []string{"--user", "u"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -444,6 +458,52 @@ func TestRunRetime(t *testing.T) {
 			var out bytes.Buffer
 			err := runRetime(tt.ctx, &out, retime, scanUsers(), tt.userID, tt.apply)
 			assert.Equal(t, tt.wantCalled, called)
+			assert.Equal(t, tt.wantOut, out.String())
+			if tt.wantErr == "" {
+				assert.NoError(t, err, "exit 0")
+				return
+			}
+			require.Error(t, err, "runSubcommand exits 1 on an error from run")
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestRunBackfillSizes(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	const warning = "warning: the bucket holds no object for 2 media row(s), logged above with their IDs and keys; " +
+		"their size stays unknown\n"
+
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		res     handlers.BackfillSizesResult
+		runErr  error
+		wantOut string
+		wantErr string
+	}{
+		{"every size filled", context.Background(), handlers.BackfillSizesResult{Checked: 3, Filled: 3}, nil,
+			"checked=3 filled=3 missing=0 failed=0\n", ""},
+		{"nothing left to fill", context.Background(), handlers.BackfillSizesResult{}, nil,
+			"checked=0 filled=0 missing=0 failed=0\n", ""},
+		{"missing objects are warned about, not a failure", context.Background(),
+			handlers.BackfillSizesResult{Checked: 5, Filled: 3, Missing: 2}, nil,
+			"checked=5 filled=3 missing=2 failed=0\n" + warning, ""},
+		{"failed items exit non-zero", context.Background(),
+			handlers.BackfillSizesResult{Checked: 5, Filled: 2, Missing: 2, Failed: 1}, nil,
+			"checked=5 filled=2 missing=2 failed=1\n" + warning, "1 item(s) failed; see the errors above, then re-run backfill-sizes"},
+		{"an error", context.Background(), handlers.BackfillSizesResult{Checked: 1, Filled: 1}, errors.New("list rows: boom"),
+			"checked=1 filled=1 missing=0 failed=0\n", "list rows: boom"},
+		{"interrupted", cancelled, handlers.BackfillSizesResult{Checked: 2, Filled: 2}, context.Canceled,
+			"checked=2 filled=2 missing=0 failed=0\n", "interrupted; re-run backfill-sizes to finish"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := runBackfillSizes(tt.ctx, &out, func(context.Context) (handlers.BackfillSizesResult, error) {
+				return tt.res, tt.runErr
+			})
 			assert.Equal(t, tt.wantOut, out.String())
 			if tt.wantErr == "" {
 				assert.NoError(t, err, "exit 0")

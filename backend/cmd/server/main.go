@@ -188,8 +188,16 @@ func runSubcommand(name string, args []string, stdout io.Writer) int {
 			}
 			return runRetime(ctx, stdout, retime, users, *userID, *apply)
 		}
+	case "backfill-sizes":
+		needS3 = true
+		run = func(ctx context.Context, env cmdEnv) error {
+			deps := handlers.NewBackfillSizesDeps(env.pool, env.s3)
+			return runBackfillSizes(ctx, stdout, func(ctx context.Context) (handlers.BackfillSizesResult, error) {
+				return handlers.RunBackfillSizes(ctx, deps)
+			})
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (available: invite, rebind-issuer, users, scan, retime; no command starts the server)\n", name)
+		fmt.Fprintf(os.Stderr, "unknown command %q (available: invite, rebind-issuer, users, scan, retime, backfill-sizes; no command starts the server)\n", name)
 		return 2
 	}
 
@@ -322,6 +330,30 @@ func runRetime(ctx context.Context, stdout io.Writer, retime retimeFunc, users [
 	return nil
 }
 
+type backfillSizesFunc func(ctx context.Context) (handlers.BackfillSizesResult, error)
+
+// runBackfillSizes fills the sizes the media rows stored before migration 17 lack, and prints the
+// counts on stdout. Rows the bucket holds no object for keep no size: each is logged, and a warning
+// says how many. An error, an interrupt or a failed item makes the command exit 1; a re-run looks
+// only at the rows still without a size.
+func runBackfillSizes(ctx context.Context, stdout io.Writer, backfill backfillSizesFunc) error {
+	res, err := backfill(ctx)
+	fmt.Fprintf(stdout, "checked=%d filled=%d missing=%d failed=%d\n", res.Checked, res.Filled, res.Missing, res.Failed)
+	if res.Missing > 0 {
+		fmt.Fprintf(stdout, "warning: the bucket holds no object for %d media row(s), logged above with their IDs and keys; "+
+			"their size stays unknown\n", res.Missing)
+	}
+	switch {
+	case ctx.Err() != nil:
+		return errors.New("interrupted; re-run backfill-sizes to finish")
+	case err != nil:
+		return err
+	case res.Failed > 0:
+		return fmt.Errorf("%d item(s) failed; see the errors above, then re-run backfill-sizes", res.Failed)
+	}
+	return nil
+}
+
 // formatRetimeChange is one change on one line, both times in UTC:
 //
 //	2019-03-13T18:28:15Z -> 2019-03-13T17:28:15Z  -1h0m0s  clock_rule(Panasonic DC-TZ200 UTC+02:00)  interpolated  <id>  P1033627.JPG
@@ -427,6 +459,8 @@ type routeHandlers struct {
 	albums     *handlers.AlbumHandler
 	challenges *handlers.ChallengeHandler
 	admin      *handlers.AdminHandler
+	storage    *handlers.AdminStorageHandler
+	myStorage  *handlers.StorageUseHandler
 	provenance *handlers.ProvenanceHandler
 	checks     *handlers.ChecksHandler
 	clockRules *handlers.CameraClockRuleHandler
@@ -476,6 +510,8 @@ func serve() {
 		albums:     handlers.NewAlbumHandler(pool),
 		challenges: handlers.NewChallengeHandler(pool, s3Client),
 		admin:      handlers.NewAdminHandler(store, cfg.PublicOrigin),
+		storage:    handlers.NewAdminStorageHandler(pool),
+		myStorage:  handlers.NewStorageUseHandler(pool),
 		provenance: handlers.NewProvenanceHandler(pool, s3Client, matchWindow, cameraZone(cfg)),
 		checks:     handlers.NewChecksHandler(pool, matchWindow),
 		clockRules: handlers.NewCameraClockRuleHandler(pool),
@@ -560,6 +596,9 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 			// tokens may use these.
 			r.Get("/me/settings", h.settings.Get)
 			r.Patch("/me/settings", h.settings.Update)
+			// The caller's own storage use, per trip and per album: names and counts the caller sees on
+			// the Trips and Albums pages anyway, and no location history, so tokens may use it.
+			r.Get("/me/storage", h.myStorage.Mine)
 
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireSession)
@@ -592,6 +631,8 @@ func newRouter(cop *http.CrossOriginProtection, authH *auth.Auth, h routeHandler
 					r.Get("/admin/users", h.admin.ListUsers)
 					r.Patch("/admin/users/{id}", h.admin.UpdateUser)
 					r.Post("/admin/invites", h.admin.CreateInvite)
+					// A summary of each user's storage use: their totals, never their trips or albums.
+					r.Get("/admin/storage", h.storage.Get)
 				})
 			})
 		})

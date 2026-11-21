@@ -131,7 +131,7 @@ Do not expose the database, MinIO console or backend ports publicly; see [Port h
 ```
 geogallery/
 ├── backend/
-│   ├── cmd/server/         # entrypoint, routes, operator subcommands (invite, users, scan, retime, rebind-issuer)
+│   ├── cmd/server/         # entrypoint, routes, operator subcommands (invite, users, scan, retime, backfill-sizes, rebind-issuer)
 │   ├── internal/
 │   │   ├── auth/           # OIDC login, sessions, API tokens, middleware
 │   │   ├── config/         # env-based config
@@ -232,6 +232,16 @@ docker compose exec backend ./server retime --user <id> --apply    # writes it
 ### Video locations
 
 Phones usually write a position into the video file. Ingest stores it like a photo's EXIF position, without making a GPS track point from it.
+
+### Storage use and `server backfill-sizes`
+
+The Admin page's **Storage** section shows how many items each user has, their total size and how many GPS track points each user has. It counts only when asked, because counting the track points reads the whole track table. It names nothing inside a library: each user sees how their own items split by trip and by album under **Settings → Storage**. Ingest records the size of each file it stores; items stored before it did have no size until an operator reads them from the bucket:
+
+```bash
+docker compose exec backend ./server backfill-sizes    # or: cd backend && go run ./cmd/server backfill-sizes
+```
+
+It sends one HEAD request per object, for every user's items without a size, and writes only where no size is stored yet, so it can run beside the server and be run again. It prints `checked=N filled=N missing=N failed=N`. An item whose file is not in the bucket keeps no size, and is logged with its ID and key. It exits 1 if a lookup or a write failed or the run was interrupted; a re-run finishes. Until it has run, both Storage sections count those items as of unknown size.
 
 ## Importing external GPS tracks
 
