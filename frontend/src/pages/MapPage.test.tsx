@@ -81,24 +81,28 @@ vi.mock("../components/viewer/Panorama360", () => ({
     </div>
   ),
 }));
-// data-tap-to-play shows the prop as Video360 resolves it (default true). Video360.test.tsx
-// checks that tapToPlay={false} leaves play and pause alone on a click or tap.
+// data-tap-to-play and data-auto-play show the props as Video360 resolves them (default true).
+// Video360.test.tsx checks that tapToPlay={false} leaves play and pause alone on a click or tap,
+// and that autoPlay={false} waits paused on the first frame.
 vi.mock("../components/viewer/Video360", () => ({
   default: ({
     onClose,
     contained,
     tapToPlay = true,
+    autoPlay = true,
     keyframes,
   }: {
     onClose: () => void;
     contained?: boolean;
     tapToPlay?: boolean;
+    autoPlay?: boolean;
     keyframes?: unknown[];
   }) => (
     <div
       data-testid="video360"
       data-contained={String(Boolean(contained))}
       data-tap-to-play={String(tapToPlay)}
+      data-auto-play={String(autoPlay)}
       data-keyframes={String(keyframes?.length ?? "")}
     >
       <button onClick={onClose}>Close 360 view</button>
@@ -1238,11 +1242,12 @@ describe("MapPage", () => {
     });
 
     // In the editor a click, or a 1-4 px nudge of the view, would restart playback and change
-    // the time the next keyframe stores.
-    it("turns off tap-to-play for a 360° video in the editor, but not in the fullscreen view", async () => {
+    // the time the next keyframe stores. It opens paused at 0:00, where a keyframe usually goes.
+    it("turns off tap-to-play and autoplay for a 360° video in the editor, but not in the fullscreen view", async () => {
       await openEditor("video_360");
       expect(screen.getByTestId("video360")).toHaveAttribute("data-contained", "true");
       expect(screen.getByTestId("video360")).toHaveAttribute("data-tap-to-play", "false");
+      expect(screen.getByTestId("video360")).toHaveAttribute("data-auto-play", "false");
 
       await userEvent.click(screen.getByRole("button", { name: "Close view editor" }));
       await settle();
@@ -1250,6 +1255,7 @@ describe("MapPage", () => {
       await settle();
       expect(screen.getByTestId("video360")).toHaveAttribute("data-contained", "false");
       expect(screen.getByTestId("video360")).toHaveAttribute("data-tap-to-play", "true");
+      expect(screen.getByTestId("video360")).toHaveAttribute("data-auto-play", "true");
     });
 
     it("closes from a 44 px close button", async () => {
