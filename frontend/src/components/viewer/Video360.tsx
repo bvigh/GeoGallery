@@ -36,6 +36,12 @@ interface Props {
    * next keyframe stores. The play button and Space still work.
    */
   tapToPlay?: boolean;
+  /**
+   * Plays each video as it opens (default true). The view editor turns it off: the video then
+   * waits paused on its first frame, in the view the keyframes give at 0:00, where a keyframe
+   * usually goes. Read as each url starts.
+   */
+  autoPlay?: boolean;
 }
 
 function fmt(s: number) {
@@ -110,6 +116,7 @@ export default function Video360({
   captureTimeRef,
   controlRef,
   tapToPlay = true,
+  autoPlay = true,
 }: Props) {
   const yaw = initialYaw ?? 0;
   const pitch = initialPitch ?? 0;
@@ -118,13 +125,15 @@ export default function Video360({
   useEffect(() => { keyframesRef.current = keyframes; }, [keyframes]);
   const tapToPlayRef = useRef(tapToPlay);
   useEffect(() => { tapToPlayRef.current = tapToPlay; }, [tapToPlay]);
+  const autoPlayRef = useRef(autoPlay);
+  useEffect(() => { autoPlayRef.current = autoPlay; }, [autoPlay]);
   // Read as each video starts: a setting that loads or changes later leaves the one playing alone.
   const startMuted = useVideosStartMuted();
   const startMutedRef = useRef(startMuted);
   useEffect(() => { startMutedRef.current = startMuted; }, [startMuted]);
   const mountRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [playing, setPlaying] = useState(true);
+  const [playing, setPlaying] = useState(autoPlay);
   const [muted, setMuted] = useState(startMuted);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -205,11 +214,25 @@ export default function Video360({
     // Muted or with sound as the user's setting says. A browser that allows no sound yet gets it
     // muted, and one that refuses even that leaves it paused: the bar then says so.
     let live = true;
-    startVideo(video, startMutedRef.current).then((nowMuted) => {
-      if (!live) return;
-      setMuted(nowMuted);
-      setPlaying(!video.paused);
-    });
+    if (autoPlayRef.current) {
+      startVideo(video, startMutedRef.current).then((nowMuted) => {
+        if (!live) return;
+        setMuted(nowMuted);
+        setPlaying(!video.paused);
+      });
+    } else {
+      // Paused on the first frame, which the browser still loads and VideoTexture still uploads.
+      // The render loop follows the keyframes only while playing, so put the view where they
+      // have it at 0:00, as a seek from the editor's list does. Play is a click or a key, which
+      // lets the browser give it sound.
+      video.muted = startMutedRef.current;
+      setPlaying(false);
+      const o = interpolateKeyframes(keyframesRef.current, 0);
+      if (o) {
+        view.setOrientation(orientation(o.yaw, o.pitch));
+        view.setFov(o.fov);
+      }
+    }
     setMuted(video.muted);
 
     const onLoadedMetadata = () => setDuration(video.duration);

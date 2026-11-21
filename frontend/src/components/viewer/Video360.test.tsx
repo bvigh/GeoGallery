@@ -188,6 +188,78 @@ describe("Video360", () => {
     expect(pause).toHaveBeenCalledOnce();
   });
 
+  describe("with autoPlay off, as in the view editor", () => {
+    const keyframes: OrientationKeyframe[] = [
+      { time: 0, yaw: 0.5, pitch: 0.2, fov: 60 },
+      { time: 4, yaw: 1, pitch: 0, fov: 90 },
+    ];
+
+    it("waits paused on the first frame, in the view the keyframes give at 0:00", () => {
+      const frames = manualFrames();
+      const captureRef: Capture = { current: null };
+      render(
+        <Video360
+          url="https://s3.example/v360"
+          onClose={() => {}}
+          contained
+          autoPlay={false}
+          initialYaw={-1}
+          initialFov={75}
+          keyframes={keyframes}
+          captureRef={captureRef}
+        />
+      );
+      expect(play).not.toHaveBeenCalled();
+      expect(video.paused).toBe(true);
+      expect(video.currentTime).toBe(0);
+      expect(video.src).toBe("https://s3.example/v360");
+      expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+
+      for (let i = 0; i < 3; i++) frames.run();
+      const view = captureRef.current!();
+      expect(view.yaw).toBeCloseTo(0.5, 6);
+      expect(view.pitch).toBeCloseTo(0.2, 6);
+      expect(view.fov).toBeCloseTo(60, 9);
+    });
+
+    it("keeps the default view without keyframes", () => {
+      const { capture } = renderVideo({ autoPlay: false, initialYaw: 0.3, initialPitch: -0.1, initialFov: 75 });
+      const view = capture();
+      expect(view.yaw).toBeCloseTo(0.3, 6);
+      expect(view.pitch).toBeCloseTo(-0.1, 6);
+      expect(view.fov).toBeCloseTo(75, 9);
+    });
+
+    it.each([
+      ["muted", true, "Unmute"],
+      ["with sound", false, "Mute"],
+    ])("plays %s from the control bar or Space, as the setting says", async (_name, startMuted, muteButton) => {
+      render(
+        <VideoSoundContext.Provider value={{ startMuted, report: () => {} }}>
+          <Video360 url="https://s3.example/v360" onClose={() => {}} contained autoPlay={false} tapToPlay={false} />
+        </VideoSoundContext.Provider>
+      );
+      await act(async () => {});
+      expect(play).not.toHaveBeenCalled();
+      expect(video.muted).toBe(startMuted);
+      expect(screen.getByRole("button", { name: muteButton })).toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("button", { name: "Play" }));
+      expect(play).toHaveBeenCalledOnce();
+      expect(video.muted).toBe(startMuted);
+      expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+
+      act(() => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { code: "Space", cancelable: true }));
+      });
+      expect(pause).toHaveBeenCalledOnce();
+      act(() => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { code: "Space", cancelable: true }));
+      });
+      expect(play).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it("leaves Space to a dialog open over it, wherever focus is", () => {
     renderVideo();
     render(

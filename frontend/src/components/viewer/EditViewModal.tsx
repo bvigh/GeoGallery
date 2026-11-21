@@ -104,6 +104,8 @@ export function EditViewModal({
               // A click or a small nudge of the view must not restart playback and move the
               // time the next keyframe stores.
               tapToPlay={false}
+              // Opens paused at 0:00, where a keyframe usually goes first.
+              autoPlay={false}
               initialYaw={item.initial_yaw}
               initialPitch={item.initial_pitch}
               initialFov={item.initial_fov}
