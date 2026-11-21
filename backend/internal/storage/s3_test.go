@@ -16,16 +16,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeS3 serves GETs of objects under /bucket/ with byte ranges, like S3 path-style requests.
+// fakeS3 serves GETs of objects under /bucket/ with byte ranges, and HEADs, like S3 path-style
+// requests. A key under forbidden/ is refused with a 403.
 func fakeS3(t *testing.T, objects map[string]string) (*Client, *[]string) {
 	t.Helper()
 	var ranges []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key, ok := strings.CutPrefix(r.URL.Path, "/bucket/")
+		if strings.HasPrefix(key, "forbidden/") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
 		body, found := objects[key]
-		if r.Method != http.MethodGet || !ok || !found {
+		if (r.Method != http.MethodGet && r.Method != http.MethodHead) || !ok || !found {
 			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchKey</Code></Error>`)
+			if r.Method != http.MethodHead {
+				fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchKey</Code></Error>`)
+			}
+			return
+		}
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 		ranges = append(ranges, r.Header.Get("Range"))
@@ -76,6 +88,33 @@ func TestReadHead(t *testing.T) {
 
 	_, err = c.ReadHead(ctx, "media/u/abc.jpg", 0)
 	require.Error(t, err)
+}
+
+func TestObjectSize(t *testing.T) {
+	c, _ := fakeS3(t, map[string]string{
+		"media/u/abc.jpg":           "0123456789abcdef",
+		"media/u/empty.jpg":         "",
+		"media/1000/file (2) ä.jpg": "legacy key",
+	})
+	ctx := context.Background()
+
+	for key, want := range map[string]int64{
+		"media/u/abc.jpg":           16,
+		"media/u/empty.jpg":         0,
+		"media/1000/file (2) ä.jpg": 10,
+	} {
+		size, err := c.ObjectSize(ctx, key)
+		require.NoError(t, err, key)
+		assert.Equal(t, want, size, key)
+	}
+
+	_, err := c.ObjectSize(ctx, "media/u/missing.jpg")
+	require.ErrorIs(t, err, ErrNoObject)
+	assert.Contains(t, err.Error(), "media/u/missing.jpg")
+
+	_, err = c.ObjectSize(ctx, "forbidden/abc.jpg")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrNoObject, "only a 404 means the object is not there")
 }
 
 func testConfig(endpoint, public string) *config.Config {
@@ -131,9 +170,17 @@ func TestClient_RequestsUseInternalEndpoint(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		assert.Equal(t, http.MethodDelete, r.Method)
 		assert.Equal(t, "/geogallery/media/u/abc.jpg", r.URL.Path)
-		w.WriteHeader(http.StatusNoContent)
+		switch r.Method {
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodHead:
+			w.Header().Set("Content-Length", "42")
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected %s", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
 	}))
 	defer srv.Close()
 
@@ -141,5 +188,8 @@ func TestClient_RequestsUseInternalEndpoint(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, c.Delete(context.Background(), "media/u/abc.jpg"))
-	assert.Equal(t, int32(1), hits.Load())
+	size, err := c.ObjectSize(context.Background(), "media/u/abc.jpg")
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), size)
+	assert.Equal(t, int32(2), hits.Load())
 }

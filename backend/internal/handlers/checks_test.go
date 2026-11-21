@@ -652,6 +652,23 @@ func (tx *recordingTx) Query(_ context.Context, sql string, _ ...any) (pgx.Rows,
 	tx.db.record(sql)
 	return &mockRows{rows: tx.db.rows[sql]}, nil
 }
+
+// QueryRow answers with the first of rows[sql], no row when absent.
+func (tx *recordingTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	rows, _ := tx.Query(ctx, sql, args...)
+	return &firstRow{rows: rows}
+}
+
+// firstRow is the first row of rows, as pgx.Row: pgx.ErrNoRows without one.
+type firstRow struct{ rows pgx.Rows }
+
+func (r *firstRow) Scan(dest ...any) error {
+	if !r.rows.Next() {
+		return pgx.ErrNoRows
+	}
+	return r.rows.Scan(dest...)
+}
+
 func (tx *recordingTx) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
 	tx.db.record(sql)
 	return pgconn.CommandTag{}, nil

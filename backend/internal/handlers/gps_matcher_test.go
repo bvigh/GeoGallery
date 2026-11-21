@@ -37,6 +37,10 @@ func (r *mockRows) Scan(dest ...any) error {
 			*p = row[i].(string)
 		case *int:
 			*p = row[i].(int)
+		case *int64:
+			*p = row[i].(int64)
+		case *bool:
+			*p = row[i].(bool)
 		case **string:
 			if row[i] == nil {
 				*p = nil

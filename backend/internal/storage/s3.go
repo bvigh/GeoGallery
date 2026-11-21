@@ -2,11 +2,14 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
@@ -119,6 +122,30 @@ func (c *Client) ReadHead(ctx context.Context, key string, n int64) ([]byte, err
 		return nil, fmt.Errorf("read %s: %w", key, err)
 	}
 	return b, nil
+}
+
+// ErrNoObject is returned, wrapped, for a key the bucket holds no object under.
+var ErrNoObject = errors.New("no such object")
+
+// ObjectSize returns the size in bytes of the object under key, from one HEAD request. A key the
+// bucket holds no object under gives ErrNoObject. A HEAD answer has no body, so a missing bucket
+// looks the same: the subcommands check the bucket when they start (Ping).
+func (c *Client) ObjectSize(ctx context.Context, key string) (int64, error) {
+	out, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var resp *awshttp.ResponseError
+		if errors.As(err, &resp) && resp.HTTPStatusCode() == http.StatusNotFound {
+			return 0, fmt.Errorf("head %s: %w", key, ErrNoObject)
+		}
+		return 0, fmt.Errorf("head %s: %w", key, err)
+	}
+	if out.ContentLength == nil || *out.ContentLength < 0 {
+		return 0, fmt.Errorf("head %s: the answer has no content length", key)
+	}
+	return *out.ContentLength, nil
 }
 
 func (c *Client) Delete(ctx context.Context, key string) error {

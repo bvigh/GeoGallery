@@ -6,14 +6,19 @@ import { AdminPage } from "@/pages/AdminPage";
 import { AuthContext } from "@/components/auth/AuthContext";
 import type { AdminUser, CurrentUser } from "@/types";
 
-vi.mock("@/api/client", () => ({
-  api: { adminListUsers: vi.fn(), adminSetDisabled: vi.fn(), adminCreateInvite: vi.fn() },
-}));
+vi.mock("@/api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/api/client")>();
+  return {
+    ApiError: actual.ApiError,
+    api: { adminListUsers: vi.fn(), adminSetDisabled: vi.fn(), adminCreateInvite: vi.fn(), adminStorage: vi.fn() },
+  };
+});
 
 const mockApi = api as unknown as {
   adminListUsers: ReturnType<typeof vi.fn>;
   adminSetDisabled: ReturnType<typeof vi.fn>;
   adminCreateInvite: ReturnType<typeof vi.fn>;
+  adminStorage: ReturnType<typeof vi.fn>;
 };
 
 const me: CurrentUser = { id: "u1", email: "alice@example.test", display_name: "Alice", role: "admin" };
@@ -118,6 +123,15 @@ describe("AdminPage", () => {
     expect(link).toHaveValue("http://localhost:5173/api/auth/login?invite=tok");
     await userEvent.click(screen.getByRole("button", { name: "Copy" }));
     expect(await screen.findByText("Press Ctrl/Cmd+C to copy")).toBeInTheDocument();
+  });
+
+  it("has a storage section below the users that counts nothing until asked", async () => {
+    renderPage();
+    await screen.findByText("bob@example.test");
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(headings).toEqual(["Invite", "Users", "Storage"]);
+    expect(screen.getByRole("button", { name: "Show storage use" })).toBeInTheDocument();
+    expect(mockApi.adminStorage).not.toHaveBeenCalled();
   });
 
   it("folds the columns a phone has no room for into the name cell", async () => {

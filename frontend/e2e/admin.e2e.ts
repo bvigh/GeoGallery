@@ -27,3 +27,25 @@ test("the admin creates an invite link", async ({ browser }) => {
     await alice.close();
   }
 });
+
+// The real summary through the Vite proxy and the admin route. Bob's library is empty for the whole
+// e2e project; alice's may already hold the upload spec's photo, which runs beside this one.
+test("the admin counts every user's storage use", async ({ browser }) => {
+  const alice = await browser.newContext({ storageState: authFile("alice") });
+  try {
+    const page = await alice.newPage();
+    await page.goto("/admin");
+    const count = page.getByRole("button", { name: "Show storage use" });
+    await count.click();
+    const users = page.getByRole("table", { name: "Storage per user" });
+    await expect(users).toBeVisible();
+    await expect(page.getByRole("button", { name: "Count again" })).toBeFocused();
+    await expect(page.getByText(/^In all: \d+ items?, /)).toBeVisible();
+
+    const bob = users.getByRole("row").filter({ has: page.getByRole("cell", { name: /^Bob Test/ }) });
+    await expect(bob.getByRole("cell")).toHaveText(["Bob Test0 items · 0 B · 0 track points", "0", "0 B", "0"]);
+    await expect(users.getByRole("row").filter({ has: page.getByRole("cell", { name: /^Alice Test/ }) })).toHaveCount(1);
+  } finally {
+    await alice.close();
+  }
+});

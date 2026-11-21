@@ -216,10 +216,14 @@ func (r *MediaRegistrar) registerMedia(
 				return registerResult{}, terr
 			}
 			tmpFile = transcoded
-			// Update size from the transcoded file so the S3 upload length is correct.
-			if fi, ferr := tmpFile.Stat(); ferr == nil {
-				size = fi.Size()
+			// The transcode's size is the S3 upload's length and the row's size_bytes.
+			fi, ferr := tmpFile.Stat()
+			if ferr != nil {
+				tmpFile.Close()
+				os.Remove(tmpFile.Name())
+				return registerResult{}, fmt.Errorf("stat transcode: %w", ferr)
 			}
+			size = fi.Size()
 		}
 		defer func() {
 			tmpFile.Close()
@@ -259,12 +263,13 @@ func (r *MediaRegistrar) registerMedia(
 		lat, lng = probe.Lat, probe.Lng
 	}
 
+	// size_bytes is what was uploaded: for a transcoded video, the transcode's size.
 	err = r.db.QueryRow(ctx, `
 		INSERT INTO media (owner_id, filename, media_type, location, gps_confidence, gps_source, taken_at, storage_key, file_hash,
-		                   camera_model, width_px, height_px, duration_sec, capture_evidence)
+		                   camera_model, width_px, height_px, duration_sec, capture_evidence, size_bytes)
 		VALUES ($1, $2, $3,
 		        CASE WHEN $4::float8 IS NOT NULL THEN ST_SetSRID(ST_MakePoint($5, $4), 4326) END,
-		        $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		        $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		ON CONFLICT (owner_id, file_hash) DO NOTHING
 		RETURNING id
 	`,
@@ -278,6 +283,7 @@ func (r *MediaRegistrar) registerMedia(
 		dimension(exifData.HeightPx, probe.HeightPx),
 		probe.DurationS,
 		evidence.encode(),
+		size,
 	).Scan(&mediaID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// A concurrent call stored the same file after the lookup above. DO NOTHING returns no row,

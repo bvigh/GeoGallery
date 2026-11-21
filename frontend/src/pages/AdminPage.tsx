@@ -3,6 +3,7 @@ import { api } from "@/api/client";
 import type { AdminUser } from "@/types";
 import { CopyField } from "@/components/CopyField";
 import { useCurrentUser } from "@/components/auth/AuthContext";
+import { StorageReport } from "@/components/admin/StorageReport";
 
 // The columns a phone has no room for: their values are folded into the name cell there.
 const WIDE_CELL = "hidden py-2 sm:table-cell";
@@ -147,6 +148,8 @@ export function AdminPage() {
           </div>
         )}
       </section>
+
+      <StorageReport />
     </div>
   );
 }

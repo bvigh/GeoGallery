@@ -846,3 +846,52 @@ func TestMigration000016_UserVideosStartMuted(t *testing.T) {
 	migrateTo(t, m, 16)
 	assertVideosStartMuted()
 }
+
+// Migration 17 adds media.size_bytes: NULL on every existing row until `server backfill-sizes`
+// fills it, any size from 0 bytes up, and nothing else.
+func TestMigration000017_MediaSizeBytes(t *testing.T) {
+	dsn := testdb.NewEmpty(t)
+	m := newMigrator(t, dsn)
+	migrateTo(t, m, 6)
+	seedLegacyData(t, dsn)
+	migrateTo(t, m, 16)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.False(t, columnExists(ctx, t, conn, "media", "size_bytes"))
+	})
+
+	migrateTo(t, m, 17)
+	assertSizeBytes := func() {
+		withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+			assert.True(t, columnExists(ctx, t, conn, "media", "size_bytes"))
+			assert.True(t, constraintExists(ctx, t, conn, "media", "media_size_bytes_nonnegative"))
+			var total, sized int
+			require.NoError(t, conn.QueryRow(ctx, `SELECT COUNT(*), COUNT(size_bytes) FROM media`).Scan(&total, &sized))
+			assert.Equal(t, 1, total, "the legacy media row survives")
+			assert.Zero(t, sized, "existing rows stay NULL")
+
+			for _, size := range []int64{0, 1, 5 << 30, 1 << 62} {
+				_, err := conn.Exec(ctx, `UPDATE media SET size_bytes = $1`, size)
+				require.NoError(t, err, "%d bytes", size)
+			}
+			_, err := conn.Exec(ctx, `UPDATE media SET size_bytes = -1`)
+			var pgErr *pgconn.PgError
+			require.True(t, errors.As(err, &pgErr), "%v", err)
+			assert.Equal(t, "media_size_bytes_nonnegative", pgErr.ConstraintName)
+			_, err = conn.Exec(ctx, `UPDATE media SET size_bytes = NULL`)
+			require.NoError(t, err, "NULL is accepted")
+		})
+	}
+	assertSizeBytes()
+
+	migrateTo(t, m, 16)
+	withConn(t, dsn, func(ctx context.Context, conn *pgx.Conn) {
+		assert.False(t, columnExists(ctx, t, conn, "media", "size_bytes"))
+		assert.False(t, constraintExists(ctx, t, conn, "media", "media_size_bytes_nonnegative"))
+		var n int
+		require.NoError(t, conn.QueryRow(ctx, `SELECT COUNT(*) FROM media`).Scan(&n))
+		assert.Equal(t, 1, n, "the down migration keeps the media rows")
+	})
+
+	migrateTo(t, m, 17)
+	assertSizeBytes()
+}
