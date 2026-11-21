@@ -30,6 +30,7 @@ const (
 	insertArgHeight      = 12
 	insertArgDuration    = 13
 	insertArgEvidence    = 14
+	insertArgSize        = 15
 )
 
 func mustLoadLocation(t *testing.T, name string) *time.Location {
@@ -505,15 +506,18 @@ func writeClip(t *testing.T, codec string) []byte {
 	return content
 }
 
-// keepingUploadStorage keeps the bytes of the last upload, so a test can read the stored object.
+// keepingUploadStorage keeps the bytes and the declared length of the last upload, so a test can
+// read the stored object.
 type keepingUploadStorage struct {
 	mockUploadStorage
 	body []byte
+	size int64
 }
 
-func (s *keepingUploadStorage) Upload(_ context.Context, _ string, body io.Reader, _ int64, _ string) error {
+func (s *keepingUploadStorage) Upload(_ context.Context, _ string, body io.Reader, size int64, _ string) error {
 	var err error
 	s.body, err = io.ReadAll(body)
+	s.size = size
 	return err
 }
 

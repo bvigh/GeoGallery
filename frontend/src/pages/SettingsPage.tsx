@@ -4,6 +4,7 @@ import type { ApiToken, CreatedApiToken } from "@/types";
 import { CopyField } from "@/components/CopyField";
 import { CameraClockRules } from "@/components/settings/CameraClockRules";
 import { CameraTimeZone } from "@/components/settings/CameraTimeZone";
+import { MyStorage } from "@/components/settings/MyStorage";
 import { VideoSound } from "@/components/settings/VideoSound";
 import {
   Dialog,
@@ -272,6 +273,9 @@ export function SettingsPage() {
       </div>
       <div className="mt-8">
         <VideoSound />
+      </div>
+      <div className="mt-8">
+        <MyStorage />
       </div>
       <CreateTokenDialog
         open={dialogOpen}

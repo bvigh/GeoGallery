@@ -550,6 +550,63 @@ describe("api client", () => {
     });
   });
 
+  describe("adminStorage", () => {
+    it("fetches the report with the signal that cancels it", async () => {
+      const body = { items: 1, bytes: 1234, unknown_items: 0, track_points: 0, users: [], albums: [] };
+      const signal = new AbortController().signal;
+      fetchMock.mockResolvedValue(response(200, body));
+      await expect(api.adminStorage(signal)).resolves.toEqual(body);
+      expect(fetchMock).toHaveBeenCalledWith("/api/admin/storage", { signal });
+    });
+
+    it.each([
+      { name: "on the server's time limit", status: 504 },
+      { name: "for a user who is not an admin", status: 403 },
+      { name: "when the database fails", status: 500 },
+    ])("rejects with the status $name", async ({ status }) => {
+      fetchMock.mockResolvedValue(response(status));
+      const error = await api.adminStorage().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status, message: `GET /admin/storage failed: ${status}` });
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it("redirects to login on 401", async () => {
+      fetchMock.mockResolvedValue(response(401));
+      await expect(api.adminStorage()).rejects.toBeInstanceOf(ApiError);
+      expect(assign).toHaveBeenCalledWith("/api/auth/login?return_to=" + encodeURIComponent("/trips?x=1"));
+    });
+
+    it("lets an abort reach the caller", async () => {
+      const aborted = new DOMException("Aborted", "AbortError");
+      fetchMock.mockRejectedValue(aborted);
+      await expect(api.adminStorage(new AbortController().signal)).rejects.toBe(aborted);
+    });
+  });
+
+  describe("myStorage", () => {
+    it("fetches the caller's own storage with the signal that cancels it", async () => {
+      const body = { items: 1, bytes: 1234, unknown_items: 0, trips: [], no_trip: { items: 1, bytes: 1234, unknown_items: 0 }, albums: [] };
+      const signal = new AbortController().signal;
+      fetchMock.mockResolvedValue(response(200, body));
+      await expect(api.myStorage(signal)).resolves.toEqual(body);
+      expect(fetchMock).toHaveBeenCalledWith("/api/me/storage", { signal });
+    });
+
+    it("rejects with the status", async () => {
+      fetchMock.mockResolvedValue(response(500));
+      const error = await api.myStorage().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status: 500, message: "GET /me/storage failed: 500" });
+    });
+
+    it("redirects to login on 401", async () => {
+      fetchMock.mockResolvedValue(response(401));
+      await expect(api.myStorage()).rejects.toBeInstanceOf(ApiError);
+      expect(assign).toHaveBeenCalledWith("/api/auth/login?return_to=" + encodeURIComponent("/trips?x=1"));
+    });
+  });
+
   describe("camera clock rules", () => {
     const input = {
       make: "Panasonic",

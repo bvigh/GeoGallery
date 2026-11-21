@@ -82,9 +82,12 @@ func TestRegisterMedia_Integration_StoresEvidence(t *testing.T) {
 			var width, height *int
 			var duration *float64
 			var evidence []byte
+			var size *int64
 			require.NoError(t, pool.QueryRow(context.Background(), `
-				SELECT camera_model, width_px, height_px, duration_sec, capture_evidence
-				FROM media WHERE id = $1`, res.mediaID).Scan(&model, &width, &height, &duration, &evidence))
+				SELECT camera_model, width_px, height_px, duration_sec, capture_evidence, size_bytes
+				FROM media WHERE id = $1`, res.mediaID).Scan(&model, &width, &height, &duration, &evidence, &size))
+			require.NotNil(t, size, "ingest records the size")
+			assert.Equal(t, int64(len(content)), *size)
 			assert.Equal(t, tt.wantModel, model)
 			assert.Equal(t, tt.wantWidth, width)
 			assert.Equal(t, tt.wantHeight, height)
@@ -114,9 +117,11 @@ func TestRegisterMedia_Integration_VideoColumns(t *testing.T) {
 	var width, height int
 	var duration float64
 	var src, encoder string
+	var size int64
 	require.NoError(t, pool.QueryRow(context.Background(), `
-		SELECT width_px, height_px, duration_sec, capture_evidence->>'src', capture_evidence->>'encoder'
-		FROM media WHERE id = $1`, res.mediaID).Scan(&width, &height, &duration, &src, &encoder))
+		SELECT width_px, height_px, duration_sec, capture_evidence->>'src', capture_evidence->>'encoder', size_bytes
+		FROM media WHERE id = $1`, res.mediaID).Scan(&width, &height, &duration, &src, &encoder, &size))
+	assert.Equal(t, int64(len(content)), size)
 	assert.Equal(t, 32, width)
 	assert.Equal(t, 16, height)
 	assert.InDelta(t, 1.0, duration, 0.2)

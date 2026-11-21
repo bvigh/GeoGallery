@@ -101,6 +101,56 @@ export interface AdminUser extends CurrentUser {
   created_at: string;
 }
 
+// What a set of media items takes in storage: `bytes` counts only the items whose size is known.
+// `unknown_items` were stored before sizes were recorded, until `server backfill-sizes` fills them in.
+export interface StorageUse {
+  items: number;
+  bytes: number;
+  unknown_items: number;
+}
+
+export interface StorageTrip extends StorageUse {
+  id: string;
+  name: string;
+  start_date: string | null; // YYYY-MM-DD
+  end_date: string | null;
+  user_edited: boolean;
+}
+
+// An album holding some of the caller's items: the counts are those items only, never the other
+// members'.
+export interface StorageAlbum extends StorageUse {
+  id: string;
+  name: string;
+  owner_id: string;
+  owner_name: string | null; // display name, else email
+  is_owner: boolean;
+}
+
+// GET /api/me/storage: the caller's own items. The trips and `no_trip` add up to the top-level
+// counts; an item counts in every album it is in, since albums hold references, not copies.
+export interface MyStorage extends StorageUse {
+  trips: StorageTrip[]; // largest first
+  no_trip: StorageUse;
+  albums: StorageAlbum[]; // largest first
+}
+
+export interface AdminStorageUser extends StorageUse {
+  id: string;
+  display_name: string | null;
+  email: string | null;
+  disabled: boolean;
+  claimed: boolean; // false for the owner of the data stored before sign-in, until an admin invite claims it
+  track_points: number;
+}
+
+// GET /api/admin/storage: each user's totals, never their trips or albums. The top-level counts
+// are every user's.
+export interface AdminStorage extends StorageUse {
+  track_points: number;
+  users: AdminStorageUser[]; // largest first
+}
+
 export interface ApiToken {
   id: string;
   name: string;

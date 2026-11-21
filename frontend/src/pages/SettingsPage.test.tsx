@@ -17,6 +17,7 @@ vi.mock("@/api/client", async (importOriginal) => {
       listCameras: vi.fn(),
       getSettings: vi.fn(),
       updateSettings: vi.fn(),
+      myStorage: vi.fn(),
     },
   };
 });
@@ -29,6 +30,7 @@ const mockApi = api as unknown as {
   listCameras: ReturnType<typeof vi.fn>;
   getSettings: ReturnType<typeof vi.fn>;
   updateSettings: ReturnType<typeof vi.fn>;
+  myStorage: ReturnType<typeof vi.fn>;
 };
 
 const future = new Date(Date.now() + 30 * 86400_000).toISOString();
@@ -62,6 +64,14 @@ describe("SettingsPage", () => {
     mockApi.revokeToken.mockResolvedValue(undefined);
     mockApi.listCameraClockRules.mockResolvedValue([]);
     mockApi.listCameras.mockResolvedValue([]);
+    mockApi.myStorage.mockResolvedValue({
+      items: 0,
+      bytes: 0,
+      unknown_items: 0,
+      trips: [],
+      no_trip: { items: 0, bytes: 0, unknown_items: 0 },
+      albums: [],
+    });
     mockApi.getSettings.mockResolvedValue({
       camera_timezone: null,
       videos_start_muted: null,
@@ -108,6 +118,7 @@ describe("SettingsPage", () => {
       "Camera time zone",
       "Camera clocks",
       "Video sound",
+      "Storage",
     ]);
     expect(await screen.findByRole("option", { name: "Server default (Europe/Warsaw)" })).toBeInTheDocument();
     expect(await screen.findByText("cron")).toBeInTheDocument();
