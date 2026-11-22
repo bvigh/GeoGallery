@@ -15,7 +15,7 @@ Type "sunset over the sea", "dog in the snow" or "Kraków 2019" and see the matc
 - **Part:** one vector of an item: the whole photo, one perspective view of a 360° item, or one sampled video frame. An item's best part decides its rank.
 - **Derivative:** a smaller file made from an original: a **tile** for grids and a **preview** for the viewer and for workers.
 - **Task:** one piece of work on one item: make its derivatives, embed its image, embed its frames, later transcribe it.
-- **Worker:** a program that takes tasks from the server, computes their results and sends them back. Derivatives are made by a loop inside the backend; everything else by the worker program, which runs as an AWS Lambda function and, for later GPU tasks, on a GPU PC.
+- **Worker:** a program that takes tasks from the server, computes their results and sends them back. Derivatives are made by a loop inside the backend; everything else by the worker program, which runs as an AWS Lambda function and, for later GPU tasks, on a GPU PC. On AWS, a small **checker** function asks the server every minute whether tasks are waiting, and starts the worker only then.
 
 ## Decisions
 
@@ -28,7 +28,7 @@ Type "sunset over the sea", "dog in the snow" or "Kraków 2019" and see the matc
 | Query encoding | **On the server, so search never waits for a worker.** The model's text tower runs in int8 ONNX in a sidecar container, since the backend is built without cgo and ONNX Runtime is a native library. |
 | Model | **Base size: SigLIP 2 B/16, or SigLIP 1 i18n B/16-256 if a test of real queries prefers it.** Both are Apache-2.0 and take about 350 MB on the server. Larger models need about twice that, and better Polish and Hungarian are not worth a bigger server (decided 2026-11-22). The image model is always the text tower's own. |
 | Server | **One CX23 (2 vCPUs, 4 GB), as the hosted instance has today.** It encodes queries and makes thumbnails, one at a time; everything heavier runs elsewhere. At idle it has 3 GB of its 3.8 GB available (measured 2026-11-22), room for both. A CX33 is rarely orderable and a CPX32 costs €36–43 a month. A second CX23 would add nothing the batch worker does not do for less. |
-| Where images and frames are embedded | **AWS Lambda in Frankfurt, on CPUs.** No GPU is needed at base size. A schedule starts the worker, which pulls tasks over HTTPS until none are left, so nothing runs while there is no work. |
+| Where images and frames are embedded | **AWS Lambda in Frankfurt, on CPUs.** No GPU is needed at base size. A checker function asks the server every minute whether tasks are waiting and starts the worker only then; the worker pulls tasks over HTTPS until none are left. Both take their AWS credentials from IAM roles, so no AWS key exists outside AWS and the server never calls AWS (2026-11-22). |
 | Videos | **In the first version.** Frames are sampled, 360° frames become several views, and a result opens at the matching moment. |
 | What a worker receives | A photo's 2048-px preview without metadata (no GPS position, no capture time, no file name, no owner). A video's original file, read in ranges. |
 | Thumbnails | **Made by the server when an item arrives:** a WebP tile and a 2048-px JPEG preview, with `vipsthumbnail` and ffmpeg run as commands. They come first: grids need them before any model exists. A tile's link stays valid for up to 7 hours, so browsers can cache it; previews and originals keep 15 minutes (2026-11-22). |
@@ -44,8 +44,8 @@ These are the rules the tests pin down.
 3. **Vectors describe pixels.** No text, name or date enters an image vector, so a vector tells a reader nothing the item itself does not show them.
 4. **Vectors never leave the server through the API.** Workers send them in; no route returns one. "Similar items" compares them inside SQL.
 5. **Search never waits for a worker.** Queries are encoded on the server. An item without vectors is still found by filters and text, and the response says how many of the caller's own items visual search does not cover yet, and why (waiting, or visual search off), as the storage counts report unknown sizes instead of counting them as 0. It says nothing of other owners' settings.
-6. **A worker sees only what its task needs.** A worker credential reaches `/api/worker/*` and nothing else, and user sessions and API tokens never reach `/api/worker/*`. A worker sees an item only through a task it leased, only for owners in its scope, and a photo only as its preview without metadata.
-7. **Only an owner who opted in is analysed.** The worker claims, and the results route writes, only for owners who have visual search on, and turning it off deletes their tasks and vectors in the same transaction. Nobody turns it on for someone else: not an administrator, not an API token.
+6. **A worker sees only what its task needs.** A worker credential reaches `/api/worker/*` and nothing else, and user sessions and API tokens never reach `/api/worker/*`. A checker's credential reads only the counts of `GET /api/worker/pending`. A worker sees an item only through a task it leased, only for owners in its scope, and a photo only as its preview without metadata.
+7. **Only an owner who opted in is analysed.** The claim, the checker's counts and the results route cover only owners who have visual search on, and turning it off deletes their tasks and vectors in the same transaction. Nobody turns it on for someone else: not an administrator, not an API token.
 8. **A result counts only for its lease and its model.** The lease must still be the task's, the model must be the task's, and every vector must have the model's dimension and finite values.
 9. **Derived data goes with its item.** Deleting an item deletes its derivatives (objects best-effort, like the original), vectors, texts and tasks. Turning visual search off deletes the owner's vectors and the texts workers drew from their pixels.
 10. **Derivatives are read like originals.** They are served by presigned GET for readable items only, under opaque keys (`newStorageKey`'s rule: never the file name or a time).
@@ -60,7 +60,11 @@ upload / scan ─▶ registerMedia ─▶ media row ─▶ derive task ─▶ de
                                                                │
                                                embed / frames task (owner opted in)
                                                                │
-EventBridge schedule ─▶ Lambda (Frankfurt) ── POST /api/worker/claim ┘
+EventBridge Scheduler, every minute                            │
+  └─▶ checker Lambda (128 MB) ── GET /api/worker/pending ──────┤
+        │ starts the worker when tasks are ready               │
+        ▼                                                      │
+      worker Lambda (Frankfurt) ── POST /api/worker/claim ─────┘
         │ GET preview or video (presigned, 15 min)
         │ image tower on 6 vCPUs
         └── POST /api/worker/results ──▶ media_embedding (pgvector)
@@ -206,13 +210,14 @@ CREATE TABLE ml_task (
   attempts     int  NOT NULL DEFAULT 0,
   run_at       timestamptz NOT NULL DEFAULT now(),
   lease_id     uuid,
+  run_id       text,                           -- the worker run holding the lease
   locked_until timestamptz,
   last_error   text,
   UNIQUE (media_id, kind, model)
 );
 
 -- claim: one statement, committed before any work starts
-UPDATE ml_task SET state = 'leased', attempts = attempts + 1,
+UPDATE ml_task SET state = 'leased', attempts = attempts + 1, run_id = $4,
        lease_id = gen_random_uuid(), locked_until = now() + interval '10 minutes'
 WHERE id IN (SELECT t.id FROM ml_task t JOIN media m ON m.id = t.media_id
                                         JOIN users u ON u.id = m.owner_id
@@ -224,7 +229,7 @@ RETURNING id, media_id, kind, model, lease_id, locked_until;
 ```
 
 - **Who enqueues.** `registerMedia` enqueues a derive task for a new row. A finished derive enqueues the item's embed task (a photo) or frames task (a video) when the owner has visual search on. Turning it on enqueues the owner's backlog (Opt-in, above). A model change enqueues every item under the new model (an operator command); search keeps the old model until the new one covers the library, then switches, and the old rows are deleted.
-- **Retries.** Because `attempts` rises at claim time, a file that crashes the worker counts against itself without any error report. A sweeper returns an expired lease to `ready` after a growing delay (River's `attempts^4` seconds), and after 5 attempts parks the task as `failed` with `last_error`. The Admin page lists failed tasks with a Retry.
+- **Retries.** Because `attempts` rises at claim time, a file that crashes the worker counts against itself without any error report. A sweeper returns an expired lease to `ready` after a growing delay (River's `attempts^4` seconds), and after 5 attempts parks the task as `failed` with `last_error`. The checker counts a task again once its delay has passed. The Admin page lists failed tasks with a Retry.
 - **Delivery is at least once.** A result replaces the item's parts for that model in one transaction, so a repeated result changes nothing and a re-sampled video keeps no stale frames. A late result for a deleted item finds no lease and is dropped.
 - River was considered for the backend's own half, but its workers run inside a River client attached to the database, so the external workers would still need this HTTP API. A plain table fits the project's hand-written SQL and golang-migrate files.
 
@@ -232,14 +237,17 @@ RETURNING id, media_id, kind, model, lease_id, locked_until;
 
 | Route | Does |
 |---|---|
-| `POST /api/worker/claim` | `{kinds, max}` → leased tasks, each with its lease, its lease's end, the media type, the duration of a video, the projection of a 360° item, and a presigned GET for its input: the preview of a photo, the original of a video. An empty list means there is no work. |
+| `GET /api/worker/pending` | → `{ready, running}`: how many tasks a claim with the token's scope and kinds would take now, by the claim's own conditions, and how many runs hold live leases. The checker's only route; it leases nothing. |
+| `POST /api/worker/claim` | `{kinds, max, run}` (`run`: the run's ID, such as the Lambda request ID) → leased tasks, each with its lease, its lease's end, the media type, the duration of a video, the projection of a 360° item, and a presigned GET for its input: the preview of a photo, the original of a video. An empty list means there is no work. |
 | `POST /api/worker/heartbeat` | Extends leases. A worker sends it about every third of a lease; video tasks get longer leases. |
 | `POST /api/worker/results` | Per task: its lease and model, then either its parts (`part`, `at_s`, `yaw_deg`, the vector as base64 float16) or an error. Written in one transaction while the lease matches, else 409. |
 
-- **Credentials.** A worker is not a user. Table `worker`: `name`, `token_hash` (sha256, like API tokens), a display hint, its scope (some owners, or every owner who has visual search on), its kinds, `last_seen_at`, `revoked_at`. Tokens look like `gg_wrk_…`. `server worker add --name … [--owner <id>]…` prints a token once; `server worker list` and `server worker revoke` complete the set. A `RequireWorker` middleware guards `/api/worker/*`, and nothing else accepts the token.
+- **Credentials.** A worker is not a user. Table `worker`: `name`, `token_hash` (sha256, like API tokens), a display hint, its scope (some owners, or every owner who has visual search on), its kinds, whether it may claim or only count, `last_seen_at`, `revoked_at`. Tokens look like `gg_wrk_…`. `server worker add --name … [--owner <id>]… [--checker]` prints a token once; a checker's token reaches `GET /api/worker/pending` alone, so a leaked one reveals counts and never a photo. `server worker list` and `server worker revoke` complete the set. A `RequireWorker` middleware guards `/api/worker/*`, and nothing else accepts the token.
 - **Results are untrusted input.** The backend checks each vector's dimension and that its values are finite, normalises it, and caps the number of parts per task.
 - **The worker program** lives in `worker/` in this repository: Python, ONNX Runtime and ffmpeg, built as a container image. It claims with jitter, fetches inputs in parallel, embeds in batches and posts results until a claim comes back empty or its time is nearly up. It keeps inputs in memory or a temporary directory, deletes them, and never logs a URL.
-- **It runs as an AWS Lambda function in Frankfurt**, from that image in ECR: 10 GB of memory and 6 vCPUs per invocation, 15 minutes at most. An EventBridge schedule invokes it every hour; an invocation stops claiming after about 12 minutes, and one that finds no work ends within a second. For the backfill, several invocations run at once. The worker token is an environment variable of the function. Lambda reaches the server's public `/api/worker/*` like any client: no port is opened for it.
+- **It runs as an AWS Lambda function in Frankfurt**, from that image in ECR: 10 GB of memory and 6 vCPUs per invocation, 15 minutes at most. A run stops claiming after about 12 minutes and leaves the rest to the next one. The worker token is an environment variable of the function. Lambda reaches the server's public `/api/worker/*` like any client: no port is opened for it.
+- **A checker starts the worker.** A second function (128 MB, a few lines of Python) runs every minute from EventBridge Scheduler. It reads `GET /api/worker/pending` with a checker token and, when tasks are ready, starts the worker asynchronously: one run, or up to four while a backlog lasts (the worker function's reserved concurrency), less the runs already going. Neither function holds an AWS key. Lambda gives each the short-lived credentials of its IAM role, the checker's role may only invoke the worker, and the schedule starts the checker through a role of its own. So no AWS credential exists outside AWS, and the server never calls AWS. A new item is analysed about a minute after its derivatives exist: up to a minute until the next check, then about 10 s for the worker to start.
+- **Considered and rejected.** An hourly schedule left an item waiting up to an hour, though uploads are rare. The server starting the worker itself would need a long-lived AWS key on the server, since a machine outside AWS gets no IAM role. SQS in front of the worker needs the same key, is a second queue to keep in step with `ml_task`, and is itself polled around the clock by the Lambda service.
 - **Videos on Lambda.** ffmpeg reads a video through its presigned URL in ranges and decodes only the sampled keyframes, so no file has to fit on the function's disk; the largest in one real library is 6.5 GB of 360° video, and 90% of its 360° videos are under 0.85 GB. Frames per clip are capped, so the slowest clip fits one invocation (estimate: about 3 minutes for the largest). Test the largest clip before the backfill. If one does not fit, its task goes to an EC2 spot instance with a T4 GPU (g4dn.xlarge, $0.2352/h in Frankfurt), which runs the same program.
 - **A GPU is not needed in this step.** At base size, CPUs do the work: Lambda embeds about 7 images a second (estimate), and decoding an 8K keyframe took 1.2–2.6 s on 2 CPUs. A GPU makes transcripts (Step 3) and captions practical, and would make larger image models fast, which the server's RAM rules out anyway. The same program, built with CUDA, runs on any GPU machine, owned or rented, and claims only the kinds given to its token.
 
@@ -271,7 +279,7 @@ RETURNING id, media_id, kind, model, lease_id, locked_until;
 AWS prices as of 20–21 November 2026, Frankfurt.
 
 - **The backfill on Lambda:** roughly 2–4 hours of function time at 10 GB: about 25 minutes for the photos and the 360° photos' views at ~7 a second, the rest for downloading, decoding and embedding video frames (estimates). That is 70,000–150,000 GB-seconds: inside Lambda's free monthly allowance of 400,000, or $1.20–2.50 at the list price of $0.0000166667 per GB-second.
-- **A month** of a few hundred new items: minutes of function time, cents at most. Hourly runs that find no work cost a few seconds each, since the worker claims before it loads the model. The image in ECR costs about $0.10 per GB a month.
+- **A month** of a few hundred new items: minutes of the worker's time, cents at most; the worker runs only when tasks are waiting. The checker's 43,200 runs a month at 128 MB take about 1,000–2,000 GB-seconds, inside the free tier (a few cents at list price), and EventBridge Scheduler's free tier covers the schedule. The worker's image in ECR costs about $0.10 per GB a month.
 - **Data transfer costs nothing in practice.** AWS charges nothing for data coming in. The vectors going back are tens of megabytes, inside the 100 GB a month AWS lets out for free. Reading the video originals (~155 GB) and the previews (~3 GB) once fits in the 1 TB of egress included in Hetzner Object Storage's base price; beyond it, a TB costs €1.
 
 The options considered:
