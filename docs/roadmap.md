@@ -1,6 +1,6 @@
 # GeoGallery roadmap
 
-As of 2026-11-21. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
+As of 2026-11-22. This replaces the phase list in `PRD.md`. Every item has a GitHub issue, under a milestone of the same name. The issue holds the details; this page holds the order and the reasons for it. Items marked **design** need a short design note (like `docs/sharing-albums.md`) before they can be estimated.
 
 Sizes: **XS** < 2 h, **S** ≤ 1 day, **M** 2–4 days, **L** a week or more.
 
@@ -75,12 +75,19 @@ Data repairs on the existing deployments are operator work, not issues: the far 
 | #32 | Trip GPS track overlay (PRD F6.R1), scope in `docs/gps-debugging.md` Step 3 | M |
 | #33 | Keyboard navigation in searchable lists | M |
 | #34 | Labels | M, design |
-| #35 | Search by name, date, label and place | L, design |
+| #35 | Search by name, date, label and place: text search, on the map and in the grid (`docs/search.md` Step 1) | L |
 | #36 | Cursor pagination for `GET /api/media` | M |
 | #37 | Comments on media | M, design |
 | #38 | Default mute setting for videos | S |
+| #97 | Database image with pgvector | M |
+| #98 | Thumbnails, previews and grids, with a Library tab (`docs/search.md` Step 0) | L |
+| #99 | Visual search for photos and videos (`docs/search.md` Step 2) | L |
 
 #38 is built: Settings → "Video sound" starts every full-size player's video muted or with sound, with sound by default. 360° videos follow it too; they used to start muted, so they could play before the page had a click. A browser that allows no sound yet still starts one muted.
+
+`docs/search.md` designs search in four steps; its questions were settled on 2026-11-22. Thumbnails and grids (#98) come first: search results need them, and trips, albums and a new Library tab gain a grid on the way. Text search (#35) follows, then visual search (#99), which needs pgvector (#97). The new database image is worth having on its own, for two more years of security fixes, so it can go in at any time before. Labels (#34), comments (#37) and transcripts (#52) become searchable text once they exist.
+
+Visual search is opt-in per user. Images and video frames are embedded on AWS Lambda in Frankfurt, on CPUs, so the server stays a CX23 and only encodes queries and makes thumbnails. The model is a base-size one, chosen between SigLIP 2 B/16 and SigLIP 1 i18n by a test of real queries: English and German work best, Polish and Hungarian less well, which does not justify a bigger server.
 
 ## M4: Sharing and social
 
@@ -126,8 +133,8 @@ Each needs a design note before it can be estimated.
 |---|---|
 | #50 | Explore motion photos (Samsung Motion Photos, Apple Live Photos) |
 | #51 | Rotate media without changing the file (the first step of media editing) |
-| #52 | Subtitles for video audio |
-| #53 | Help choose the best photo among near-duplicates |
+| #52 | Subtitles for video audio (a GPU worker task on #99's queue, `docs/search.md` Step 3) |
+| #53 | Help choose the best photo among near-duplicates (#99's vectors could group them) |
 | #54 | Face recognition (parked: biometric data) |
 | #55 | Trip video |
 
@@ -137,6 +144,9 @@ Each needs a design note before it can be estimated.
 - `retime` port (#24) → editing capture times (#26).
 - Per-user settings (#25) → default mute (#38).
 - Labels (#34) → search (#35).
+- Thumbnails and grids (#98) → search results in the grid (#35) → visual search (#99), whose worker reads #98's previews and shares its task queue.
+- Database image with pgvector (#97) → visual search (#99).
+- Visual search (#99) → transcripts on a GPU worker (#52), near-duplicate groups (#53), perhaps.
 - Location suggestions (#40) → keyframe suggestions (#41).
 - Albums in the challenge dialog (#81, built) and the pool's album rule (#83) go together; the count before creating (#84) follows the pool's rule.
 - Lint fix (#21) → CI (#47).
